@@ -1,0 +1,20 @@
+<?xml version="1.0" ?>
+<launch>
+    <arg name="joystick_type" default="bt2pro"/>
+    <node pkg="joy" type="joy_node" name="joy_node" output="screen" respawn="true">
+        <param name="dev" value="/dev/input/js0"/>
+        <param name="autorepeat_rate" type="double" value="100.0"/>
+        <param name="deadzone" type="double" value="0.18"/>
+    </node>
+
+    <node pkg="rl_sac_env_isaac_lab" type="joy.py" name="joy_control" output="screen" respawn="true">
+        <param name="max_linear_vel" value="50.0"/>
+        <param name="max_angular_vel" value="30.0"/>
+    </node>
+
+    <node pkg="rl_sac_env_isaac_lab" type="launch_lab.py" name="launch_lab" output="screen" respawn="true">
+        <param name="use_camera_ros_topic_flag" value="true"/>
+        <param name="use_gpu_flag" value="true"/>
+        <param name="only_render_rviz_flag" value="false"/>
+    </node>
+</launch>

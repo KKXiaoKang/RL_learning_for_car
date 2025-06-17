@@ -1,0 +1,5 @@
+{
+    "wheel_joints": [
+        "left_wheel_joint", "right_wheel_joint"
+    ]
+}
