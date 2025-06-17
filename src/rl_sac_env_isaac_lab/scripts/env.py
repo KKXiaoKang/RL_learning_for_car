@@ -65,6 +65,7 @@ import cv2
 
 # 在文件开头的导入部分添加新的服务类型
 from kuavo_msgs.srv import resetIsaaclab, resetIsaaclabResponse
+from kuavo_msgs.srv import SetTargetPoint, SetTargetPointResponse
 
 DEBUG_FLAG = True
 DECIMATION_RATE = 10
@@ -328,6 +329,21 @@ class KuavoRobotController():
 
         # Add the reset scene service
         self.reset_scene_srv = rospy.Service('/isaac_lab_reset_scene', resetIsaaclab, self.reset_scene_callback)
+
+        # 添加机器人位姿发布者
+        self.robot_pose_pub = rospy.Publisher('/robot_pose', PoseStamped, queue_size=1)
+        self.goal_pose_pub = rospy.Publisher('/goal_pose', PoseStamped, queue_size=1)
+        
+        # 初始化目标点参数
+        self.target_points = {
+            'A': (-23.15, 11.57),
+            'B': (-17.91, 11.57),
+            'C': (-12.91, 11.57)
+        }
+        self.current_target = 'B'  # 默认目标点
+        
+        # 添加目标点服务
+        self.target_srv = rospy.Service('/set_target_point', SetTargetPoint, self.handle_target_point)
 
     def sim_start_callback(self, req):
         """
@@ -606,6 +622,47 @@ class KuavoRobotController():
         
         return response
 
+    def handle_target_point(self, req):
+        if req.point_index in self.target_points:
+            self.current_target = req.point_index
+            return SetTargetPointResponse(True, f"Target set to {req.point_index}")
+        return SetTargetPointResponse(False, "Invalid target point")
+
+    def publish_robot_pose(self):
+        """发布机器人位姿到/robot_pose话题"""
+        root_state = self.scene["robot"].data.root_state_w.clone()
+        pos = root_state[:, 0:3]
+        quat = root_state[:, 3:7]
+        
+        # 创建PoseStamped消息
+        pose_msg = PoseStamped()
+        pose_msg.header.stamp = rospy.Time.now()
+        pose_msg.header.frame_id = "world"
+        
+        # 设置位姿信息
+        pose_msg.pose.position.x = pos[0, 0].item()
+        pose_msg.pose.position.y = pos[0, 1].item()
+        pose_msg.pose.position.z = pos[0, 2].item()
+        pose_msg.pose.orientation.w = quat[0, 0].item()
+        pose_msg.pose.orientation.x = quat[0, 1].item()
+        pose_msg.pose.orientation.y = quat[0, 2].item()
+        pose_msg.pose.orientation.z = quat[0, 3].item()
+        
+        self.robot_pose_pub.publish(pose_msg)
+
+    def publish_goal_pose(self):
+        """发布当前目标点到/goal_pose话题"""
+        goal_msg = PoseStamped()
+        goal_msg.header.stamp = rospy.Time.now()
+        goal_msg.header.frame_id = "world"
+        
+        x, y = self.target_points[self.current_target]
+        goal_msg.pose.position.x = x
+        goal_msg.pose.position.y = y
+        goal_msg.pose.position.z = 0.0  # 假设Z坐标为0
+        
+        self.goal_pose_pub.publish(goal_msg)
+
 # 在类定义前添加初始化调用
 generate_box_params()  # 初始化所有全局旋转变量
 
@@ -854,12 +911,6 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, kua
         step_start_time = time.time()
         if count % DECIMATION_RATE == 0:
             sim.render()
-            # 获取相机数据并发布 (only if camera is enabled)
-            # if USE_CAMERA_FLAG_BOOL:
-            #     rgb_data = scene["camera"].data.output.get("rgb")
-            #     depth_data = scene["camera"].data.output.get("distance_to_image_plane")
-            #     if rgb_data is not None and depth_data is not None:
-            #         kuavo_robot.publish_camera_data(rgb_data, depth_data, sim_time)
         else:
             sim.step(False)  # 物理步往前但是不渲染
             scene["robot"].update(sim_dt)
@@ -877,28 +928,19 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, kua
         # 计算总循环时间
         timing_stats["total_loop"] += time.time() - loop_start_time
         timing_counter += 1
-        
-        # 修改定时统计打印条件
-        if timing_counter % timing_print_interval == 0 and ENABLE_PERF_LOG:  # 添加条件判断
-            avg_total = timing_stats["total_loop"] / timing_counter
-            print("\n--- Timing Statistics (average over {} iterations) ---".format(timing_counter))
-            print(f"Total loop time: {avg_total*1000:.2f} ms")
-            print(f"Sensor data processing: {timing_stats['sensor_data']*1000/timing_counter:.2f} ms ({timing_stats['sensor_data']*100/timing_stats['total_loop']:.1f}%)")
-            print(f"Command processing: {timing_stats['process_commands']*1000/timing_counter:.2f} ms ({timing_stats['process_commands']*100/timing_stats['total_loop']:.1f}%)")
-            print(f"Write to sim: {timing_stats['write_to_sim']*1000/timing_counter:.2f} ms ({timing_stats['write_to_sim']*100/timing_stats['total_loop']:.1f}%)")
-            print(f"Physics step: {timing_stats['physics_step']*1000/timing_counter:.2f} ms ({timing_stats['physics_step']*100/timing_stats['total_loop']:.1f}%)")
-            print(f"Scene update: {timing_stats['scene_update']*1000/timing_counter:.2f} ms ({timing_stats['scene_update']*100/timing_stats['total_loop']:.1f}%)")
-            print(f"Loop rate: {1.0/avg_total:.1f} Hz")
-            print("--------------------------------------------------------\n")
-            
+                    
         # 第一帧结束
         FIRST_TIME_FLAG = False
 
         # 数据已经用完
         kuavo_robot.new_cmd_received = False
 
-        # 发布箱子位姿
-        kuavo_robot.publish_box_poses(sim_time)
+        # # 发布箱子位姿
+        # kuavo_robot.publish_box_poses(sim_time)
+
+        # 发布位姿信息
+        kuavo_robot.publish_robot_pose()
+        kuavo_robot.publish_goal_pose()
 
         # 控制频率
         rate.sleep()
