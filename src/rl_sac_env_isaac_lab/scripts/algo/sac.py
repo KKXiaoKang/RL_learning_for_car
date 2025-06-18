@@ -504,23 +504,41 @@ class SAC:
             
             # 环境终止处理
             if episode_done:
-                if truncated and not done:
+                episode_count = len(episode_rewards) + 1  # 当前是第几个episode
+                
+                # 确定终止原因
+                is_collided = info.get("collided", False)
+                # 成功完成的条件是 done 为 True 且没有发生碰撞
+                is_success = done and not is_collided
+                # 超时的条件是 truncated 为 True 且 episode 不是因为 done 结束
+                is_truncated = truncated and not done
+
+                # 记录终止原因到 TensorBoard
+                if self.writer is not None:
+                    self.writer.add_scalar('episode/is_collided', float(is_collided), episode_count)
+                    self.writer.add_scalar('episode/is_success', float(is_success), episode_count)
+                    self.writer.add_scalar('episode/is_truncated', float(is_truncated), episode_count)
+                
+                if is_truncated:
                     print(f"Episode truncated at {current_ep_length} steps.")
                 
-                if info.get("collided"):
+                if is_collided:
                     print(f"Episode terminated due to collision after {current_ep_length} steps.")
+                
+                if is_success:
+                    print(f"Episode finished successfully after {current_ep_length} steps.")
 
                 episode_rewards.append(current_ep_reward)
                 episode_lengths.append(current_ep_length)
                 
                 # 记录episode统计信息
                 if self.writer is not None:
-                    self.writer.add_scalar('episode/reward', current_ep_reward, step) # 记录每个episode的奖励
-                    self.writer.add_scalar('episode/length', current_ep_length, step) # 记录每个episode的步长
-                    self.writer.add_scalar('episode/avg_reward', np.mean(episode_rewards[-10:]), step) # 记录最近10个episode的平均奖励
-                    self.writer.add_scalar('episode/avg_length', np.mean(episode_lengths[-10:]), step) # 记录最近10个episode的平均步长
+                    self.writer.add_scalar('episode/reward', current_ep_reward, episode_count) # 记录每个episode的奖励
+                    self.writer.add_scalar('episode/length', current_ep_length, episode_count) # 记录每个episode的步长
+                    self.writer.add_scalar('episode/avg_reward', np.mean(episode_rewards[-10:]), episode_count) # 记录最近10个episode的平均奖励
+                    self.writer.add_scalar('episode/avg_length', np.mean(episode_lengths[-10:]), episode_count) # 记录最近10个episode的平均步长
                 
-                print(f"Episode {len(episode_rewards)} Reward: {current_ep_reward:.2f}, Length: {current_ep_length}")
+                print(f"Episode {episode_count} Reward: {current_ep_reward:.2f}, Length: {current_ep_length}")
                 obs = self.env.reset()
                 current_ep_reward = 0
                 current_ep_length = 0
