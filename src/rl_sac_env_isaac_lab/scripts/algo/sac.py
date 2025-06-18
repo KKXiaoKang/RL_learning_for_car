@@ -135,10 +135,14 @@ class GymEnvWrapper:
 
         # 活动边界定义
         self.x_range = (-24.62, 4.5)
-        self.y_range = (-17.32, 15.35)
+        self.y_range = (-17.32, 26.35)
         self.safety_margin = 0.5
         self.x_safe_range = (self.x_range[0] + self.safety_margin, self.x_range[1] - self.safety_margin)
         self.y_safe_range = (self.y_range[0] + self.safety_margin, self.y_range[1] - self.safety_margin)
+        
+        # 新的危险区
+        self.x_danger_range = (-10.46, 3.37)
+        self.y_danger_range = (8.9, 24.9)
         
         # 添加调试标志
         self.debug = False
@@ -200,13 +204,22 @@ class GymEnvWrapper:
         reward = 0.0
         
         # 边界碰撞检测
-        collided = not (self.x_safe_range[0] < robot_pos[0] < self.x_safe_range[1] and \
+        collided_boundary = not (self.x_safe_range[0] < robot_pos[0] < self.x_safe_range[1] and \
                         self.y_safe_range[0] < robot_pos[1] < self.y_safe_range[1])
 
+        # 危险区检测
+        in_danger_zone = (self.x_danger_range[0] < robot_pos[0] < self.x_danger_range[1] and \
+                          self.y_danger_range[0] < robot_pos[1] < self.y_danger_range[1])
+
+        collided = collided_boundary or in_danger_zone
+
         if collided:
-            reward += 0.01 # 碰撞时给予一个小的正奖励
+            reward -= 10.0 # 碰撞时给予一个负奖励
             if self.debug:
-                print("Robot collided with boundary!")
+                if collided_boundary:
+                    print("Robot collided with boundary!")
+                elif in_danger_zone:
+                    print("Robot entered danger zone!")
         
         # 距离奖励：当距离减小时给予正奖励
         if self.last_distance != float('inf'):
@@ -216,8 +229,8 @@ class GymEnvWrapper:
                 print(f"Distance change: {distance_change:.3f}, Reward from distance: {10.0 * distance_change:.3f}")
         
         # 到达目标奖励
-        if distance < 0.1:
-            reward += 100.0
+        if distance < 0.5: # 小于50cm 则达标已经到位
+            reward += 300.0
             if self.debug:
                 print("Reached goal! +100 reward")
         
@@ -233,7 +246,7 @@ class GymEnvWrapper:
         # 判断是否终止
         done = distance < 0.1 or collided
         
-        return obs, reward, done, {"collided": collided}
+        return obs, reward, done, {"collided": collided, "distance": distance}
 
     def reset(self):
         """重置环境"""
@@ -479,6 +492,10 @@ class SAC:
             
             # 执行动作
             next_obs, reward, done, info = self.env.step(action)
+            
+            # 记录距离
+            if self.writer is not None and "distance" in info:
+                self.writer.add_scalar('rollout/distance', info['distance'], step)
             
             current_ep_length += 1
             # 检查是否因为超时而终止

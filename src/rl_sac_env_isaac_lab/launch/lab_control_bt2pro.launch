@@ -21,4 +21,7 @@
         <param name="use_gpu_flag" value="true"/>
         <param name="only_render_rviz_flag" value="false"/>
     </node>
+
+    <!-- Launch RViz with the specified configuration -->
+    <node name="rviz" pkg="rviz" type="rviz" args="-d $(find rl_sac_env_isaac_lab)/rviz/rl_robot_rviz.rviz" />
 </launch>

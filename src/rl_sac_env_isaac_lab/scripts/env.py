@@ -340,10 +340,14 @@ class KuavoRobotController():
         
         # 活动边界定义
         self.x_range = (-24.62, 4.5)
-        self.y_range = (-17.32, 15.35)
+        self.y_range = (-17.32, 26.35)
         self.safety_margin = 0.5
         self.x_safe_range = (self.x_range[0] + self.safety_margin, self.x_range[1] - self.safety_margin)
         self.y_safe_range = (self.y_range[0] + self.safety_margin, self.y_range[1] - self.safety_margin)
+        
+        # 新的危险区
+        self.x_danger_range = (-10.46, 3.37)
+        self.y_danger_range = (8.9, 24.9)
         
         # 机器人生成位置定义
         self.robot_random_x = (-23.62, 3.5)
@@ -740,6 +744,29 @@ class KuavoRobotController():
             Point(self.robot_random_x[0], self.robot_random_y[0], 0.1),
         ]
         self.marker_pub.publish(marker_robot_random)
+
+        # 发布新的危险区
+        marker_danger = Marker()
+        marker_danger.header.frame_id = "world"
+        marker_danger.header.stamp = rospy.Time.now()
+        marker_danger.ns = "new_danger_zone"
+        marker_danger.id = 3
+        marker_danger.type = Marker.LINE_STRIP
+        marker_danger.action = Marker.ADD
+        marker_danger.pose.orientation.w = 1.0
+        marker_danger.scale.x = 0.05
+        marker_danger.color.r = 1.0
+        marker_danger.color.g = 0.0
+        marker_danger.color.b = 0.0
+        marker_danger.color.a = 1.0
+        marker_danger.points = [
+            Point(self.x_danger_range[0], self.y_danger_range[0], 0.1),
+            Point(self.x_danger_range[1], self.y_danger_range[0], 0.1),
+            Point(self.x_danger_range[1], self.y_danger_range[1], 0.1),
+            Point(self.x_danger_range[0], self.y_danger_range[1], 0.1),
+            Point(self.x_danger_range[0], self.y_danger_range[0], 0.1),
+        ]
+        self.marker_pub.publish(marker_danger)
 
 # 在类定义前添加初始化调用
 generate_box_params()  # 初始化所有全局旋转变量
