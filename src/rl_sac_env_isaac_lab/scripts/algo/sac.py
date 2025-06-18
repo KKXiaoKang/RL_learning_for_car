@@ -251,7 +251,7 @@ class GymEnvWrapper:
                     if self.latest_obs is not None:
                         obs = self.latest_obs.copy()
                         # 初始化last_distance
-                        position_diff = obs[0:2] - obs[6:8]
+                        position_diff = obs[0:2] - obs[7:9]
                         self.last_distance = np.linalg.norm(position_diff)
                         if self.debug:
                             print(f"Reset - Initial distance: {self.last_distance:.3f}")
