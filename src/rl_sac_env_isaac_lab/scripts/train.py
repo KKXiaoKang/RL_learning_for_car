@@ -1,7 +1,7 @@
 import json
 import os
 import datetime
-from algo.sac import SAC, ROSReplayBuffer
+from algo.sac import SAC
 
 def load_sac_config():
     config_path = os.path.join(

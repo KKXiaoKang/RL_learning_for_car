@@ -67,6 +67,10 @@ import cv2
 from kuavo_msgs.srv import resetIsaaclab, resetIsaaclabResponse
 from kuavo_msgs.srv import SetTargetPoint, SetTargetPointResponse
 
+# In `env.py`, add imports for Marker and Point
+from visualization_msgs.msg import Marker
+from geometry_msgs.msg import Point
+
 DEBUG_FLAG = True
 DECIMATION_RATE = 10
 RESET_WORK_RUNNABLE = False
@@ -334,6 +338,21 @@ class KuavoRobotController():
         self.robot_pose_pub = rospy.Publisher('/robot_pose', PoseStamped, queue_size=1)
         self.goal_pose_pub = rospy.Publisher('/goal_pose', PoseStamped, queue_size=1)
         
+        # 活动边界定义
+        self.x_range = (-24.62, 4.5)
+        self.y_range = (-17.32, 15.35)
+        self.safety_margin = 0.5
+        self.x_safe_range = (self.x_range[0] + self.safety_margin, self.x_range[1] - self.safety_margin)
+        self.y_safe_range = (self.y_range[0] + self.safety_margin, self.y_range[1] - self.safety_margin)
+        
+        # 机器人生成位置定义
+        self.robot_random_x = (-23.62, 3.5)
+        self.robot_random_y = (-16.32, 4.35)
+        
+        # 可视化Marker发布器
+        self.marker_pub = rospy.Publisher('/visualization_marker', Marker, queue_size=10)
+        rospy.Timer(rospy.Duration(1), self.publish_boundary_markers, oneshot=False) # Periodically publish
+
         # 初始化目标点参数
         self.target_points = {
             'A': (-23.15, 11.57),
@@ -576,8 +595,8 @@ class KuavoRobotController():
                     torch.cuda.manual_seed(random_seed)
 
             # 生成随机位置
-            x_range = (-24.62, 4.5)
-            y_range = (-17.32, 5.35)
+            x_range = self.robot_random_x
+            y_range = self.robot_random_y
             new_pos = [
                 random.uniform(x_range[0], x_range[1]),
                 random.uniform(y_range[0], y_range[1]),
@@ -650,6 +669,77 @@ class KuavoRobotController():
         goal_msg.pose.position.z = 0.0  # 假设Z坐标为0
         
         self.goal_pose_pub.publish(goal_msg)
+
+    def publish_boundary_markers(self, event=None):
+        """发布边界和安全区以供可视化"""
+        # 发布随机生成位置的矩形
+        marker_bounds = Marker()
+        marker_bounds.header.frame_id = "world"
+        marker_bounds.header.stamp = rospy.Time.now()
+        marker_bounds.ns = "boundary"
+        marker_bounds.id = 0
+        marker_bounds.type = Marker.LINE_STRIP
+        marker_bounds.action = Marker.ADD
+        marker_bounds.pose.orientation.w = 1.0
+        marker_bounds.scale.x = 0.1  # Line width
+        marker_bounds.color.r = 0.0
+        marker_bounds.color.g = 1.0
+        marker_bounds.color.b = 0.0
+        marker_bounds.color.a = 1.0
+        marker_bounds.points = [
+            Point(self.x_range[0], self.y_range[0], 0.1),
+            Point(self.x_range[1], self.y_range[0], 0.1),
+            Point(self.x_range[1], self.y_range[1], 0.1),
+            Point(self.x_range[0], self.y_range[1], 0.1),
+            Point(self.x_range[0], self.y_range[0], 0.1),
+        ]
+        self.marker_pub.publish(marker_bounds)
+
+        # 发布安全区（碰撞区）
+        marker_safety = Marker()
+        marker_safety.header.frame_id = "world"
+        marker_safety.header.stamp = rospy.Time.now()
+        marker_safety.ns = "safety_zone"
+        marker_safety.id = 1
+        marker_safety.type = Marker.LINE_STRIP
+        marker_safety.action = Marker.ADD
+        marker_safety.pose.orientation.w = 1.0
+        marker_safety.scale.x = 0.05
+        marker_safety.color.r = 1.0
+        marker_safety.color.g = 0.0
+        marker_safety.color.b = 0.0
+        marker_safety.color.a = 1.0
+        marker_safety.points = [
+            Point(self.x_safe_range[0], self.y_safe_range[0], 0.1),
+            Point(self.x_safe_range[1], self.y_safe_range[0], 0.1),
+            Point(self.x_safe_range[1], self.y_safe_range[1], 0.1),
+            Point(self.x_safe_range[0], self.y_safe_range[1], 0.1),
+            Point(self.x_safe_range[0], self.y_safe_range[0], 0.1),
+        ]
+        self.marker_pub.publish(marker_safety)
+
+        # 生成机器人随机位置的矩形
+        marker_robot_random = Marker()
+        marker_robot_random.header.frame_id = "world"
+        marker_robot_random.header.stamp = rospy.Time.now()
+        marker_robot_random.ns = "robot_random"
+        marker_robot_random.id = 2
+        marker_robot_random.type = Marker.LINE_STRIP
+        marker_robot_random.action = Marker.ADD
+        marker_robot_random.pose.orientation.w = 1.0
+        marker_robot_random.scale.x = 0.05
+        marker_robot_random.color.r = 0.0
+        marker_robot_random.color.g = 0.0
+        marker_robot_random.color.b = 1.0
+        marker_robot_random.color.a = 1.0
+        marker_robot_random.points = [
+            Point(self.robot_random_x[0], self.robot_random_y[0], 0.1),
+            Point(self.robot_random_x[1], self.robot_random_y[0], 0.1),
+            Point(self.robot_random_x[1], self.robot_random_y[1], 0.1),
+            Point(self.robot_random_x[0], self.robot_random_y[1], 0.1),
+            Point(self.robot_random_x[0], self.robot_random_y[0], 0.1),
+        ]
+        self.marker_pub.publish(marker_robot_random)
 
 # 在类定义前添加初始化调用
 generate_box_params()  # 初始化所有全局旋转变量

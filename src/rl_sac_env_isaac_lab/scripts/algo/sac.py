@@ -52,6 +52,9 @@ class RunningMeanStd:
         self.var = new_var
         self.count = tot_count
 
+    def get_buffer(self):
+        return self.buffer
+
 class ReplayBuffer:
     def __init__(self, capacity, obs_shape, action_shape, device="cuda"):
         self.capacity = capacity
@@ -85,101 +88,6 @@ class ReplayBuffer:
             self.dones[idx]
         )
 
-class ROSReplayBuffer:
-    def __init__(self, buffer_size, device="cuda"):
-        # 初始化缓冲区
-        self.buffer = ReplayBuffer(
-            capacity=buffer_size,
-            obs_shape=(12,),  # 假设观测维度：机器人状态(6) + 目标状态(6)
-            action_shape=(2,),  # 假设动作是线速度和角速度
-            device=device
-        )
-        
-        # # ROS初始化
-        # rospy.init_node('sac_data_collector', anonymous=True)
-        
-        # 修改订阅话题
-        robot_pose_sub = message_filters.Subscriber('/robot_pose', PoseStamped)
-        goal_pose_sub = message_filters.Subscriber('/goal_pose', PoseStamped)
-        joint_cmd_sub = message_filters.Subscriber('/joint_cmd', jointCmd)  # 修改话题和消息类型
-        
-        # 同步订阅（时间同步窗口0.1秒）
-        self.ts = message_filters.ApproximateTimeSynchronizer(
-            [robot_pose_sub, goal_pose_sub, joint_cmd_sub],  # 替换为joint_cmd
-            queue_size=10,
-            slop=0.1
-        )
-        self.ts.registerCallback(self.callback)
-        
-        # 状态缓存
-        self.last_obs = None
-        self.last_action = None
-        self.last_reward = None
-        
-    def pose_to_array(self, pose_msg):
-        """将Pose消息转换为numpy数组"""
-        return np.array([
-            pose_msg.pose.position.x,
-            pose_msg.pose.position.y,
-            pose_msg.pose.position.z,
-            pose_msg.pose.orientation.x,
-            pose_msg.pose.orientation.y,
-            pose_msg.pose.orientation.z
-        ])
-    
-    def calculate_reward(self, robot_pose, goal_pose):
-        """计算奖励函数（需要根据任务调整）"""
-        # 示例：基于距离的奖励
-        position_diff = np.array([
-            goal_pose.pose.position.x - robot_pose.pose.pose.position.x,
-            goal_pose.pose.position.y - robot_pose.pose.pose.position.y
-        ])
-        distance = np.linalg.norm(position_diff)
-        return -distance  # 负距离作为奖励
-    
-    def callback(self, robot_odom, goal_pose, joint_cmd):
-        # 转换观测数据
-        robot_state = self.pose_to_array(robot_odom.pose)
-        goal_state = self.pose_to_array(goal_pose)
-        obs = np.concatenate([robot_state, goal_state])
-        
-        # 修改动作数据获取方式
-        action = np.array([
-            joint_cmd.tau[0],  # 使用tau参数
-            joint_cmd.tau[1]
-        ])
-        
-        # 计算奖励和距离
-        position_diff = np.array([
-            goal_pose.pose.position.x - robot_odom.pose.pose.position.x,
-            goal_pose.pose.position.y - robot_odom.pose.pose.position.y
-        ])
-        distance = np.linalg.norm(position_diff)
-        reward = -distance  # 直接使用距离计算奖励
-        
-        # 判断是否终止（示例条件）
-        done = distance < 0.1  # 现在distance已经定义
-        
-        # 添加到缓冲区（需要前一个状态）
-        if self.last_obs is not None:
-            self.buffer.add(
-                obs=self.last_obs,
-                action=self.last_action,
-                reward=reward,
-                next_obs=obs,
-                done=done
-            )
-        
-        # 更新缓存
-        self.last_obs = obs
-        self.last_action = action
-        
-    def start(self):
-        rospy.spin()
-        
-    def get_buffer(self):
-        return self.buffer
-
 class GymEnvWrapper:
     def __init__(self):
         # rospy.init_node('gym_env_wrapper', anonymous=True)
@@ -188,7 +96,7 @@ class GymEnvWrapper:
         self.observation_space = Box(
             low=-np.inf, 
             high=np.inf,
-            shape=(12,),
+            shape=(14,),
             dtype=np.float32
         )
         
@@ -224,6 +132,13 @@ class GymEnvWrapper:
         
         # 初始化last_distance
         self.last_distance = float('inf')
+
+        # 活动边界定义
+        self.x_range = (-24.62, 4.5)
+        self.y_range = (-17.32, 15.35)
+        self.safety_margin = 0.5
+        self.x_safe_range = (self.x_range[0] + self.safety_margin, self.x_range[1] - self.safety_margin)
+        self.y_safe_range = (self.y_range[0] + self.safety_margin, self.y_range[1] - self.safety_margin)
         
         # 添加调试标志
         self.debug = False
@@ -238,7 +153,8 @@ class GymEnvWrapper:
                 robot_pose.pose.position.z,
                 robot_pose.pose.orientation.x,
                 robot_pose.pose.orientation.y,
-                robot_pose.pose.orientation.z
+                robot_pose.pose.orientation.z,
+                robot_pose.pose.orientation.w
             ])
             
             # 提取目标位姿
@@ -248,7 +164,8 @@ class GymEnvWrapper:
                 goal_pose.pose.position.z,
                 goal_pose.pose.orientation.x,
                 goal_pose.pose.orientation.y,
-                goal_pose.pose.orientation.z
+                goal_pose.pose.orientation.z,
+                goal_pose.pose.orientation.w
             ])
             
             # 合并观测
@@ -275,12 +192,21 @@ class GymEnvWrapper:
         
         # 计算奖励和终止条件
         robot_pos = obs[0:2]
-        goal_pos = obs[6:8]
+        goal_pos = obs[7:9]
         position_diff = robot_pos - goal_pos
         distance = np.linalg.norm(position_diff)
         
         # 改进的奖励函数
         reward = 0.0
+        
+        # 边界碰撞检测
+        collided = not (self.x_safe_range[0] < robot_pos[0] < self.x_safe_range[1] and \
+                        self.y_safe_range[0] < robot_pos[1] < self.y_safe_range[1])
+
+        if collided:
+            reward -= 200.0 # 碰撞惩罚
+            if self.debug:
+                print("Robot collided with boundary!")
         
         # 距离奖励：当距离减小时给予正奖励
         if self.last_distance != float('inf'):
@@ -305,9 +231,9 @@ class GymEnvWrapper:
         self.last_distance = distance
         
         # 判断是否终止
-        done = distance < 0.1
+        done = distance < 0.1 or collided
         
-        return obs, reward, done, {}
+        return obs, reward, done, {"collided": collided}
 
     def reset(self):
         """重置环境"""
@@ -336,30 +262,6 @@ class GymEnvWrapper:
         except rospy.ServiceException as e:
             raise RuntimeError(f"服务调用失败: {str(e)}")
 
-class ExperienceBuffer:
-    """独立的经验收集缓冲区"""
-    def __init__(self, buffer_size, device="cuda"):
-        self.buffer = ReplayBuffer(
-            capacity=buffer_size,
-            obs_shape=(12,),
-            action_shape=(2,),
-            device=device
-        )
-        
-        # 订阅动作话题
-        self.joint_cmd_sub = rospy.Subscriber('/joint_cmd', jointCmd, self._action_callback)
-        self.last_action = None
-        
-    def _action_callback(self, msg):
-        """记录最新动作"""
-        self.last_action = np.array([msg.tau[0], msg.tau[1]])
-        
-    def add_experience(self, obs, action, reward, next_obs, done):
-        """添加经验到缓冲区"""
-        self.buffer.add(obs, action, reward, next_obs, done)
-        
-    def get_buffer(self):
-        return self.buffer
 
 class SAC:
     def __init__(
@@ -580,12 +482,12 @@ class SAC:
             action = self.policy.predict(clipped_obs, deterministic=False)
             
             # 执行动作
-            next_obs, reward, done, _ = self.env.step(action)
+            next_obs, reward, done, info = self.env.step(action)
             
             current_ep_length += 1
             # 检查是否因为超时而终止
             truncated = current_ep_length >= max_episode_steps
-            episode_done = done or truncated
+            episode_done = done or truncated # 完成 或者 超时
 
             # 存储经验 (使用未归一化的观测)
             self.replay_buffer.add(
@@ -604,6 +506,9 @@ class SAC:
             if episode_done:
                 if truncated and not done:
                     print(f"Episode truncated at {current_ep_length} steps.")
+                
+                if info.get("collided"):
+                    print(f"Episode terminated due to collision after {current_ep_length} steps.")
 
                 episode_rewards.append(current_ep_reward)
                 episode_lengths.append(current_ep_length)
