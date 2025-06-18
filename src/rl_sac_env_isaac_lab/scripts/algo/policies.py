@@ -199,21 +199,36 @@ class SACPolicy(nn.Module):
         return self.log_alpha.exp()
     
     def calculate_loss_q(self, obs, actions, rewards, next_obs, dones, gamma):
+        """
+            计算Q值损失
+            :param obs: 当前状态
+            :param actions: 当前动作
+            :param rewards: 奖励
+            :param next_obs: 下一个状态
+            :param dones: 是否结束
+            :param gamma: 折扣因子
+        """
+        # 目标网络无梯度计算Q值
         with torch.no_grad():
             next_actions, log_pi_next, _ = self.actor(next_obs)
             target_q_values = self.critic_target(next_obs, next_actions)
             target_q_min = target_q_values.min(1)[0]
-            target_q = rewards + (1 - dones) * gamma * (target_q_min - self.get_alpha() * log_pi_next)
-
+            target_q = rewards + (1 - dones) * gamma * (target_q_min - self.get_alpha().detach() * log_pi_next)
+        # 当前网络计算Q值
         current_q = self.critic(obs, actions)  # [batch_size, n_critics]
+        # 计算Q值损失
         q_loss = 0.5 * (current_q - target_q.unsqueeze(1)).pow(2).sum(dim=1).mean()
         return q_loss
 
     def calculate_loss_pi(self, obs):
-        actions_pi, log_pi, action_penalty = self.actor(obs)
+        """
+            计算策略损失
+            :param obs: 当前状态
+        """
+        actions_pi, log_pi, action_penalty = self.actor(obs) # 当前网络计算动作
         q_values_pi = self.critic(obs, actions_pi)
         min_qf_pi = q_values_pi.min(1)[0]
-        policy_loss = (self.get_alpha() * log_pi - min_qf_pi + action_penalty).mean()
+        policy_loss = (self.get_alpha().detach() * log_pi - min_qf_pi + action_penalty).mean()
         return policy_loss, log_pi
 
     def calculate_loss_alpha(self, log_pi):

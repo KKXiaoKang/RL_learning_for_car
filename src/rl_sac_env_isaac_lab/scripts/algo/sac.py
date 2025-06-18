@@ -204,7 +204,7 @@ class GymEnvWrapper:
                         self.y_safe_range[0] < robot_pos[1] < self.y_safe_range[1])
 
         if collided:
-            reward -= 200.0 # 碰撞惩罚
+            reward += 0.01 # 碰撞时给予一个小的正奖励
             if self.debug:
                 print("Robot collided with boundary!")
         
@@ -352,6 +352,9 @@ class SAC:
         # 初始化目标网络
         self.policy.update_target_network(tau=1.0)
         
+        # 梯度更新计数器
+        self._n_updates = 0
+        
         # 设置tensorboard
         self.tensorboard_log = tensorboard_log
         if self.tensorboard_log:
@@ -406,10 +409,6 @@ class SAC:
             if self.writer is not None:
                 self.writer.add_scalar('train/q_loss', q_loss.item(), step) # 记录Q值损失
             
-            # 冻结Q参数避免策略更新
-            for param in self.policy.critic.parameters():
-                param.requires_grad = False
-                
             # 更新Actor
             policy_loss, log_pi = self.policy.calculate_loss_pi(clipped_obs)
             self.policy.actor_optimizer.zero_grad()
@@ -421,10 +420,6 @@ class SAC:
                 self.writer.add_scalar('train/policy_loss', policy_loss.item(), step) # 记录策略损失
                 self.writer.add_scalar('train/policy_entropy', -log_pi.mean().item(), step) # 记录策略熵
             
-            # 解冻Q参数
-            for param in self.policy.critic.parameters():
-                param.requires_grad = True
-                
             # 更新alpha
             alpha_loss = self.policy.calculate_loss_alpha(log_pi)
             self.policy.alpha_optimizer.zero_grad()
@@ -436,8 +431,9 @@ class SAC:
                 self.writer.add_scalar('train/alpha_loss', alpha_loss.item(), step) # 记录alpha损失
                 self.writer.add_scalar('train/alpha', self.policy.get_alpha().item(), step) # 记录alpha值
             
+            self._n_updates += 1
             # 更新目标网络
-            if self.gradient_steps % self.target_update_interval == 0:
+            if self._n_updates % self.target_update_interval == 0:
                 self.policy.update_target_network(self.tau)
             
             # 记录Q值统计信息
