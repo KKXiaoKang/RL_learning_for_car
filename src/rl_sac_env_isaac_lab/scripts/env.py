@@ -562,27 +562,11 @@ class KuavoRobotController():
         self.box_support_pub.publish(box_support_msg)
 
     def reset_scene_callback(self, req):
-        """
-        Reset scene objects (convert_shelves, box_origin, box_support) to their initial positions
-        Args:
-            req: resetIsaaclab request containing the random seed
-        Returns:
-            resetIsaaclabResponse: Service response
-        """
-        global random_seed, theta_deg_global
-        global ORIGIN_POS_X, ORIGIN_POS_Y, ORIGIN_POS_Z, TARGET_POS_X, TARGET_POS_Y, TARGET_POS_Z
-        global ORIGIN_ROT_W, ORIGIN_ROT_X, ORIGIN_ROT_Y, ORIGIN_ROT_Z
-        global SUPPORT_ROT_W, SUPPORT_ROT_X, SUPPORT_ROT_Y, SUPPORT_ROT_Z
-        global support_scale_tuple, original_support_height, \
-            support_position_z, original_box_z, \
-            scaled_support_height, height_reduction, \
-            adjusted_box_z, adjusted_support_z
-        global RESET_WORK_RUNNABLE
-
+        global random_seed
         response = resetIsaaclabResponse()
         
         try:
-            # Update random seed if provided
+            # 设置随机种子
             if req.data != 0:
                 random_seed = req.data
                 random.seed(random_seed)
@@ -590,35 +574,39 @@ class KuavoRobotController():
                 torch.manual_seed(random_seed)
                 if torch.cuda.is_available():
                     torch.cuda.manual_seed(random_seed)
-                rospy.loginfo(f"Using new random seed: {random_seed}")
-            
-            theta_deg_global = random.uniform(-60, 60)
-            generate_box_params()
-            # 确保朝向和极性一致
-            if theta_deg_global > 0.0:
-                ORIGIN_POS_Y = abs(ORIGIN_POS_Y)
-                TARGET_POS_Y = abs(TARGET_POS_Y)
-            else:
-                ORIGIN_POS_Y = -abs(ORIGIN_POS_Y)
-                TARGET_POS_Y = -abs(TARGET_POS_Y)
-            if ORIGIN_POS_X < 0.0:
-                ORIGIN_POS_X = -ORIGIN_POS_X
-            if TARGET_POS_X > 0.0:
-                TARGET_POS_X = -TARGET_POS_X
-            
-            # TODO:固定目标位置
-            TARGET_POS_Y = -2.40805
-            TARGET_POS_X = 0.32278
 
-            # 数据生成成功
-            RESET_WORK_RUNNABLE = True
-            rospy.loginfo("Reset scene data generated successfully")
+            # 生成随机位置
+            x_range = (-24.62, 4.5)
+            y_range = (-17.32, 5.35)
+            new_pos = [
+                random.uniform(x_range[0], x_range[1]),
+                random.uniform(y_range[0], y_range[1]),
+                0.2  # Z坐标保持不变
+            ]
+
+            # 获取当前机器人状态
+            root_state = self.scene["robot"].data.root_state_w.clone()
+            
+            # 更新位置并保持原有姿态
+            root_state[:, 0:3] = torch.tensor(new_pos, device=root_state.device)
+            
+            # 应用新状态
+            self.scene["robot"].write_root_pose_to_sim(root_state[:, :7])
+            self.scene["robot"].write_root_velocity_to_sim(torch.zeros_like(root_state[:, 7:]))
+            
+            # 重置关节状态
+            self.scene["robot"].write_joint_state_to_sim(
+                self.scene["robot"].data.default_joint_pos.clone(),
+                self.scene["robot"].data.default_joint_vel.clone()
+            )
+
             response.success = True
-            response.message = "Scene reset successful"
+            response.message = f"机器人已重置到位置({new_pos[0]:.2f}, {new_pos[1]:.2f})"
+            
         except Exception as e:
-            rospy.logerr(f"Unexpected error during scene reset: {str(e)}")
+            rospy.logerr(f"重置失败: {str(e)}")
             response.success = False
-            response.message = f"Unexpected error: {str(e)}"
+            response.message = f"错误: {str(e)}"
         
         return response
 

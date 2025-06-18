@@ -1,0 +1,4 @@
+string point_index
+---
+bool success
+string message

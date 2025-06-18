@@ -140,7 +140,8 @@ add_service_files(
 
   # kuavo-isaac-sim
   resetIsaaclab.srv
-
+  SetTargetPoint.srv
+  
   # kuavo_tf2_web_republisher
   RepublishTFs.srv
 )
