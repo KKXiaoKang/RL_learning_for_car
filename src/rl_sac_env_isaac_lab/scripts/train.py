@@ -50,7 +50,7 @@ def main():
         policy="MlpPolicy",
         env="KuavoNavigation-v0",
         device="cuda",  # 强制使用GPU
-        use_ros_buffer=True,  # 启用ROS数据收集
+        use_ros_buffer=False,  # 禁用ROS数据收集
         tensorboard_log=base_log_dir,  # 使用基础日志目录
         **config
     )
@@ -59,7 +59,8 @@ def main():
         # 开始训练
         agent.learn(
             total_timesteps=1_000_000,
-            log_interval=100
+            log_interval=100,
+            max_episode_steps=10000  # 设置每个episode的最大步长
         )
     except KeyboardInterrupt:
         print("Training interrupted")

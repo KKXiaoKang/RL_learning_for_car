@@ -22,6 +22,36 @@ import os
 
 rospy.init_node('sac_model_agent_collector', anonymous=True)
 
+class RunningMeanStd:
+    """
+    Calculates the running mean and standard deviation of a data stream.
+    This is useful for normalizing observations in reinforcement learning.
+    """
+    def __init__(self, epsilon: float = 1e-4, shape: tuple[int, ...] = ()):
+        self.mean = np.zeros(shape, np.float64)
+        self.var = np.ones(shape, np.float64)
+        self.count = epsilon
+
+    def update(self, arr: np.ndarray) -> None:
+        batch_mean = np.mean(arr, axis=0)
+        batch_var = np.var(arr, axis=0)
+        batch_count = arr.shape[0]
+        self.update_from_moments(batch_mean, batch_var, batch_count)
+
+    def update_from_moments(self, batch_mean: np.ndarray, batch_var: np.ndarray, batch_count: int) -> None:
+        delta = batch_mean - self.mean
+        tot_count = self.count + batch_count
+
+        new_mean = self.mean + delta * batch_count / tot_count
+        m_a = self.var * self.count
+        m_b = batch_var * batch_count
+        m2 = m_a + m_b + np.square(delta) * self.count * batch_count / tot_count
+        new_var = m2 / tot_count
+
+        self.mean = new_mean
+        self.var = new_var
+        self.count = tot_count
+
 class ReplayBuffer:
     def __init__(self, capacity, obs_shape, action_shape, device="cuda"):
         self.capacity = capacity
@@ -196,7 +226,7 @@ class GymEnvWrapper:
         self.last_distance = float('inf')
         
         # 添加调试标志
-        self.debug = True
+        self.debug = False
 
     def _obs_callback(self, robot_pose, goal_pose):
         """同步处理机器人位姿和目标位姿"""
@@ -265,14 +295,10 @@ class GymEnvWrapper:
             if self.debug:
                 print("Reached goal! +100 reward")
         
-        # 动作惩罚：避免动作过大
-        action_penalty = -0.01 * np.sum(np.square(action))
-        reward += action_penalty
-        
         if self.debug:
             print(f"Robot pos: {robot_pos}, Goal pos: {goal_pos}")
             print(f"Distance: {distance:.3f}, Last distance: {self.last_distance:.3f}")
-            print(f"Action penalty: {action_penalty:.3f}")
+            # print(f"Action penalty: {action_penalty:.3f}")
             print(f"Total reward: {reward:.3f}")
         
         # 更新last_distance
@@ -364,7 +390,7 @@ class SAC:
         seed: Optional[int] = None,
         device: Union[torch.device, str] = "auto",
         _init_setup_model: bool = True,
-        use_ros_buffer: bool = True,
+        use_ros_buffer: bool = False,
         **kwargs
     ):
         # 首先设置device
@@ -383,9 +409,16 @@ class SAC:
         obs_shape = self.env.observation_space.shape
         action_shape = self.env.action_space.shape
         
+        # 观测归一化
+        self.obs_rms = RunningMeanStd(shape=obs_shape)
+        
         # 经验缓冲区初始化
-        self.experience_buffer = ExperienceBuffer(buffer_size, device=self.device)
-        self.replay_buffer = self.experience_buffer.buffer
+        self.replay_buffer = ReplayBuffer(
+            buffer_size,
+            obs_shape,
+            action_shape,
+            device=self.device
+        )
         
         # 其他参数设置
         self.learning_rate = learning_rate
@@ -413,18 +446,6 @@ class SAC:
             ).to(self.device)
         else:
             raise ValueError("Unsupported policy type")
-        
-        # 初始化回放缓冲区
-        if use_ros_buffer:
-            self.ros_buffer = ROSReplayBuffer(buffer_size, device=self.device)
-            self.replay_buffer = self.ros_buffer.buffer
-        else:
-            self.replay_buffer = ReplayBuffer(
-                buffer_size, 
-                obs_shape,
-                action_shape,
-                device=self.device
-            )
         
         # 初始化目标网络
         self.policy.update_target_network(tau=1.0)
@@ -459,30 +480,44 @@ class SAC:
             # 从缓冲区采样
             obs, actions, rewards, next_obs, dones = self.replay_buffer.sample(self.batch_size)
             
+            # 归一化观测
+            mean = torch.as_tensor(self.obs_rms.mean, dtype=torch.float32, device=self.device)
+            var = torch.as_tensor(self.obs_rms.var, dtype=torch.float32, device=self.device)
+            
+            # 确保var非负
+            var = torch.clamp(var, min=1e-8)
+
+            normalized_obs = (obs - mean) / torch.sqrt(var)
+            normalized_next_obs = (next_obs - mean) / torch.sqrt(var)
+            
+            # 裁剪观测值
+            clipped_obs = torch.clamp(normalized_obs, -10.0, 10.0)
+            clipped_next_obs = torch.clamp(normalized_next_obs, -10.0, 10.0)
+
             # 更新Critic
-            q_loss = self.policy.calculate_loss_q(obs, actions, rewards, next_obs, dones, self.gamma)
+            q_loss = self.policy.calculate_loss_q(clipped_obs, actions, rewards, clipped_next_obs, dones, self.gamma)
             self.policy.critic_optimizer.zero_grad()
             q_loss.backward()
             self.policy.critic_optimizer.step()
             
             # 记录Q值损失
             if self.writer is not None:
-                self.writer.add_scalar('train/q_loss', q_loss.item(), step)
+                self.writer.add_scalar('train/q_loss', q_loss.item(), step) # 记录Q值损失
             
             # 冻结Q参数避免策略更新
             for param in self.policy.critic.parameters():
                 param.requires_grad = False
                 
             # 更新Actor
-            policy_loss, log_pi = self.policy.calculate_loss_pi(obs)
+            policy_loss, log_pi = self.policy.calculate_loss_pi(clipped_obs)
             self.policy.actor_optimizer.zero_grad()
             policy_loss.backward()
             self.policy.actor_optimizer.step()
             
             # 记录策略损失和策略熵
             if self.writer is not None:
-                self.writer.add_scalar('train/policy_loss', policy_loss.item(), step)
-                self.writer.add_scalar('train/policy_entropy', -log_pi.mean().item(), step)
+                self.writer.add_scalar('train/policy_loss', policy_loss.item(), step) # 记录策略损失
+                self.writer.add_scalar('train/policy_entropy', -log_pi.mean().item(), step) # 记录策略熵
             
             # 解冻Q参数
             for param in self.policy.critic.parameters():
@@ -496,8 +531,8 @@ class SAC:
             
             # 记录alpha损失和alpha值
             if self.writer is not None:
-                self.writer.add_scalar('train/alpha_loss', alpha_loss.item(), step)
-                self.writer.add_scalar('train/alpha', self.policy.get_alpha().item(), step)
+                self.writer.add_scalar('train/alpha_loss', alpha_loss.item(), step) # 记录alpha损失
+                self.writer.add_scalar('train/alpha', self.policy.get_alpha().item(), step) # 记录alpha值
             
             # 更新目标网络
             if self.gradient_steps % self.target_update_interval == 0:
@@ -506,9 +541,9 @@ class SAC:
             # 记录Q值统计信息
             if self.writer is not None:
                 with torch.no_grad():
-                    q_values = self.policy.critic(obs, actions)
-                    self.writer.add_scalar('train/q_value_mean', q_values.mean().item(), step)
-                    self.writer.add_scalar('train/q_value_std', q_values.std().item(), step)
+                    q_values = self.policy.critic(clipped_obs, actions)
+                    self.writer.add_scalar('train/q_value_mean', q_values.mean().item(), step) # 记录Q值平均值
+                    self.writer.add_scalar('train/q_value_std', q_values.std().item(), step) # 记录Q值标准差
 
     def eval(self):
         pass
@@ -523,6 +558,7 @@ class SAC:
         self,
         total_timesteps: int,
         log_interval: int = 100,
+        max_episode_steps: int = 1000,
         **kwargs
     ):
         # 初始化环境
@@ -535,39 +571,51 @@ class SAC:
         
         # 主训练循环
         for step in range(total_timesteps):
+            # 更新观测统计量并归一化
+            self.obs_rms.update(np.array([obs]))
+            normalized_obs = (obs - self.obs_rms.mean) / np.sqrt(self.obs_rms.var + 1e-8)
+            clipped_obs = np.clip(normalized_obs, -10.0, 10.0)
+            
             # 选择动作
-            action = self.policy.predict(obs, deterministic=False)
+            action = self.policy.predict(clipped_obs, deterministic=False)
             
             # 执行动作
             next_obs, reward, done, _ = self.env.step(action)
             
-            # 存储经验
+            current_ep_length += 1
+            # 检查是否因为超时而终止
+            truncated = current_ep_length >= max_episode_steps
+            episode_done = done or truncated
+
+            # 存储经验 (使用未归一化的观测)
             self.replay_buffer.add(
                 obs=obs,
                 action=action,
                 reward=reward,
                 next_obs=next_obs,
-                done=done
+                done=episode_done # 使用合并后的终止信号
             )
             
             # 更新统计
             current_ep_reward += reward
-            current_ep_length += 1
             obs = next_obs
             
             # 环境终止处理
-            if done:
+            if episode_done:
+                if truncated and not done:
+                    print(f"Episode truncated at {current_ep_length} steps.")
+
                 episode_rewards.append(current_ep_reward)
                 episode_lengths.append(current_ep_length)
                 
                 # 记录episode统计信息
                 if self.writer is not None:
-                    self.writer.add_scalar('episode/reward', current_ep_reward, step)
-                    self.writer.add_scalar('episode/length', current_ep_length, step)
-                    self.writer.add_scalar('episode/avg_reward', np.mean(episode_rewards[-10:]), step)
-                    self.writer.add_scalar('episode/avg_length', np.mean(episode_lengths[-10:]), step)
+                    self.writer.add_scalar('episode/reward', current_ep_reward, step) # 记录每个episode的奖励
+                    self.writer.add_scalar('episode/length', current_ep_length, step) # 记录每个episode的步长
+                    self.writer.add_scalar('episode/avg_reward', np.mean(episode_rewards[-10:]), step) # 记录最近10个episode的平均奖励
+                    self.writer.add_scalar('episode/avg_length', np.mean(episode_lengths[-10:]), step) # 记录最近10个episode的平均步长
                 
-                print(f"Episode {len(episode_rewards)} Reward: {current_ep_reward:.2f}")
+                print(f"Episode {len(episode_rewards)} Reward: {current_ep_reward:.2f}, Length: {current_ep_length}")
                 obs = self.env.reset()
                 current_ep_reward = 0
                 current_ep_length = 0
@@ -585,11 +633,11 @@ class SAC:
                 
                 # 记录训练统计信息
                 if self.writer is not None:
-                    self.writer.add_scalar('train/buffer_size', self.replay_buffer.size, step)
-                    self.writer.add_scalar('train/avg_reward', avg_reward, step)
+                    self.writer.add_scalar('train/buffer_size', self.replay_buffer.size, step) # 记录缓冲区大小
+                    self.writer.add_scalar('train/avg_reward', avg_reward, step) # 记录平均奖励
                     
                     # 记录动作统计信息
                     if len(episode_rewards) > 0:
                         actions = self.policy.predict(obs, deterministic=False)
-                        self.writer.add_scalar('train/action_mean', np.mean(actions), step)
-                        self.writer.add_scalar('train/action_std', np.std(actions), step)
+                        self.writer.add_scalar('train/action_mean', np.mean(actions), step) # 记录动作平均值
+                        self.writer.add_scalar('train/action_std', np.std(actions), step) # 记录动作标准差

@@ -89,7 +89,7 @@ class Actor(nn.Module):
         nn.init.constant_(self.mu.bias, 0.0)
         
         # 动作缩放参数
-        self.tau_scale = 30.0  # 将[-1,1]缩放到[-30,30]
+        self.tau_scale = 50.0  # 将[-1,1]缩放到[-50,50]
         
         # 添加梯度裁剪
         self.max_grad_norm = 1.0
@@ -108,20 +108,26 @@ class Actor(nn.Module):
         log_std = torch.clamp(log_std, -20, 2)
         std = torch.exp(log_std)
         
+        distribution = Normal(mean, std)
+        # 动作在 tanh 之前
+        actions_raw = distribution.rsample() if not deterministic else mean
+        # 经过 tanh 激活，范围 [-1, 1]
+        actions_tanh = torch.tanh(actions_raw)
+        
+        # 缩放动作到力矩范围
+        actions_scaled = actions_tanh * self.tau_scale
+
+        # 在 tanh 后的 [-1,1] 范围内计算动作惩罚
+        action_penalty = -0.01 * torch.sum(torch.square(actions_tanh), dim=-1)
+
         if deterministic:
-            actions = torch.tanh(mean)
-            # 缩放动作到合适的范围
-            actions = actions * self.tau_scale
-            return actions
-        else:
-            distribution = Normal(mean, std)
-            actions = distribution.rsample()
-            actions = torch.tanh(actions)
-            # 缩放动作到合适的范围
-            actions = actions * self.tau_scale
-            log_prob = distribution.log_prob(actions).sum(axis=-1)
-            log_prob -= (2*(np.log(2) - actions - F.softplus(-2*actions))).sum(axis=1)
-            return actions, log_prob
+            return actions_scaled, None, None
+
+        log_prob = distribution.log_prob(actions_raw).sum(axis=-1)
+        # Gart-Martin等人提出的修正，用于tanh变换
+        log_prob -= (2*(np.log(2) - actions_raw - F.softplus(-2*actions_raw))).sum(axis=1)
+
+        return actions_scaled, log_prob, action_penalty
 
 class ContinuousCritic(nn.Module):
     def __init__(
@@ -194,7 +200,7 @@ class SACPolicy(nn.Module):
     
     def calculate_loss_q(self, obs, actions, rewards, next_obs, dones, gamma):
         with torch.no_grad():
-            next_actions, log_pi_next = self.actor(next_obs)
+            next_actions, log_pi_next, _ = self.actor(next_obs)
             target_q_values = self.critic_target(next_obs, next_actions)
             target_q_min = target_q_values.min(1)[0]
             target_q = rewards + (1 - dones) * gamma * (target_q_min - self.get_alpha() * log_pi_next)
@@ -204,10 +210,10 @@ class SACPolicy(nn.Module):
         return q_loss
 
     def calculate_loss_pi(self, obs):
-        actions_pi, log_pi = self.actor(obs)
+        actions_pi, log_pi, action_penalty = self.actor(obs)
         q_values_pi = self.critic(obs, actions_pi)
         min_qf_pi = q_values_pi.min(1)[0]
-        policy_loss = (self.get_alpha() * log_pi - min_qf_pi).mean()
+        policy_loss = (self.get_alpha() * log_pi - min_qf_pi + action_penalty).mean()
         return policy_loss, log_pi
 
     def calculate_loss_alpha(self, log_pi):
@@ -220,7 +226,10 @@ class SACPolicy(nn.Module):
             obs_tensor = torch.as_tensor(obs, dtype=torch.float32).to(next(self.parameters()).device)
             if obs_tensor.ndim == 1:
                 obs_tensor = obs_tensor.unsqueeze(0)  # 添加batch维度
-            action = self.act(obs_tensor, deterministic=deterministic)
+            
+            # Actor 现在返回 (动作, log_prob, 惩罚)
+            action, _, _ = self.actor(obs_tensor, deterministic=deterministic)
+            
             # 如果action是元组，取第一个元素（动作）
             if isinstance(action, tuple):
                 action = action[0]
