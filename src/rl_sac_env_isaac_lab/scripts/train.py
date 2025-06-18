@@ -1,5 +1,6 @@
 import json
 import os
+import datetime
 from algo.sac import SAC, ROSReplayBuffer
 
 def load_sac_config():
@@ -28,6 +29,10 @@ def main():
     # 加载配置
     config = load_sac_config()
     
+    # 创建基础日志目录
+    base_log_dir = "./logs/sac_kuavo_navigation"
+    os.makedirs(base_log_dir, exist_ok=True)
+    
     # 修改关键训练参数
     config.update({
         "learning_rate": 1e-4,  # 降低学习率
@@ -46,7 +51,7 @@ def main():
         env="KuavoNavigation-v0",
         device="cuda",  # 强制使用GPU
         use_ros_buffer=True,  # 启用ROS数据收集
-        tensorboard_log="./logs/sac_kuavo_navigation",  # 添加tensorboard日志
+        tensorboard_log=base_log_dir,  # 使用基础日志目录
         **config
     )
     
@@ -59,7 +64,11 @@ def main():
     except KeyboardInterrupt:
         print("Training interrupted")
     finally:
-        agent.save("sac_kuavo_navigation")
+        # 保存模型时也使用时间戳
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        save_path = f"sac_kuavo_navigation_{timestamp}"
+        agent.save(save_path)
+        print(f"Model saved to: {save_path}")
 
 if __name__ == "__main__":
     main() 

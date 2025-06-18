@@ -89,7 +89,7 @@ class Actor(nn.Module):
         nn.init.constant_(self.mu.bias, 0.0)
         
         # 动作缩放参数
-        self.tau_scale = 50.0  # 将[-1,1]缩放到[-50,50]
+        self.tau_scale = 30.0  # 将[-1,1]缩放到[-30,30]
         
         # 添加梯度裁剪
         self.max_grad_norm = 1.0

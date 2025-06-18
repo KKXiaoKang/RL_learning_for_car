@@ -581,7 +581,7 @@ class KuavoRobotController():
             new_pos = [
                 random.uniform(x_range[0], x_range[1]),
                 random.uniform(y_range[0], y_range[1]),
-                0.2  # Z坐标保持不变
+                0.4  # Z坐标保持不变
             ]
 
             # 获取当前机器人状态

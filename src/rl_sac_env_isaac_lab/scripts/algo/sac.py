@@ -18,6 +18,7 @@ from std_msgs.msg import Empty
 from kuavo_msgs.srv import resetIsaaclab, resetIsaaclabRequest
 from gymnasium import spaces
 from gymnasium.spaces import Box
+import os
 
 rospy.init_node('sac_model_agent_collector', anonymous=True)
 
@@ -190,6 +191,12 @@ class GymEnvWrapper:
         
         # 重置服务客户端
         self.reset_client = rospy.ServiceProxy('/isaac_lab_reset_scene', resetIsaaclab)
+        
+        # 初始化last_distance
+        self.last_distance = float('inf')
+        
+        # 添加调试标志
+        self.debug = True
 
     def _obs_callback(self, robot_pose, goal_pose):
         """同步处理机器人位姿和目标位姿"""
@@ -237,24 +244,36 @@ class GymEnvWrapper:
             raise TimeoutError("未收到新的观测数据")
         
         # 计算奖励和终止条件
-        position_diff = obs[0:2] - obs[6:8]  # 只比较xy位置
+        robot_pos = obs[0:2]
+        goal_pos = obs[6:8]
+        position_diff = robot_pos - goal_pos
         distance = np.linalg.norm(position_diff)
         
         # 改进的奖励函数
         reward = 0.0
         
         # 距离奖励：当距离减小时给予正奖励
-        if hasattr(self, 'last_distance'):
+        if self.last_distance != float('inf'):
             distance_change = self.last_distance - distance
-            reward += 10.0 * distance_change  # 距离减小给予正奖励
+            reward += 10.0 * distance_change
+            if self.debug:
+                print(f"Distance change: {distance_change:.3f}, Reward from distance: {10.0 * distance_change:.3f}")
         
         # 到达目标奖励
         if distance < 0.1:
-            reward += 100.0  # 到达目标给予大奖励
+            reward += 100.0
+            if self.debug:
+                print("Reached goal! +100 reward")
         
         # 动作惩罚：避免动作过大
         action_penalty = -0.01 * np.sum(np.square(action))
         reward += action_penalty
+        
+        if self.debug:
+            print(f"Robot pos: {robot_pos}, Goal pos: {goal_pos}")
+            print(f"Distance: {distance:.3f}, Last distance: {self.last_distance:.3f}")
+            print(f"Action penalty: {action_penalty:.3f}")
+            print(f"Total reward: {reward:.3f}")
         
         # 更新last_distance
         self.last_distance = distance
@@ -282,6 +301,8 @@ class GymEnvWrapper:
                         # 初始化last_distance
                         position_diff = obs[0:2] - obs[6:8]
                         self.last_distance = np.linalg.norm(position_diff)
+                        if self.debug:
+                            print(f"Reset - Initial distance: {self.last_distance:.3f}")
                         return obs
                 time.sleep(0.1)
             raise TimeoutError("重置后未收到新的观测数据")
@@ -412,14 +433,24 @@ class SAC:
         self.tensorboard_log = tensorboard_log
         if self.tensorboard_log:
             from torch.utils.tensorboard import SummaryWriter
-            self.writer = SummaryWriter(log_dir=self.tensorboard_log)
+            import datetime
+            
+            # 创建带时间戳的日志目录
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            log_dir = os.path.join(self.tensorboard_log, f"run_{timestamp}")
+            
+            # 确保日志目录存在
+            os.makedirs(log_dir, exist_ok=True)
+            
+            self.writer = SummaryWriter(log_dir=log_dir)
+            print(f"TensorBoard logs will be saved to: {log_dir}")
         else:
             self.writer = None
         
         print(f"Using device: {self.device}")
         print(f"Policy device: {next(self.policy.parameters()).device}")
         
-    def train(self, gradient_steps=1):
+    def train(self, gradient_steps=1, step=0):
         # 检查缓冲区是否有足够的数据
         if self.replay_buffer.size < self.batch_size:
             return  # 如果数据不够，直接返回
@@ -434,6 +465,10 @@ class SAC:
             q_loss.backward()
             self.policy.critic_optimizer.step()
             
+            # 记录Q值损失
+            if self.writer is not None:
+                self.writer.add_scalar('train/q_loss', q_loss.item(), step)
+            
             # 冻结Q参数避免策略更新
             for param in self.policy.critic.parameters():
                 param.requires_grad = False
@@ -443,6 +478,11 @@ class SAC:
             self.policy.actor_optimizer.zero_grad()
             policy_loss.backward()
             self.policy.actor_optimizer.step()
+            
+            # 记录策略损失和策略熵
+            if self.writer is not None:
+                self.writer.add_scalar('train/policy_loss', policy_loss.item(), step)
+                self.writer.add_scalar('train/policy_entropy', -log_pi.mean().item(), step)
             
             # 解冻Q参数
             for param in self.policy.critic.parameters():
@@ -454,9 +494,21 @@ class SAC:
             alpha_loss.backward()
             self.policy.alpha_optimizer.step()
             
+            # 记录alpha损失和alpha值
+            if self.writer is not None:
+                self.writer.add_scalar('train/alpha_loss', alpha_loss.item(), step)
+                self.writer.add_scalar('train/alpha', self.policy.get_alpha().item(), step)
+            
             # 更新目标网络
             if self.gradient_steps % self.target_update_interval == 0:
                 self.policy.update_target_network(self.tau)
+            
+            # 记录Q值统计信息
+            if self.writer is not None:
+                with torch.no_grad():
+                    q_values = self.policy.critic(obs, actions)
+                    self.writer.add_scalar('train/q_value_mean', q_values.mean().item(), step)
+                    self.writer.add_scalar('train/q_value_std', q_values.std().item(), step)
 
     def eval(self):
         pass
@@ -478,6 +530,8 @@ class SAC:
         obs = self.env.reset()
         episode_rewards = []
         current_ep_reward = 0
+        episode_lengths = []  # 添加episode长度记录
+        current_ep_length = 0
         
         # 主训练循环
         for step in range(total_timesteps):
@@ -498,26 +552,44 @@ class SAC:
             
             # 更新统计
             current_ep_reward += reward
+            current_ep_length += 1
             obs = next_obs
             
             # 环境终止处理
             if done:
                 episode_rewards.append(current_ep_reward)
+                episode_lengths.append(current_ep_length)
+                
+                # 记录episode统计信息
+                if self.writer is not None:
+                    self.writer.add_scalar('episode/reward', current_ep_reward, step)
+                    self.writer.add_scalar('episode/length', current_ep_length, step)
+                    self.writer.add_scalar('episode/avg_reward', np.mean(episode_rewards[-10:]), step)
+                    self.writer.add_scalar('episode/avg_length', np.mean(episode_lengths[-10:]), step)
+                
                 print(f"Episode {len(episode_rewards)} Reward: {current_ep_reward:.2f}")
                 obs = self.env.reset()
                 current_ep_reward = 0
+                current_ep_length = 0
                 
             # 训练步骤 - 只在有足够数据时进行
             if (step > self.learning_starts and 
                 step % self.train_freq == 0 and 
                 self.replay_buffer.size >= self.batch_size):
-                self.train(gradient_steps=self.gradient_steps)
+                self.train(gradient_steps=self.gradient_steps, step=step)
             
             # 日志记录
             if step % log_interval == 0:
                 avg_reward = np.mean(episode_rewards[-10:]) if episode_rewards else 0
                 print(f"Step: {step}/{total_timesteps} | Avg Reward: {avg_reward:.2f} | Buffer Size: {self.replay_buffer.size}")
-                # TensorBoard记录
+                
+                # 记录训练统计信息
                 if self.writer is not None:
-                    self.writer.add_scalar('train/reward', avg_reward, step)
                     self.writer.add_scalar('train/buffer_size', self.replay_buffer.size, step)
+                    self.writer.add_scalar('train/avg_reward', avg_reward, step)
+                    
+                    # 记录动作统计信息
+                    if len(episode_rewards) > 0:
+                        actions = self.policy.predict(obs, deterministic=False)
+                        self.writer.add_scalar('train/action_mean', np.mean(actions), step)
+                        self.writer.add_scalar('train/action_std', np.std(actions), step)
