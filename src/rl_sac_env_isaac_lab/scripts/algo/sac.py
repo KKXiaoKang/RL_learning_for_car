@@ -353,7 +353,7 @@ class SAC:
                 action_space=self.env.action_space,
                 lr_schedule=lambda _: learning_rate
             ).to(self.device)
-        elif isinstance(policy, type[SACPolicy]):
+        elif issubclass(policy, SACPolicy):
             self.policy = policy(
                 observation_space=self.env.observation_space,
                 action_space=self.env.action_space,
@@ -460,10 +460,29 @@ class SAC:
         pass
 
     def save(self, path: str):
-        pass
+        """
+        Save all the attributes of the object and the model parameters in a dictionary.
+        :param path: path to save the model
+        """
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        torch.save({
+            'policy_state_dict': self.policy.state_dict(),
+            'obs_rms_mean': self.obs_rms.mean,
+            'obs_rms_var': self.obs_rms.var,
+            'obs_rms_count': self.obs_rms.count
+        }, path)
     
     def load(self, path: str):
-        pass
+        """
+        Load model parameters and attributes from a file.
+        :param path: path to the saved model
+        """
+        data = torch.load(path, map_location=self.device)
+        self.policy.load_state_dict(data['policy_state_dict'])
+        self.obs_rms.mean = data['obs_rms_mean']
+        self.obs_rms.var = data['obs_rms_var']
+        self.obs_rms.count = data['obs_rms_count']
+        self.policy.update_target_network(tau=1.0) # Hard update
 
     def learn(
         self,

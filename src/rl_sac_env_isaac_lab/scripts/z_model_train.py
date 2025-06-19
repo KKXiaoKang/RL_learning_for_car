@@ -66,8 +66,12 @@ def main():
         print("Training interrupted")
     finally:
         # 保存模型时也使用时间戳
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        save_path = f"sac_kuavo_navigation_{timestamp}"
+        if agent.writer is not None:
+            save_path = os.path.join(agent.writer.log_dir, "model.pth")
+        else:
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            save_path = f"sac_kuavo_navigation_{timestamp}.pth"
+        
         agent.save(save_path)
         print(f"Model saved to: {save_path}")
 
