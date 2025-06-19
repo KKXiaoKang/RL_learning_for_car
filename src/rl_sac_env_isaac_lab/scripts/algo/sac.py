@@ -247,7 +247,7 @@ class GymEnvWrapper:
         self.last_distance = distance
         
         # 判断是否终止
-        done = distance < 0.1 or collided
+        done = distance < self.reach_agent_radius or collided
         
         return obs, reward, done, {"collided": collided, "distance": distance}
 
