@@ -144,6 +144,9 @@ class GymEnvWrapper:
         self.x_danger_range = (-10.46, 3.37)
         self.y_danger_range = (8.9, 24.9)
         
+        # 到达机器人半径
+        self.reach_agent_radius = 1.0
+
         # 添加调试标志
         self.debug = False
 
@@ -229,7 +232,7 @@ class GymEnvWrapper:
                 print(f"Distance change: {distance_change:.3f}, Reward from distance: {10.0 * distance_change:.3f}")
         
         # 到达目标奖励
-        if distance < 0.5: # 小于50cm 则达标已经到位
+        if distance < self.reach_agent_radius: # 小于50cm 则达标已经到位
             reward += 300.0
             if self.debug:
                 print("Reached goal! +100 reward")

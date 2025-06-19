@@ -364,6 +364,7 @@ class KuavoRobotController():
             'C': (-12.91, 11.57)
         }
         self.current_target = 'B'  # 默认目标点
+        self.reach_goal_radius = 1.0 # 到达目标点半径
         
         # 添加目标点服务
         self.target_srv = rospy.Service('/set_target_point', SetTargetPoint, self.handle_target_point)
@@ -673,6 +674,36 @@ class KuavoRobotController():
         goal_msg.pose.position.z = 0.0  # 假设Z坐标为0
         
         self.goal_pose_pub.publish(goal_msg)
+        self.publish_goal_radius_marker()
+
+    def publish_goal_radius_marker(self):
+        """发布目标点周围0.5米半径的圆圈以供可视化"""
+        marker = Marker()
+        marker.header.frame_id = "world"
+        marker.header.stamp = rospy.Time.now()
+        marker.ns = "goal_radius"
+        marker.id = 4  # 使用新的ID
+        marker.type = Marker.LINE_STRIP
+        marker.action = Marker.ADD
+        marker.pose.orientation.w = 1.0
+        marker.scale.x = 0.05  # 线宽
+        marker.color.r = 0.0
+        marker.color.g = 1.0
+        marker.color.b = 1.0  # 青色
+        marker.color.a = 1.0
+
+        marker.points = []
+        radius = self.reach_goal_radius
+        num_points = 50
+        center_x, center_y = self.target_points[self.current_target]
+        
+        for i in range(num_points + 1):
+            angle = i / num_points * 2 * np.pi
+            x = center_x + radius * np.cos(angle)
+            y = center_y + radius * np.sin(angle)
+            marker.points.append(Point(x, y, 0.1))  # 在地面上方一点发布
+
+        self.marker_pub.publish(marker)
 
     def publish_boundary_markers(self, event=None):
         """发布边界和安全区以供可视化"""
