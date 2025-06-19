@@ -196,6 +196,9 @@ class SACPolicy(nn.Module):
             return self.forward(obs, deterministic)
 
     def get_alpha(self):
+        """
+            获取alpha真实值.通过指数消除log符号
+        """
         return self.log_alpha.exp()
     
     def calculate_loss_q(self, obs, actions, rewards, next_obs, dones, gamma):

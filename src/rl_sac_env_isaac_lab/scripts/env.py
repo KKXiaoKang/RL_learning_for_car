@@ -268,6 +268,35 @@ rospack = rospkg.RosPack()
 ISAAC_SIM_PATH = rospack.get_path('rl_sac_env_isaac_lab')
 ASSETS_PATH = os.path.join(ISAAC_SIM_PATH, 'Assets')
 
+# 添加四元数运算函数
+def quaternion_inverse(q):
+    """计算四元数的逆 (w, x, y, z) -> (w, -x, -y, -z)"""
+    return np.array([q[0], -q[1], -q[2], -q[3]])
+
+def quaternion_multiply(q1, q2):
+    """四元数乘法 (w, x, y, z) 格式"""
+    w1, x1, y1, z1 = q1
+    w2, x2, y2, z2 = q2
+    
+    w = w1*w2 - x1*x2 - y1*y2 - z1*z2
+    x = w1*x2 + x1*w2 + y1*z2 - z1*y2
+    y = w1*y2 - x1*z2 + y1*w2 + z1*x2
+    z = w1*z2 + x1*y2 - y1*x2 + z1*w2
+    
+    return np.array([w, x, y, z])
+
+def quaternion_rotate_vector(q, v):
+    """使用四元数旋转向量"""
+    # 将向量转换为四元数形式 (0, vx, vy, vz)
+    v_quat = np.array([0.0, v[0], v[1], v[2]])
+    
+    # 计算 q * v_quat * q^(-1)
+    q_inv = quaternion_inverse(q)
+    result = quaternion_multiply(quaternion_multiply(q, v_quat), q_inv)
+    
+    # 返回旋转后的向量部分
+    return result[1:4]
+
 class KuavoRobotController():
     """
     # 45 - 机器人
@@ -337,6 +366,7 @@ class KuavoRobotController():
         # 添加机器人位姿发布者
         self.robot_pose_pub = rospy.Publisher('/robot_pose', PoseStamped, queue_size=1)
         self.goal_pose_pub = rospy.Publisher('/goal_pose', PoseStamped, queue_size=1)
+        self.goal_torso_pub = rospy.Publisher('/goal_torso_pose', PoseStamped, queue_size=1)
         
         # 活动边界定义
         self.x_range = (-24.62, 4.5)
@@ -644,7 +674,7 @@ class KuavoRobotController():
         """发布机器人位姿到/robot_pose话题"""
         root_state = self.scene["robot"].data.root_state_w.clone()
         pos = root_state[:, 0:3]
-        quat = root_state[:, 3:7]
+        quat = root_state[:, 3:7]  # Isaac Sim quat is [qx, qy, qz, qw]
         
         # 创建PoseStamped消息
         pose_msg = PoseStamped()
@@ -655,10 +685,10 @@ class KuavoRobotController():
         pose_msg.pose.position.x = pos[0, 0].item()
         pose_msg.pose.position.y = pos[0, 1].item()
         pose_msg.pose.position.z = pos[0, 2].item()
-        pose_msg.pose.orientation.w = quat[0, 0].item()
-        pose_msg.pose.orientation.x = quat[0, 1].item()
-        pose_msg.pose.orientation.y = quat[0, 2].item()
-        pose_msg.pose.orientation.z = quat[0, 3].item()
+        pose_msg.pose.orientation.x = quat[0, 0].item()  # qx
+        pose_msg.pose.orientation.y = quat[0, 1].item()  # qy
+        pose_msg.pose.orientation.z = quat[0, 2].item()  # qz
+        pose_msg.pose.orientation.w = quat[0, 3].item()  # qw
         
         self.robot_pose_pub.publish(pose_msg)
 
@@ -675,6 +705,48 @@ class KuavoRobotController():
         
         self.goal_pose_pub.publish(goal_msg)
         self.publish_goal_radius_marker()
+
+    def publish_relative_goal_pose(self):
+        """Calculates and publishes the goal's pose relative to the robot's torso."""
+        # 1. Get robot pose in world frame
+        root_state = self.scene["robot"].data.root_state_w.clone()
+        robot_pos_w = root_state[0, 0:3].cpu().numpy()
+        robot_quat_w = root_state[0, 3:7].cpu().numpy()  # [qx, qy, qz, qw]
+
+        # 2. Get goal pose in world frame
+        goal_x, goal_y = self.target_points[self.current_target]
+        goal_pos_w = np.array([goal_x, goal_y, robot_pos_w[2]]) # Use robot's Z for a 2D-plane relative pose
+        goal_quat_w = np.array([0.0, 0.0, 0.0, 1.0])  # Identity orientation
+
+        # 3. Calculate transformation from world to robot frame
+        robot_quat_w_inv = quaternion_inverse(robot_quat_w)
+        pos_diff_w = goal_pos_w - robot_pos_w
+
+        # 4. Transform goal pose into robot frame
+        # Position: Rotate the position difference vector into the robot's frame
+        pos_diff_w_quat = np.append(pos_diff_w, 0)
+        rel_pos_quat = quaternion_multiply(
+            quaternion_multiply(robot_quat_w_inv, pos_diff_w_quat),
+            robot_quat_w
+        )
+        # Orientation: Transform goal orientation into robot frame
+        rel_quat = quaternion_multiply(robot_quat_w_inv, goal_quat_w)
+
+        # 5. Construct and publish the PoseStamped message
+        pose_msg = PoseStamped()
+        pose_msg.header.stamp = rospy.Time.now()
+        pose_msg.header.frame_id = "base_link"  # Conceptual frame
+        
+        pose_msg.pose.position.x = rel_pos_quat[0]
+        pose_msg.pose.position.y = rel_pos_quat[1]
+        pose_msg.pose.position.z = rel_pos_quat[2]
+
+        pose_msg.pose.orientation.x = rel_quat[0]
+        pose_msg.pose.orientation.y = rel_quat[1]
+        pose_msg.pose.orientation.z = rel_quat[2]
+        pose_msg.pose.orientation.w = rel_quat[3]
+
+        self.goal_torso_pub.publish(pose_msg)
 
     def publish_goal_radius_marker(self):
         """发布目标点周围0.5米半径的圆圈以供可视化"""
@@ -1077,6 +1149,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, kua
         # 发布位姿信息
         kuavo_robot.publish_robot_pose()
         kuavo_robot.publish_goal_pose()
+        kuavo_robot.publish_relative_goal_pose()
 
         # 控制频率
         rate.sleep()

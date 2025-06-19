@@ -92,11 +92,11 @@ class GymEnvWrapper:
     def __init__(self):
         # rospy.init_node('gym_env_wrapper', anonymous=True)
         
-        # 定义观测空间 (12维：机器人位姿6 + 目标位姿6)
+        # 定义观测空间 (21维：机器人世界位姿7 + 目标世界位姿7 + 目标相对位姿7)
         self.observation_space = Box(
             low=-np.inf, 
             high=np.inf,
-            shape=(14,),
+            shape=(21,),
             dtype=np.float32
         )
         
@@ -114,10 +114,11 @@ class GymEnvWrapper:
         # 同步订阅观测话题
         robot_pose_sub = message_filters.Subscriber('/robot_pose', PoseStamped)
         goal_pose_sub = message_filters.Subscriber('/goal_pose', PoseStamped)
+        goal_torso_pose_sub = message_filters.Subscriber('/goal_torso_pose', PoseStamped)
         
         # 时间同步器
         self.ts = message_filters.ApproximateTimeSynchronizer(
-            [robot_pose_sub, goal_pose_sub],
+            [robot_pose_sub, goal_pose_sub, goal_torso_pose_sub],
             queue_size=10,
             slop=0.1
         )
@@ -150,10 +151,10 @@ class GymEnvWrapper:
         # 添加调试标志
         self.debug = False
 
-    def _obs_callback(self, robot_pose, goal_pose):
-        """同步处理机器人位姿和目标位姿"""
+    def _obs_callback(self, robot_pose, goal_pose, goal_torso_pose):
+        """同步处理机器人位姿、目标位姿和相对目标位姿"""
         with self.obs_lock:
-            # 提取机器人位姿
+            # 提取机器人位姿 (世界系)
             robot_state = np.array([
                 robot_pose.pose.position.x,
                 robot_pose.pose.position.y,
@@ -164,7 +165,7 @@ class GymEnvWrapper:
                 robot_pose.pose.orientation.w
             ])
             
-            # 提取目标位姿
+            # 提取目标位姿 (世界系)
             goal_state = np.array([
                 goal_pose.pose.position.x,
                 goal_pose.pose.position.y,
@@ -174,9 +175,20 @@ class GymEnvWrapper:
                 goal_pose.pose.orientation.z,
                 goal_pose.pose.orientation.w
             ])
+
+            # 提取目标位姿 (机器人系)
+            goal_torso_state = np.array([
+                goal_torso_pose.pose.position.x,
+                goal_torso_pose.pose.position.y,
+                goal_torso_pose.pose.position.z,
+                goal_torso_pose.pose.orientation.x,
+                goal_torso_pose.pose.orientation.y,
+                goal_torso_pose.pose.orientation.z,
+                goal_torso_pose.pose.orientation.w
+            ])
             
             # 合并观测
-            self.latest_obs = np.concatenate([robot_state, goal_state]).astype(np.float32)
+            self.latest_obs = np.concatenate([robot_state, goal_state, goal_torso_state]).astype(np.float32)
 
     def step(self, action):
         """执行动作并返回(next_obs, reward, done, info)"""
@@ -492,6 +504,7 @@ class SAC:
         total_timesteps: int,
         log_interval: int = 100,
         max_episode_steps: int = 1000,
+        save_freq_episodes: int = 100,
         **kwargs
     ):
         # 初始化环境
@@ -540,6 +553,14 @@ class SAC:
             # 环境终止处理
             if episode_done:
                 episode_count = len(episode_rewards) + 1  # 当前是第几个episode
+                
+                # Save checkpoint every `save_freq_episodes`
+                if self.writer and episode_count > 0 and episode_count % save_freq_episodes == 0:
+                    checkpoint_dir = os.path.join(self.writer.log_dir, "checkpoints")
+                    os.makedirs(checkpoint_dir, exist_ok=True)
+                    save_path = os.path.join(checkpoint_dir, f"model_ep{episode_count}.pth")
+                    self.save(save_path)
+                    print(f"Checkpoint saved to: {save_path}")
                 
                 # 确定终止原因
                 is_collided = info.get("collided", False)

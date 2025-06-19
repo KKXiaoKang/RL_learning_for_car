@@ -60,7 +60,8 @@ def main():
         agent.learn(
             total_timesteps=1_000_000,
             log_interval=100,
-            max_episode_steps=1000  # 设置每个episode的最大步长
+            max_episode_steps=2000,  # 设置每个episode的最大步长
+            save_freq_episodes=100
         )
     except KeyboardInterrupt:
         print("Training interrupted")
