@@ -4,3 +4,4 @@ devel/
 logs/
 rl-baselines3-zoo/
 stable-baselines3/
+*.pyc
