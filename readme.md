@@ -13,5 +13,5 @@ python3 scripts/z_model_train.py
 
 ## 验证
 ```bash
-python3 scripts/z_model_eval.py
+python3 scripts/z_model_eval.py --model_path ./logs/sac_kuavo_navigation/run_20250619_115642/checkpoints/model_ep1500.pth 
 ```

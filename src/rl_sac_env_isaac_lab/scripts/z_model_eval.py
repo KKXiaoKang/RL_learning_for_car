@@ -6,11 +6,17 @@ import rospy
 from algo.sac import SAC, GymEnvWrapper
 from algo.policies import SACPolicy
 import os
+import argparse
 
 def main():
     """Main function to evaluate the trained SAC model."""    
-    # Define the path to the saved model
-    model_path = "/home/lab/RL/src/rl_sac_env_isaac_lab/logs/sac_kuavo_navigation/run_20250618_211000/model.pth"
+    # Set up argument parser
+    parser = argparse.ArgumentParser(description="Evaluate a trained SAC model.")
+    parser.add_argument("--model_path", type=str, required=True, help="Path to the trained model (.pth) file.")
+    args = parser.parse_args()
+
+    # Use the path from the command-line argument
+    model_path = args.model_path
     
     if not os.path.exists(model_path):
         rospy.logerr(f"Model file not found at {model_path}")
