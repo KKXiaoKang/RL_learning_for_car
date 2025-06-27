@@ -321,7 +321,7 @@ class RLCarGamepadWrapper(gym.Wrapper):
         self,
         env,
         linear_vel_scale=1.0,
-        angular_vel_scale=1.0,
+        angular_vel_scale=0.2,
         auto_reset=False,
         controller_config_path=None,
     ):
