@@ -24,6 +24,18 @@ python3 scripts/pth2onnx.py --model_path logs/sac_kuavo_navigation/run_20250619_
 # lerobo hil-serl
 * ![lerobo-rlpd](./IMG/lerobo-rlpd.jpg)
 # lerobot hil-serl快速启动教程
+## 安装环境 - gym_hil 融合自定义env
+```bash
+cd /home/lab/RL/lerobot/gym_hil
+pip3 install -e .
+```
+## 测试环境
+```bash
+# 开启isaac Lab
+roslaunch rl_sac_env_isaac_lab lab_control_bt2pro.launch training_mode:=true
+# 测试环境
+python3 src/rl_sac_env_isaac_lab/test/test_gym_env_isaac_lab.py
+```
 ## 前置处理
 ### 运行mujoco env环境测试
 ```bash

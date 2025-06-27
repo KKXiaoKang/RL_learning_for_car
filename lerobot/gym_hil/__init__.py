@@ -16,6 +16,8 @@
 
 import gymnasium as gym
 
+from gym_hil.isaacLab_gym_env import IsaacLabGymEnv
+from gym_hil.envs.rl_car_gym_env import RLCarGymEnv
 from gym_hil.mujoco_gym_env import FrankaGymEnv, GymRenderingSpec, MujocoGymEnv
 from gym_hil.wrappers.factory import make_env, wrap_env
 from gym_hil.wrappers.viewer_wrapper import PassiveViewerWrapper
@@ -23,6 +25,8 @@ from gym_hil.wrappers.viewer_wrapper import PassiveViewerWrapper
 __all__ = [
     "MujocoGymEnv",
     "FrankaGymEnv",
+    "IsaacLabGymEnv",
+    "RLCarGymEnv",
     "GymRenderingSpec",
     "PassiveViewerWrapper",
     "make_env",
@@ -31,11 +35,18 @@ __all__ = [
 
 from gymnasium.envs.registration import register
 
-# Register the base environment directly
+# Register the base environment for the Panda robot
 register(
     id="gym_hil/PandaPickCubeBase-v0",  # This is the base environment
     entry_point="gym_hil.envs:PandaPickCubeGymEnv",
     max_episode_steps=100,
+)
+
+# Register the base environment for the RL Car
+register(
+    id="gym_hil/RLCar-v0",
+    entry_point="gym_hil.envs.rl_car_gym_env:RLCarGymEnv",
+    max_episode_steps=10000,
 )
 
 # Register the viewer wrapper
