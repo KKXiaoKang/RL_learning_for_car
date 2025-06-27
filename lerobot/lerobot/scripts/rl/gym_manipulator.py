@@ -2206,6 +2206,7 @@ def main(cfg: EnvConfig):
              including mode (record, replay, random) and other settings.
     """
     env = make_robot_env(cfg)
+    policy = None
 
     if cfg.mode == "record":
         policy = None
