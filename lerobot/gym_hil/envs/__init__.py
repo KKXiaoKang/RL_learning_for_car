@@ -18,4 +18,5 @@ from gym_hil.envs.panda_pick_gym_env import PandaPickCubeGymEnv
 
 __all__ = [
     "PandaPickCubeGymEnv",
+    "RLCarGymEnv",
 ]

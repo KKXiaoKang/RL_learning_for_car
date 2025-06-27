@@ -308,3 +308,110 @@ class ResetDelayWrapper(gym.Wrapper):
 
         # Call the parent reset method
         return self.env.reset(**kwargs)
+
+
+class RLCarGamepadWrapper(gym.Wrapper):
+    """
+    Wrapper that allows controlling the RLCar environment with a gamepad.
+    When intervention is initiated, it first sends a zero action to stop the car,
+    then gives control to the human.
+    """
+
+    def __init__(
+        self,
+        env,
+        linear_vel_scale=1.0,
+        angular_vel_scale=1.0,
+        auto_reset=False,
+        controller_config_path=None,
+    ):
+        """
+        Initialize the RLCar gamepad controller wrapper.
+        """
+        super().__init__(env)
+        from gym_hil.wrappers.intervention_utils import RLCarGamepadController
+
+        self.controller = RLCarGamepadController(
+            linear_vel_scale=linear_vel_scale,
+            angular_vel_scale=angular_vel_scale,
+            config_path=controller_config_path,
+        )
+
+        self.auto_reset = auto_reset
+        self.controller.start()
+        # State tracking for intervention
+        self.was_intervening = False
+
+    def get_gamepad_action(self):
+        """
+        Get the current action from the gamepad.
+        """
+        self.controller.update()
+
+        intervention_is_active = self.controller.should_intervene()
+        gamepad_action = self.controller.get_action()
+        episode_end_status = self.controller.get_episode_end_status()
+
+        terminate_episode = episode_end_status is not None
+        success = episode_end_status == "success"
+        rerecord_episode = episode_end_status == "rerecord_episode"
+
+        return intervention_is_active, gamepad_action, terminate_episode, success, rerecord_episode
+
+    def step(self, action):
+        """
+        Step the environment, using gamepad input to override the policy's action when intervention is active.
+        """
+        (
+            is_intervening_now,
+            gamepad_action,
+            terminate_episode,
+            success,
+            rerecord_episode,
+        ) = self.get_gamepad_action()
+
+        # Intervention logic with state tracking
+        if is_intervening_now:
+            if not self.was_intervening:
+                # This is the first frame of intervention. Stop the car.
+                print("Intervention started: Sending stop command.")
+                action = np.array([0.0, 0.0], dtype=np.float32)
+            else:
+                # Already intervening, use gamepad joystick action.
+                action = gamepad_action
+        # If not intervening, the original `action` from the policy is used.
+
+        # Update the state for the next step.
+        self.was_intervening = is_intervening_now
+
+        # Step the environment with the determined action
+        obs, reward, terminated, truncated, info = self.env.step(action)
+
+        terminated = terminated or truncated or terminate_episode
+
+        if success:
+            reward = 1.0
+
+        info["is_intervention"] = is_intervening_now
+        info["action_intervention"] = action
+        info["rerecord_episode"] = rerecord_episode
+
+        if terminated or truncated:
+            info["next.success"] = success
+            if self.auto_reset:
+                obs, reset_info = self.reset()
+                info.update(reset_info)
+
+        return obs, reward, terminated, truncated, info
+
+    def reset(self, **kwargs):
+        """Reset the environment."""
+        self.controller.reset()
+        self.was_intervening = False
+        return self.env.reset(**kwargs)
+
+    def close(self):
+        """Clean up resources when environment closes."""
+        if hasattr(self, "controller"):
+            self.controller.stop()
+        return self.env.close()

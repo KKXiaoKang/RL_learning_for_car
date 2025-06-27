@@ -16,6 +16,7 @@
 
 import json
 from pathlib import Path
+import numpy as np
 
 
 def load_controller_config(controller_name: str, config_path: str | None = None) -> dict:
@@ -255,6 +256,33 @@ class GamepadController(InputController):
         self.controller_config = None
         self.controller_type = None  # "xbox" or "bt2pro"
 
+    def _print_controls(self):
+        """Prints the control mapping for the user."""
+        buttons = self.controller_config.get("buttons", {})
+        if self.controller_type == "bt2pro":
+            print("bt2pro Gamepad controls:")
+            print("  Button 0: End episode with FAILURE")
+            print("  Button 1: Exit")
+            print("  Button 3: Rerecord episode")
+            print("  Button 4: No function")
+            print("  Button 6: End episode with SUCCESS")
+            print("  Button 7: Intervention")
+            print("  Button 8: Open gripper")
+            print("  Button 9: Close gripper")
+            print("  Left analog stick: Move in X-Y plane")
+            print("  Right analog stick (vertical): Move in Z axis")
+        else:
+            print("Gamepad controls:")
+            print(f"  {buttons.get('rb', 'RB')} button: Intervention")
+            print("  Left analog stick: Move in X-Y plane")
+            print("  Right analog stick (vertical): Move in Z axis")
+            print(f"  {buttons.get('lt', 'LT')} button: Close gripper")
+            print(f"  {buttons.get('rt', 'RT')} button: Open gripper")
+            print(f"  {buttons.get('b', 'B')}/Circle button: Exit")
+            print(f"  {buttons.get('y', 'Y')}/Triangle button: End episode with SUCCESS")
+            print(f"  {buttons.get('a', 'A')}/Cross button: End episode with FAILURE")
+            print(f"  {buttons.get('x', 'X')}/Square button: Rerecord episode")
+
     def start(self):
         """Initialize pygame and the gamepad."""
         import pygame
@@ -283,32 +311,8 @@ class GamepadController(InputController):
         # Load controller configuration based on joystick name
         self.controller_config = load_controller_config(joystick_name, self.config_path)
 
-        # Get button mappings from config
-        buttons = self.controller_config.get("buttons", {})
-
-        if self.controller_type == "bt2pro":
-            print("bt2pro Gamepad controls:")
-            print("  Button 0: End episode with FAILURE")
-            print("  Button 1: Exit")
-            print("  Button 3: Rerecord episode")
-            print("  Button 4: No function")
-            print("  Button 6: End episode with SUCCESS")
-            print("  Button 7: Intervention")
-            print("  Button 8: Open gripper")
-            print("  Button 9: Close gripper")
-            print("  Left analog stick: Move in X-Y plane")
-            print("  Right analog stick (vertical): Move in Z axis")
-        else:
-            print("Gamepad controls:")
-            print(f"  {buttons.get('rb', 'RB')} button: Intervention")
-            print("  Left analog stick: Move in X-Y plane")
-            print("  Right analog stick (vertical): Move in Z axis")
-            print(f"  {buttons.get('lt', 'LT')} button: Close gripper")
-            print(f"  {buttons.get('rt', 'RT')} button: Open gripper")
-            print(f"  {buttons.get('b', 'B')}/Circle button: Exit")
-            print(f"  {buttons.get('y', 'Y')}/Triangle button: End episode with SUCCESS")
-            print(f"  {buttons.get('a', 'A')}/Cross button: End episode with FAILURE")
-            print(f"  {buttons.get('x', 'X')}/Square button: Rerecord episode")
+        # Print controls
+        self._print_controls()
 
     def stop(self):
         """Clean up pygame resources."""
@@ -327,6 +331,7 @@ class GamepadController(InputController):
         if self.controller_type == "bt2pro":
             # bt2pro controller button mappings
             for event in pygame.event.get():
+                # print(event)
                 if event.type == pygame.JOYBUTTONDOWN:
                     if event.button == 0:
                         self.episode_end_status = "failure"
@@ -365,6 +370,7 @@ class GamepadController(InputController):
             rb_button = buttons.get("rb", 5)  # Default to 5 if not found
 
             for event in pygame.event.get():
+                # print(event)
                 if event.type == pygame.JOYBUTTONDOWN:
                     if event.button == y_button:
                         self.episode_end_status = "success"
@@ -629,3 +635,118 @@ class GamepadControllerHID(InputController):
     def should_save(self):
         """Return True if save button was pressed."""
         return self.save_requested
+
+
+class RLCarGamepadController(GamepadController):
+    """Generate differential drive wheel velocities from gamepad input for RLCar."""
+
+    def __init__(self, linear_vel_scale=1.0, angular_vel_scale=1.0, deadzone=0.1, config_path=None):
+        # For a differential drive car:
+        # y_step_size corresponds to linear velocity scale.
+        # x_step_size corresponds to angular velocity scale.
+        super().__init__(
+            x_step_size=angular_vel_scale, y_step_size=linear_vel_scale, deadzone=deadzone, config_path=config_path
+        )
+
+    def _print_controls(self):
+        """Override to print car-specific controls."""
+        if self.controller_type == "bt2pro":
+            print("RLCar Gamepad controls (bt2pro):")
+            print("  Button 7 (RB): Press and hold for manual intervention")
+            print("  Left stick (Up/Down): Forward/Backward")
+            print("  Right stick (Left/Right): Turn Left/Right")
+            print("  Button 6 (Y): End episode with SUCCESS")
+            print("  Button 0 (A): End episode with FAILURE")
+            print("  Button 3 (X): Rerecord episode")
+        else:
+            buttons = self.controller_config.get("buttons", {})
+            print("RLCar Gamepad controls (Xbox-like):")
+            print(f"  {buttons.get('rb', 'RB')} button: Press and hold for manual intervention")
+            print("  Left stick (Up/Down): Forward/Backward")
+            print("  Right stick (Left/Right): Turn Left/Right")
+            print(f"  {buttons.get('y', 'Y')}/Triangle button: End episode with SUCCESS")
+            print(f"  {buttons.get('a', 'A')}/Cross button: End episode with FAILURE")
+            print(f"  {buttons.get('x', 'X')}/Square button: Rerecord episode")
+
+    def get_action(self) -> np.ndarray:
+        """Get the current wheel velocities from gamepad state using differential drive mixing."""
+        import pygame
+
+        try:
+            steering_input, throttle_input = 0.0, 0.0
+            # The axis mapping is adapted to be consistent with the user's `joy.py` example.
+            # Throttle (forward/backward) is mapped to a vertical stick axis.
+            # Steering (turn) is mapped to a horizontal stick axis.
+
+            if self.controller_type == "bt2pro":
+                # As per joy.py: throttle from axes[1], steering from axes[2]
+                # For bt2pro on Linux, this typically corresponds to:
+                # axes[1]: Left Stick Y
+                # axes[2]: Right Stick X
+                throttle_axis = 1
+                steering_axis = 2
+
+                throttle_input = self.joystick.get_axis(throttle_axis)
+                steering_input = self.joystick.get_axis(steering_axis)
+
+                # Invert throttle axis for intuitive control (up on stick = forward)
+                throttle_input = -throttle_input
+
+            else:
+                # Default/Xbox controller logic from config
+                axes = self.controller_config.get("axes", {})
+                axis_inversion = self.controller_config.get("axis_inversion", {})
+
+                # We will use Left Stick Y for throttle and Right Stick X for steering.
+                # This is a common configuration and consistent with the logic requested.
+                throttle_axis_name = "left_y"
+                steering_axis_name = "right_x"
+
+                # Get axis indices from config (with defaults if not found)
+                throttle_axis_idx = axes.get(throttle_axis_name, 1)  # default to axis 1
+                steering_axis_idx = axes.get(steering_axis_name, 2)  # default to axis 2
+
+                throttle_input = self.joystick.get_axis(throttle_axis_idx)
+                steering_input = self.joystick.get_axis(steering_axis_idx)
+
+                # Get inversion from config, default to inverting Y axis
+                invert_throttle = axis_inversion.get(throttle_axis_name, True)
+                invert_steering = axis_inversion.get(steering_axis_name, False)
+
+                if invert_throttle:
+                    throttle_input = -throttle_input
+                if invert_steering:
+                    steering_input = -steering_input
+
+            # Apply deadzone
+            steering_input = 0 if abs(steering_input) < self.deadzone else steering_input
+            throttle_input = 0 if abs(throttle_input) < self.deadzone else throttle_input
+
+            # Calculate forward and turn components
+            # self.y_step_size is linear_vel_scale
+            # self.x_step_size is angular_vel_scale
+            forward = throttle_input * self.y_step_size
+            turn = steering_input * self.x_step_size
+
+            # Differential drive mixing formula
+            left_wheel_vel = forward + turn
+            right_wheel_vel = forward - turn
+
+            # Normalize to stay within a max velocity, similar to joy.py
+            max_vel = self.y_step_size  # Assumes max linear velocity is the scale
+            max_abs_speed = max(abs(left_wheel_vel), abs(right_wheel_vel))
+            if max_abs_speed > max_vel:
+                scale = max_vel / max_abs_speed
+                left_wheel_vel *= scale
+                right_wheel_vel *= scale
+
+            return np.array([left_wheel_vel, right_wheel_vel], dtype=np.float32)
+
+        except pygame.error:
+            print("Error reading gamepad. Is it still connected?")
+            return np.array([0.0, 0.0], dtype=np.float32)
+
+    def get_deltas(self):
+        # This controller returns a 2D action, not 3D deltas.
+        # This method is here for compatibility with the base class.
+        raise NotImplementedError("RLCarGamepadController uses get_action(), not get_deltas().")

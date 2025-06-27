@@ -11,6 +11,7 @@ from gym_hil.wrappers.hil_wrappers import (
     GripperPenaltyWrapper,
     InputsControlWrapper,
     ResetDelayWrapper,
+    RLCarGamepadWrapper,
 )
 from gym_hil.wrappers.viewer_wrapper import PassiveViewerWrapper
 
@@ -129,3 +130,12 @@ def make_env(
         reset_delay_seconds=reset_delay_seconds,
         controller_config_path=controller_config_path,
     )
+
+
+def make_rl_car_gamepad_env(**kwargs):
+    """Factory function to create the RLCar environment with gamepad support."""
+    # Create the base RLCar environment
+    env = gym.make("gym_hil/RLCar-v0", **kwargs)
+    # Wrap it with the gamepad wrapper
+    env = RLCarGamepadWrapper(env)
+    return env

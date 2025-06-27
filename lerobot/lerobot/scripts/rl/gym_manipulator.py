@@ -1855,6 +1855,11 @@ def make_robot_env(cfg: EnvConfig) -> gym.Env:
     if cfg.type == "hil":
         import gym_hil  # noqa: F401
 
+        # Handle RLCar environment specifically, as it has different needs.
+        if "RLCar" in cfg.task:
+            env = gym.make(f"gym_hil/{cfg.task}")
+            return env
+
         # TODO (azouitine)
         env = gym.make(
             f"gym_hil/{cfg.task}",
@@ -2251,7 +2256,7 @@ def main(cfg: EnvConfig):
 
     num_episode = 0
     successes = []
-    while num_episode < 10:
+    while num_episode < cfg.num_episodes:
         start_loop_s = time.perf_counter()
         if policy is not None:
             action = policy.select_action(obs)
@@ -2264,15 +2269,19 @@ def main(cfg: EnvConfig):
         # Execute the step: wrap the NumPy action in a torch tensor.
         obs, reward, terminated, truncated, info = env.step(action)
         if terminated or truncated:
-            successes.append(reward)
+            successes.append(float(reward))
             obs, _ = env.reset()
             num_episode += 1
 
         dt_s = time.perf_counter() - start_loop_s
         busy_wait(1 / cfg.fps - dt_s)
 
-    logging.info(f"Success after 20 steps {successes}")
-    logging.info(f"success rate {sum(successes) / len(successes)}")
+    print(f"Successes over {cfg.num_episodes} episodes: {successes}")
+    if len(successes) > 0:
+        success_rate = sum(successes) / len(successes)
+        print(f"Success rate: {success_rate:.4f}")
+    else:
+        print("Success rate: 0.0")
 
 
 if __name__ == "__main__":
