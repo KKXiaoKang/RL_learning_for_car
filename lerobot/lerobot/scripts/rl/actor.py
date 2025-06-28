@@ -56,6 +56,7 @@ import grpc
 import torch
 from torch import nn
 from torch.multiprocessing import Event, Queue
+import numpy as np
 
 from lerobot.common.cameras import opencv  # noqa: F401
 from lerobot.common.policies.factory import make_policy
@@ -300,14 +301,23 @@ def act_with_policy(
             # Increment intervention steps counter
             episode_intervention_steps += 1
 
+        # NOTE(michel-aractingi): Make sure all info values are supported by the transport layer
+        for k, v in info.items():
+            if isinstance(v, np.bool_):
+                info[k] = bool(v)
+            elif isinstance(v, np.floating):
+                info[k] = float(v)
+            elif isinstance(v, np.integer):
+                info[k] = int(v)
+
         list_transition_to_send_to_learner.append(
             Transition(
                 state=obs,
                 action=action,
-                reward=reward,
+                reward=torch.tensor(reward, dtype=torch.float32),
                 next_state=next_obs,
-                done=done,
-                truncated=truncated,  # TODO: (azouitine) Handle truncation properly
+                done=torch.tensor(done, dtype=torch.bool),
+                truncated=torch.tensor(truncated, dtype=torch.bool),
                 complementary_info=info,
             )
         )

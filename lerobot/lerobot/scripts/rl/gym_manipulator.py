@@ -1672,7 +1672,7 @@ class GamepadControlWrapper(gym.Wrapper):
         # For Gamepad, if intervention, `gamepad_action` is the intervention.
         # If not intervention, policy's action is `action`.
         # For consistency, let's store the *human's* action if intervention occurred.
-        info["action_intervention"] = action
+        info["action_intervention"] = torch.from_numpy(gamepad_action).to(action.device)
 
         info["rerecord_episode"] = rerecord_episode
 
@@ -1818,19 +1818,29 @@ class GymHilObservationProcessorWrapper(gym.ObservationWrapper):
         prev_space = self.observation_space
         new_space = {}
 
-        for key in prev_space:
-            if "pixels" in key:
-                for k in prev_space["pixels"]:
+        if isinstance(prev_space, gym.spaces.Dict):
+            # Case for environments with dictionary-based observations (e.g., with cameras)
+            if "pixels" in prev_space.spaces:
+                for k in prev_space.spaces["pixels"].spaces:
+                    # This assumes a fixed resized output, which is what LeRobot pipelines expect.
                     new_space[f"observation.images.{k}"] = gym.spaces.Box(
                         0.0, 255.0, shape=(3, 128, 128), dtype=np.uint8
                     )
-
-            if key == "agent_pos":
-                new_space["observation.state"] = prev_space["agent_pos"]
+            if "agent_pos" in prev_space.spaces:
+                new_space["observation.state"] = prev_space.spaces["agent_pos"]
+        elif isinstance(prev_space, gym.spaces.Box):
+            # Case for environments with box-based observations (e.g., state-only like RLCar)
+            new_space["observation.state"] = prev_space
+        else:
+            raise TypeError(f"Unsupported observation space type: {type(prev_space)}")
 
         self.observation_space = gym.spaces.Dict(new_space)
 
-    def observation(self, observation: dict[str, Any]) -> dict[str, Any]:
+    def observation(self, observation: Any) -> dict[str, Any]:
+        # If the original observation is a numpy array (from a Box space),
+        # wrap it in a dictionary to match what `preprocess_observation` expects.
+        if isinstance(observation, np.ndarray):
+            observation = {"agent_pos": observation}
         return preprocess_observation(observation)
 
 
@@ -1854,12 +1864,17 @@ def make_robot_env(cfg: EnvConfig) -> gym.Env:
     """
     if cfg.type == "hil":
         import gym_hil  # noqa: F401
-
+    
         # Handle RLCar environment specifically, as it has different needs.
         if "RLCar" in cfg.task:
             env = gym.make(f"gym_hil/{cfg.task}")
+            # Wrappers to make the environment compatible with the rest of the script.
+            env = GymHilObservationProcessorWrapper(env=env)
+            env = GymHilDeviceWrapper(env=env, device=cfg.device)
+            env = BatchCompatibleWrapper(env=env)
+            env = TorchActionWrapper(env=env, device=cfg.device)
             return env
-
+    
         # TODO (azouitine)
         env = gym.make(
             f"gym_hil/{cfg.task}",
@@ -2033,9 +2048,12 @@ def record_dataset(env, policy, cfg):
     # Setup initial action (zero action if using teleop)
     action = env.action_space.sample() * 0.0
 
-    action_names = ["delta_x_ee", "delta_y_ee", "delta_z_ee"]
-    if cfg.wrapper.use_gripper:
-        action_names.append("gripper_delta")
+    if "RLCar" in cfg.task:
+        action_names = ["left_wheel_velocity", "right_wheel_velocity"]
+    else:
+        action_names = ["delta_x_ee", "delta_y_ee", "delta_z_ee"]
+        if cfg.wrapper.use_gripper:
+            action_names.append("gripper_delta")
 
     # Configure dataset features based on environment spaces
     features = {
@@ -2046,17 +2064,18 @@ def record_dataset(env, policy, cfg):
         },
         "action": {
             "dtype": "float32",
-            "shape": (len(action_names),),
+            "shape": env.action_space.shape,
             "names": action_names,
         },
         "next.reward": {"dtype": "float32", "shape": (1,), "names": None},
         "next.done": {"dtype": "bool", "shape": (1,), "names": None},
-        "complementary_info.discrete_penalty": {
+    }
+    if "RLCar" not in cfg.task:
+        features["complementary_info.discrete_penalty"] = {
             "dtype": "float32",
             "shape": (1,),
             "names": ["discrete_penalty"],
-        },
-    }
+        }
 
     # Add image features
     for key in env.observation_space:
@@ -2134,9 +2153,10 @@ def record_dataset(env, policy, cfg):
                 really_done = success_steps_collected >= cfg.number_of_steps_after_success
 
             frame["next.done"] = np.array([really_done], dtype=bool)
-            frame["complementary_info.discrete_penalty"] = torch.tensor(
-                [info.get("discrete_penalty", 0.0)], dtype=torch.float32
-            )
+            if "RLCar" not in cfg.task:
+                frame["complementary_info.discrete_penalty"] = torch.tensor(
+                    [info.get("discrete_penalty", 0.0)], dtype=torch.float32
+                )
             dataset.add_frame(frame, task=cfg.task)
 
             # Maintain consistent timing

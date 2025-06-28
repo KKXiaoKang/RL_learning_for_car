@@ -22,6 +22,7 @@ from multiprocessing import Event, Queue
 from typing import Any
 
 import torch
+from torch import Tensor
 
 from lerobot.common.transport import services_pb2
 from lerobot.common.utils.transition import Transition
@@ -101,7 +102,7 @@ def receive_bytes_in_chunks(iterator, queue: Queue, shutdown_event: Event, log_p
             raise ValueError(f"Received unknown transfer state {item.transfer_state}")
 
 
-def state_to_bytes(state_dict: dict[str, torch.Tensor]) -> bytes:
+def state_to_bytes(state_dict: dict[str, Tensor]) -> bytes:
     """Convert model state dict to flat array for transmission"""
     buffer = io.BytesIO()
 
@@ -110,7 +111,7 @@ def state_to_bytes(state_dict: dict[str, torch.Tensor]) -> bytes:
     return buffer.getvalue()
 
 
-def bytes_to_state_dict(buffer: bytes) -> dict[str, torch.Tensor]:
+def bytes_to_state_dict(buffer: bytes) -> dict[str, Tensor]:
     buffer = io.BytesIO(buffer)
     buffer.seek(0)
     return torch.load(buffer, weights_only=True)
@@ -128,10 +129,30 @@ def bytes_to_python_object(buffer: bytes) -> Any:
     return obj
 
 
-def bytes_to_transitions(buffer: bytes) -> list[Transition]:
+def bytes_to_transitions(buffer: bytes) -> list[dict[str, Tensor | dict[str, Tensor]]]:
+    """Convert bytes to a list of transitions.
+
+    A transition is a dictionary with the following keys:
+    - state: dictionary of tensors
+    - action: tensor
+    - reward: tensor
+    - next_state: dictionary of tensors
+    - done: tensor
+    - info: dictionary of tensors
+
+    Args:
+        buffer (bytes): The buffer to convert.
+
+    Returns:
+        A list of transitions.
+    """
+    # TODO(rcadene): For now, we use torch.load, but this is not safe.
+    # We should use a safer way to deserialize the data.
+    # The main issue is that the buffer can contain dictionaries of tensors,
+    # which is not supported by safetensors.
     buffer = io.BytesIO(buffer)
     buffer.seek(0)
-    transitions = torch.load(buffer, weights_only=True)
+    transitions = torch.load(buffer, weights_only=False)  # nosec B301
     return transitions
 
 

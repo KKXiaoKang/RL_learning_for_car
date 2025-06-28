@@ -493,9 +493,23 @@ class SACObservationEncoder(nn.Module):
         self._compute_output_dim()
 
     def _init_image_layers(self) -> None:
+        # If the config clearly indicates no vision, just exit.
+        # This is a stronger check that relies on explicit config values.
+        if self.config.vision_encoder_name is None and self.config.image_encoder_hidden_dim == 0:
+            self.has_images = False
+            self.image_keys = []
+            self.image_encoder = None
+            self.spatial_embeddings = nn.ModuleDict()
+            self.post_encoders = nn.ModuleDict()
+            return
+
         self.image_keys = [k for k in self.config.input_features if is_image_feature(k)]
         self.has_images = bool(self.image_keys)
         if not self.has_images:
+            # Set image-related attributes to None or empty to avoid errors
+            self.image_encoder = None
+            self.spatial_embeddings = nn.ModuleDict()
+            self.post_encoders = nn.ModuleDict()
             return
 
         if self.config.vision_encoder_name is not None:
