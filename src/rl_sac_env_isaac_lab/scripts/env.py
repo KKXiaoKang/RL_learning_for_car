@@ -674,7 +674,7 @@ class KuavoRobotController():
         """发布机器人位姿到/robot_pose话题"""
         root_state = self.scene["robot"].data.root_state_w.clone()
         pos = root_state[:, 0:3]
-        quat = root_state[:, 3:7]  # Isaac Sim quat is [qx, qy, qz, qw]
+        quat = root_state[:, 3:7]  # Isaac Sim quat is [qw, qx, qy, qz]
         
         # 创建PoseStamped消息
         pose_msg = PoseStamped()
@@ -685,10 +685,10 @@ class KuavoRobotController():
         pose_msg.pose.position.x = pos[0, 0].item()
         pose_msg.pose.position.y = pos[0, 1].item()
         pose_msg.pose.position.z = pos[0, 2].item()
-        pose_msg.pose.orientation.x = quat[0, 0].item()  # qx
-        pose_msg.pose.orientation.y = quat[0, 1].item()  # qy
-        pose_msg.pose.orientation.z = quat[0, 2].item()  # qz
-        pose_msg.pose.orientation.w = quat[0, 3].item()  # qw
+        pose_msg.pose.orientation.w = quat[0, 0].item()  # qw
+        pose_msg.pose.orientation.x = quat[0, 1].item()  # qx
+        pose_msg.pose.orientation.y = quat[0, 2].item()  # qy
+        pose_msg.pose.orientation.z = quat[0, 3].item()  # qz
         
         self.robot_pose_pub.publish(pose_msg)
 
