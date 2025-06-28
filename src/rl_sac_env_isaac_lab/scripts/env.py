@@ -1158,7 +1158,7 @@ def main():
     """Main function."""
     # Initialize the simulation context
     sim_cfg = sim_utils.SimulationCfg(
-        dt=0.01, 
+        dt=0.02, 
         device=args_cli.device,
         # physx=sim_utils.PhysxCfg(
         #     solver_type="TGS",  # CPU通常使用PGS求解器 | TGS

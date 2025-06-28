@@ -46,7 +46,7 @@ register(
 register(
     id="gym_hil/RLCar-v0",
     entry_point="gym_hil.envs.rl_car_gym_env:RLCarGymEnv",
-    max_episode_steps=100,
+    max_episode_steps=200,
 )
 
 # Register the viewer wrapper
@@ -91,5 +91,5 @@ register(
 register(
     id="gym_hil/RLCarGamepad-v0",
     entry_point="gym_hil.wrappers.factory:make_rl_car_gamepad_env",
-    max_episode_steps=2000,  # Or your preferred step limit
+    max_episode_steps=200,  # Or your preferred step limit
 )
