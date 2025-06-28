@@ -15,7 +15,7 @@
         "disable_artifact": true
     },
     "dataset": {
-        "repo_id": "aractingi/franka_sim_pick_lift_6",
+        "repo_id": "KANGKKANG/franka_sim_pick_lift_626_1900",
         "use_imagenet_stats": false
     },
     "policy": {
@@ -226,7 +226,7 @@
     },
     "name": "franka_sim",
     "mode": null,
-    "repo_id": "KANGKKANG/franka_sim_pick_lift_6",
+    "repo_id": "KANGKKANG/franka_sim_pick_lift_626_1900",
     "dataset_root": null,
     "task": "PandaPickCubeGamepad-v0",
     "num_episodes": 30,

@@ -8,3 +8,4 @@ lerobot_hil-serl
 lerobot_origin/
 *.pyc
 .idea/
+src/lerobot/

@@ -44,7 +44,7 @@
     "task": "PandaPickCubeGamepad-v0", 
     "num_episodes": 30, 
     "episode": 0,
-    "pretrained_policy_name_or_path": "/home/lab/RL/lerobot/outputs/train/2025-06-26/21-29-55_default/checkpoints/last/pretrained_model",
+    "pretrained_policy_name_or_path": "/home/lab/RL/lerobot/outputs/train/2025-06-28/14-36-41_default/checkpoints/last/pretrained_model",
     "device": "cuda",
     "push_to_hub": true,
     "fps": 10,
