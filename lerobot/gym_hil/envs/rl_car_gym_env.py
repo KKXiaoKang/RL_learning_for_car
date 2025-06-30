@@ -37,7 +37,7 @@ class RLCarGymEnv(IsaacLabGymEnv):
         )
         
         # Action scaling factor to map policy output to robot's physical command range
-        self.action_scale = 50.0
+        self.action_scale = 20.0 
         
         # Task-specific state
         self.last_distance = float('inf')

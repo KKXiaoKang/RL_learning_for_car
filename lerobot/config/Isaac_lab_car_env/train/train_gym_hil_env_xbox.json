@@ -3,8 +3,10 @@
     "job_name": "rl_car_hil_1",
     "resume": false,
     "seed": 42,
+    "num_workers": 4,
     "batch_size": 256,
-    "log_freq": 100,
+    "steps": 100000,
+    "log_freq": 1,
     "save_checkpoint": true,
     "save_freq": 2000,
     "wandb": {
@@ -13,8 +15,7 @@
         "disable_artifact": true
     },
     "dataset": {
-        "repo_id": "KANGKKANG/rl_car_627_2015",
-        "root": "data/lerobot/rl_car_627_2015",
+        "repo_id": "KANGKKANG/rl_car_628_2015",
         "use_imagenet_stats": false
     },
     "policy": {
@@ -47,11 +48,13 @@
             }
         },
         "device": "cuda",
+        "use_amp": false,
         "storage_device": "cpu",
         "vision_encoder_name": null,
         "freeze_vision_encoder": false,
         "image_encoder_hidden_dim": 0,
         "shared_encoder": false,
+        "num_discrete_actions": null,
         "online_steps": 1000000,
         "online_env_seed": 1000,
         "online_buffer_capacity": 100000,
@@ -61,13 +64,16 @@
         "discount": 0.99,
         "temperature_init": 0.01,
         "num_critics": 2,
+        "num_subsample_critics": null,
         "critic_lr": 3e-4,
         "actor_lr": 3e-4,
         "temperature_lr": 3e-4,
         "critic_target_update_weight": 0.005,
-        "utd_ratio": 20,
+        "utd_ratio": 2,
         "state_encoder_hidden_dim": 256,
         "latent_dim": 64,
+        "target_entropy": null,
+        "use_backup_entropy": true,
         "grad_clip_norm": 10.0,
         "actor_network_kwargs": {
             "hidden_dims": [ 256, 256 ],
@@ -87,7 +93,8 @@
         "actor_learner_config": {
             "learner_host": "127.0.0.1",
             "learner_port": 50051,
-            "policy_parameters_push_frequency": 1
+            "policy_parameters_push_frequency": 1,
+            "queue_get_timeout": 2
         },
         "concurrency": {
             "actor": "threads",
@@ -97,7 +104,16 @@
     "env": {
         "type": "hil",
         "wrapper": {
-            "control_time_s": 30.0
+            "control_time_s": 15.0,
+            "reset_time_s": 2.0,
+            "control_mode": "gamepad",
+            "display_cameras": false,
+            "add_joint_velocity_to_observation": false,
+            "add_ee_pose_to_observation": false,
+            "crop_params_dict": null,
+            "resize_size": null,
+            "fixed_reset_joint_positions": null,
+            "gripper_penalty": 0.0
         },
         "name": "rl_car_online_env",
         "mode": null,
@@ -106,6 +122,12 @@
         "fps": 10,
         "use_viewer": true,
         "use_gamepad": true,
+        "repo_id": null,
+        "dataset_root": null,
+        "num_episodes": 10,
+        "episode": 0,
+        "pretrained_policy_name_or_path": null,
+        "push_to_hub": true,
         "features": {
             "observation.state": {
                 "type": "STATE",
@@ -123,6 +145,7 @@
         "features_map": {
             "observation.state": "observation.state",
             "action": "action"
-        }
+        },
+        "reward_classifier_pretrained_path": null
     }
 }
