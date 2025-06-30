@@ -57,6 +57,8 @@ class RLCarGymEnv(IsaacLabGymEnv):
         # Goal radius
         self.reach_agent_radius = 1.0
 
+        self.last_action = np.zeros(self.action_space.shape, dtype=np.float32)
+
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
         """Execute one time step within the environment."""
         # Scale the normalized action from [-1, 1] to the robot's command range
@@ -69,7 +71,7 @@ class RLCarGymEnv(IsaacLabGymEnv):
         obs = self._get_observation()
         
         # Compute reward and termination condition
-        reward, done, info = self._compute_reward_and_done(obs)
+        reward, done, info = self._compute_reward_and_done(obs, action)
 
         # The 'truncated' flag is False as we don't have a time limit in this implementation
         return obs, reward, done, False, info
@@ -89,12 +91,14 @@ class RLCarGymEnv(IsaacLabGymEnv):
         goal_pos = obs[7:9]
         self.last_distance = np.linalg.norm(robot_pos - goal_pos)
         
+        self.last_action.fill(0.0)
+        
         if self.debug:
             print(f"Environment reset. Initial distance to goal: {self.last_distance:.3f}")
         
         return obs, {}
 
-    def _compute_reward_and_done(self, obs: np.ndarray) -> Tuple[float, bool, Dict[str, Any]]:
+    def _compute_reward_and_done(self, obs: np.ndarray, action: np.ndarray) -> Tuple[float, bool, Dict[str, Any]]:
         """
         Calculates the reward, done condition, and info dict for the current step.
         """
@@ -129,6 +133,13 @@ class RLCarGymEnv(IsaacLabGymEnv):
 
         # Update last distance for the next step
         self.last_distance = distance
+        
+        # Action smoothness penalty
+        action_smoothness_penalty = np.sum(np.square(action - self.last_action))
+        reward -= 0.1 * action_smoothness_penalty  # The coefficient 0.1 can be tuned
+
+        # Update last action
+        self.last_action = action
         
         # Determine if the episode is done
         done = reached_goal or collided
