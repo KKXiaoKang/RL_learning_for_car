@@ -6,6 +6,38 @@ from gymnasium import spaces
 from gym_hil.isaacLab_gym_env import IsaacLabGymEnv
 
 
+class RunningMeanStd:
+    """
+    Calculates the running mean and standard deviation of a data stream.
+    This is useful for normalizing observations in reinforcement learning.
+    """
+
+    def __init__(self, epsilon: float = 1e-4, shape: tuple[int, ...] = ()):
+        self.mean = np.zeros(shape, np.float64)
+        self.var = np.ones(shape, np.float64)
+        self.count = epsilon
+
+    def update(self, arr: np.ndarray) -> None:
+        batch_mean = np.mean(arr, axis=0)
+        batch_var = np.var(arr, axis=0)
+        batch_count = arr.shape[0]
+        self.update_from_moments(batch_mean, batch_var, batch_count)
+
+    def update_from_moments(self, batch_mean: np.ndarray, batch_var: np.ndarray, batch_count: int) -> None:
+        delta = batch_mean - self.mean
+        tot_count = self.count + batch_count
+
+        new_mean = self.mean + delta * batch_count / tot_count
+        m_a = self.var * self.count
+        m_b = batch_var * batch_count
+        m2 = m_a + m_b + np.square(delta) * self.count * batch_count / tot_count
+        new_var = m2 / tot_count
+
+        self.mean = new_mean
+        self.var = new_var
+        self.count = tot_count
+
+
 class RLCarGymEnv(IsaacLabGymEnv):
     """
     A gymnasium environment for the RL car task in Isaac Lab.
@@ -39,6 +71,9 @@ class RLCarGymEnv(IsaacLabGymEnv):
         # Action scaling factor to map policy output to robot's physical command range
         self.action_scale = 20.0 
         
+        # Add RunningMeanStd for observation normalization
+        self.obs_rms = RunningMeanStd(shape=(21,))
+        
         # Task-specific state
         self.last_distance = float('inf')
         self.debug = debug
@@ -57,6 +92,13 @@ class RLCarGymEnv(IsaacLabGymEnv):
         # Goal radius
         self.reach_agent_radius = 1.0
 
+    def _normalize_obs(self, obs: np.ndarray) -> np.ndarray:
+        """Updates running stats and normalizes observation."""
+        self.obs_rms.update(np.array([obs]))
+        normalized_obs = (obs - self.obs_rms.mean) / np.sqrt(self.obs_rms.var + 1e-8)
+        clipped_obs = np.clip(normalized_obs, -10.0, 10.0)
+        return clipped_obs.astype(np.float32)
+
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
         """Execute one time step within the environment."""
         # Scale the normalized action from [-1, 1] to the robot's command range
@@ -65,11 +107,14 @@ class RLCarGymEnv(IsaacLabGymEnv):
         # Send the scaled action to the robot
         self._send_action(scaled_action)
         
-        # Get the next observation
-        obs = self._get_observation()
+        # Get the next raw observation
+        raw_obs = self._get_observation()
         
-        # Compute reward and termination condition
-        reward, done, info = self._compute_reward_and_done(obs)
+        # Compute reward and termination condition based on the raw observation
+        reward, done, info = self._compute_reward_and_done(raw_obs)
+
+        # Normalize the observation before returning it to the agent
+        obs = self._normalize_obs(raw_obs)
 
         # The 'truncated' flag is False as we don't have a time limit in this implementation
         return obs, reward, done, False, info
@@ -81,22 +126,26 @@ class RLCarGymEnv(IsaacLabGymEnv):
         # Reset the simulation via ROS service
         self._reset_simulation()
         
-        # Get the initial observation after reset
-        obs = self._get_observation()
+        # Get the initial raw observation after reset
+        raw_obs = self._get_observation()
         
-        # Initialize the last distance to goal
-        robot_pos = obs[0:2]
-        goal_pos = obs[7:9]
+        # Initialize the last distance to goal based on the raw observation
+        robot_pos = raw_obs[0:2]
+        goal_pos = raw_obs[7:9]
         self.last_distance = np.linalg.norm(robot_pos - goal_pos)
         
         if self.debug:
             print(f"Environment reset. Initial distance to goal: {self.last_distance:.3f}")
+        
+        # Normalize the initial observation before returning it to the agent
+        obs = self._normalize_obs(raw_obs)
         
         return obs, {}
 
     def _compute_reward_and_done(self, obs: np.ndarray) -> Tuple[float, bool, Dict[str, Any]]:
         """
         Calculates the reward, done condition, and info dict for the current step.
+        This function should use the raw, unnormalized observation.
         """
         reward = 0.0
         info = {}

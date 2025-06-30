@@ -239,6 +239,21 @@ def act_with_policy(
 
     online_env = make_robot_env(cfg=cfg.env)
 
+    # =======================================================
+    # ===== 新增代码：加载 RunningMeanStd 状态 ================
+    # =======================================================
+    if cfg.resume and hasattr(online_env, "obs_rms"):
+        obs_rms_state_path = os.path.join(cfg.output_dir, "obs_rms_state.pt")
+        if os.path.exists(obs_rms_state_path):
+            rms_state = torch.load(obs_rms_state_path)
+            online_env.obs_rms.mean = rms_state['mean']
+            online_env.obs_rms.var = rms_state['var']
+            online_env.obs_rms.count = rms_state['count']
+            logging.info(f"[ACTOR] Loaded obs_rms state from {obs_rms_state_path}")
+        else:
+            logging.warning(f"[ACTOR] Resume is true, but obs_rms_state.pt not found.")
+    # =======================================================
+    
     set_seed(cfg.seed)
     device = get_safe_torch_device(cfg.policy.device, log=True)
 
@@ -326,6 +341,21 @@ def act_with_policy(
 
         if done or truncated:
             logging.info(f"[ACTOR] Global step {interaction_step}: Episode reward: {sum_reward_episode}")
+            # =======================================================
+            # ===== 新增代码：保存 RunningMeanStd 状态 ================
+            # =======================================================
+            if hasattr(online_env, "obs_rms"):
+                obs_rms_state_path = os.path.join(cfg.output_dir, "obs_rms_state.pt")
+                rms_state = {
+                    'mean': online_env.obs_rms.mean,
+                    'var': online_env.obs_rms.var,
+                    'count': online_env.obs_rms.count,
+                }
+                torch.save(rms_state, obs_rms_state_path)
+                logging.info(f"[ACTOR] Saved obs_rms state to {obs_rms_state_path}")
+            # =======================================================
+            # ===== 新增代码：保存 RunningMeanStd 状态 ================
+            # =======================================================
 
             update_policy_parameters(policy=policy.actor, parameters_queue=parameters_queue, device=device)
 
