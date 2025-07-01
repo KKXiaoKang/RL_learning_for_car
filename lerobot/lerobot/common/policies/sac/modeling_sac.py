@@ -56,7 +56,7 @@ class SACPolicy(
         continuous_action_dim = config.output_features["action"].shape[0] # 🔥 获取连续动作维度
         self._init_normalization(dataset_stats) # 🔥 初始化归一化, 通过 dataset_stats 中的 min 和 max 对输入数据进行归一化
         self._init_encoders() # 🔥 初始化编码器
-        self._init_critics(continuous_action_dim) # 初始化critic
+        self._init_critics(continuous_action_dim) # 🔥 初始化critic
         self._init_actor(continuous_action_dim) # 初始化actor
         self._init_temperature() # 初始化温度
 
@@ -421,7 +421,30 @@ class SACPolicy(
         )
 
     def _init_critics(self, continuous_action_dim):
+        """
+                观测输入 → SACObservationEncoder → 观测编码 (256维)
+                动作输入 → 动作归一化 → 归一化动作 (2维)
+                                        ↓
+                                    拼接 (258维)
+                                        ↓
+                                CriticHead 1: MLP(258→256→256→1) → Q1
+                                        ↓
+                                CriticHead 2: MLP(258→256→256→1) → Q2
+                                        ↓
+                                    输出: [2, batch_size] 的Q值张量    
+        """
         """Build critic ensemble, targets, and optional discrete critic."""
+        # 步骤1: 初始化 当前Q网络(据数量初始化多个当前Q网络)
+        """
+        举例:
+            可以混合不同类型的评论家头
+            mixed_heads = [
+                CriticHead(input_dim, [256, 256]),  # 标准评论家
+                CustomCriticHead(input_dim, [512, 256]),  # 自定义评论家
+                LightweightCriticHead(input_dim, [128, 128])  # 轻量级评论家
+            ]
+            ensemble = CriticEnsemble(encoder, mixed_heads, normalization)
+        """
         heads = [
             CriticHead(
                 input_dim=self.encoder_critic.output_dim + continuous_action_dim,
@@ -432,6 +455,7 @@ class SACPolicy(
         self.critic_ensemble = CriticEnsemble(
             encoder=self.encoder_critic, ensemble=heads, output_normalization=self.normalize_targets
         )
+        # 步骤2: 初始化 目标Q网络(根据数量初始化多个目标Q网络)
         target_heads = [
             CriticHead(
                 input_dim=self.encoder_critic.output_dim + continuous_action_dim,
@@ -442,12 +466,15 @@ class SACPolicy(
         self.critic_target = CriticEnsemble(
             encoder=self.encoder_critic, ensemble=target_heads, output_normalization=self.normalize_targets
         )
+        # 步骤3: 将当前Q网络的参数加载到目标Q网络
         self.critic_target.load_state_dict(self.critic_ensemble.state_dict())
 
+        # 步骤4: 使用torch.compile 编译当前Q网络和目标Q网络 - 编译优化
         if self.config.use_torch_compile:
             self.critic_ensemble = torch.compile(self.critic_ensemble)
             self.critic_target = torch.compile(self.critic_target)
 
+        # 步骤5: 初始化 离散Q网络(根据数量初始化多个离散Q网络) - 离散Q的网络用于末端执行器的抓/放
         if self.config.num_discrete_actions is not None:
             self._init_discrete_critics()
 
@@ -674,6 +701,9 @@ class SACObservationEncoder(nn.Module):
 
     @property
     def output_dim(self) -> int:
+        """
+            输出观测编码的维度
+        """
         return self._out_dim
 
 
@@ -735,6 +765,11 @@ class MLP(nn.Module):
 
 
 class CriticHead(nn.Module):
+    """
+    职责: 实现单个Q值网络的逻辑
+    输入: 观测编码 + 归一化动作
+    输出: Q值
+    """
     def __init__(
         self,
         input_dim: int,
@@ -776,6 +811,11 @@ class CriticEnsemble(nn.Module):
         init_final (float | None): optional initializer scale for final layers.
 
     Forward returns a tensor of shape (num_critics, batch_size) containing Q-values.
+
+    管理多个CriticHead模块的集合
+    职责: 管理多个CriticHead模块的集合
+    输入: 观测编码 + 归一化动作
+    输出: Q值向量
     """
 
     def __init__(

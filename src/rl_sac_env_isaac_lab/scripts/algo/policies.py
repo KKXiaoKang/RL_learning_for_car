@@ -170,8 +170,8 @@ class SACPolicy(nn.Module):
         super().__init__()
         # 创建actor和critic
         self.actor = Actor(observation_space, action_space, net_arch, activation_fn)
-        self.critic = ContinuousCritic(observation_space, action_space, net_arch, activation_fn)
-        self.critic_target = ContinuousCritic(observation_space, action_space, net_arch, activation_fn)
+        self.critic = ContinuousCritic(observation_space, action_space, net_arch, activation_fn) # 双Q网络
+        self.critic_target = ContinuousCritic(observation_space, action_space, net_arch, activation_fn) # 双Q网络
         self.critic_target.load_state_dict(self.critic.state_dict())
         
         # 自动熵调整
