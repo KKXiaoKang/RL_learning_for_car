@@ -217,7 +217,9 @@ class SACConfig(PreTrainedConfig):
         return None
 
     def validate_features(self) -> None:
+        """ 检查config当中是否有任何输入特征键以observation.image开头"""
         has_image = any(is_image_feature(key) for key in self.input_features)
+        """ 检查config当中是否有observation.state特征键 | 如果没有则报错 """
         has_state = OBS_STATE in self.input_features
 
         if not (has_state or has_image):
@@ -225,6 +227,7 @@ class SACConfig(PreTrainedConfig):
                 "You must provide either 'observation.state' or an image observation (key starting with 'observation.image') in the input features"
             )
 
+        """ 检查config当中是否有action特征键 | 如果没有则报错 """
         if "action" not in self.output_features:
             raise ValueError("You must provide 'action' in the output features")
 

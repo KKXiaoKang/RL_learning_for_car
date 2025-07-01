@@ -46,17 +46,19 @@ class SACPolicy(
         config: SACConfig | None = None,
         dataset_stats: dict[str, dict[str, Tensor]] | None = None,
     ):
+        # 通过配置文件初始化父类
         super().__init__(config)
-        config.validate_features()
+        # 验证输入输出特征
+        config.validate_features() 
         self.config = config
 
         # Determine action dimension and initialize all components
-        continuous_action_dim = config.output_features["action"].shape[0]
-        self._init_normalization(dataset_stats)
-        self._init_encoders()
-        self._init_critics(continuous_action_dim)
-        self._init_actor(continuous_action_dim)
-        self._init_temperature()
+        continuous_action_dim = config.output_features["action"].shape[0] # 🔥 获取连续动作维度
+        self._init_normalization(dataset_stats) # 🔥 初始化归一化, 通过 dataset_stats 中的 min 和 max 对输入数据进行归一化
+        self._init_encoders() # 🔥 初始化编码器
+        self._init_critics(continuous_action_dim) # 初始化critic
+        self._init_actor(continuous_action_dim) # 初始化actor
+        self._init_temperature() # 初始化温度
 
     def get_optim_params(self) -> dict:
         optim_params = {
@@ -387,14 +389,23 @@ class SACPolicy(
 
     def _init_normalization(self, dataset_stats):
         """Initialize input/output normalization modules."""
-        self.normalize_inputs = nn.Identity()
-        self.normalize_targets = nn.Identity()
-        if self.config.dataset_stats is not None:
-            params = _convert_normalization_params_to_tensor(self.config.dataset_stats)
+        self.normalize_inputs = nn.Identity()  # 网络层占位初始化
+        self.normalize_targets = nn.Identity() # 网络层占位初始化
+        """
+            pre-train 阶段使用config当中的dataset_stats对输入数据进行归一化
+            eval 阶段使用 ./pretrained_model/config.json 当中的dataset_stats对输出数据进行归一化
+        """
+        if self.config.dataset_stats is not None: # 如果config当中定义了dataset_stats
+            params = _convert_normalization_params_to_tensor(self.config.dataset_stats) # 将归一化参数转换为张量
             self.normalize_inputs = NormalizeBuffer(
                 self.config.input_features, self.config.normalization_mapping, params
             )
-            stats = dataset_stats or params
+            """
+                优先使用dataset_stats中的min和max对输出数据进行归一化, 
+                如果dataset_stats为None
+                则使用params对输出数据进行归一化
+            """
+            stats = dataset_stats or params # 如果dataset_stats 为None，则使用params
             self.normalize_targets = NormalizeBuffer(
                 self.config.output_features, self.config.normalization_mapping, stats
             )
@@ -580,14 +591,14 @@ class SACObservationEncoder(nn.Module):
         parts = []
         if self.has_images:
             if cache is None:
-                cache = self.get_cached_image_features(obs, normalize=False)
-            parts.append(self._encode_images(cache, detach))
-        if self.has_env:
-            parts.append(self.env_encoder(obs["observation.environment_state"]))
-        if self.has_state:
-            parts.append(self.state_encoder(obs["observation.state"]))
+                cache = self.get_cached_image_features(obs, normalize=False) # 输入obs，返回缓存ResNet10的特征
+            parts.append(self._encode_images(cache, detach)) # 编码图像
+        if self.has_env: # 如果config当中定义了observation.environment_state
+            parts.append(self.env_encoder(obs["observation.environment_state"])) # 编码环境状态
+        if self.has_state: # 如果config当中定义了observation.state
+            parts.append(self.state_encoder(obs["observation.state"])) # 编码状态
         if parts:
-            return torch.cat(parts, dim=-1)
+            return torch.cat(parts, dim=-1) # 将所有部分拼接在一起
 
         raise ValueError(
             "No parts to concatenate, you should have at least one image or environment state or state"
@@ -624,11 +635,11 @@ class SACObservationEncoder(nn.Module):
             Dictionary mapping image keys to their corresponding encoded features
         """
         if normalize:
-            obs = self.input_normalization(obs)
-        batched = torch.cat([obs[k] for k in self.image_keys], dim=0)
-        out = self.image_encoder(batched)
-        chunks = torch.chunk(out, len(self.image_keys), dim=0)
-        return dict(zip(self.image_keys, chunks, strict=False))
+            obs = self.input_normalization(obs) # 归一化图像
+        batched = torch.cat([obs[k] for k in self.image_keys], dim=0) # 🔥 关键步骤：只提取图像键对应的数据, 同时拼接在一起
+        out = self.image_encoder(batched) # 🔥 这里调用 ResNet10 直接输入图片 输出out 输出out 是 1024 维的特征
+        chunks = torch.chunk(out, len(self.image_keys), dim=0) # 将输出分割为多个小块
+        return dict(zip(self.image_keys, chunks, strict=False)) # 返回字典，键为图像键，值为小块
 
     def _encode_images(self, cache: dict[str, Tensor], detach: bool) -> Tensor:
         """Encode image features from cached observations.
@@ -644,16 +655,22 @@ class SACObservationEncoder(nn.Module):
 
         Returns:
             Tensor: The encoded image features.
+        
+        cache:缓存ResNet10的特征 
+        更多细节见 `https://cdn.aaai.org/ojs/17276/17276-13-20770-1-2-20210518.pdf`
+
+        detach: 当编码器在actor和critic之间共享时, 我们希望在policy actor侧分离编码器以避免通过编码器进行反向传播,但是可以编码器只通过 critic 的梯度更新
+        更多细节见 `https://cdn.aaai.org/ojs/17276/17276-13-20770-1-2-20210518.pdf`
         """
-        feats = []
-        for k, feat in cache.items():
-            safe_key = k.replace(".", "_")
-            x = self.spatial_embeddings[safe_key](feat)
-            x = self.post_encoders[safe_key](x)
+        feats = [] # 存储编码后的特征
+        for k, feat in cache.items(): # 遍历缓存中的特征
+            safe_key = k.replace(".", "_") # 将特征键中的点替换为下划线
+            x = self.spatial_embeddings[safe_key](feat) # 将特征通过空间学习嵌入
+            x = self.post_encoders[safe_key](x) # 保持梯度传播
             if detach:
-                x = x.detach()
-            feats.append(x)
-        return torch.cat(feats, dim=-1)
+                x = x.detach() # 如果detach为True，则将特征分离
+            feats.append(x) # 将编码后的特征添加到列表中
+        return torch.cat(feats, dim=-1) # 将所有特征拼接在一起
 
     @property
     def output_dim(self) -> int:
@@ -999,7 +1016,7 @@ class PretrainedImageEncoder(nn.Module):
         return self.image_enc_layers, self.image_enc_out_shape
 
     def forward(self, x):
-        enc_feat = self.image_enc_layers(x).last_hidden_state
+        enc_feat = self.image_enc_layers(x).last_hidden_state # 🔥 这里调用 ResNet10
         return enc_feat
 
 
@@ -1120,6 +1137,7 @@ def _convert_normalization_params_to_tensor(normalization_params: dict) -> dict:
         for key, value in inner_dict.items():
             converted_params[outer_key][key] = torch.tensor(value)
             if "image" in outer_key:
+                # 图像数据需要特殊处理：将形状调整为 (3, 1, 1) 以便广播
                 converted_params[outer_key][key] = converted_params[outer_key][key].view(3, 1, 1)
 
     return converted_params
