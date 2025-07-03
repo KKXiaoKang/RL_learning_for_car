@@ -196,17 +196,19 @@ def wrap(config_path: Path | None = None):
             from the CLI '.type' arguments
     """
 
-    def wrapper_outer(fn):
+    def wrapper_outer(fn): # `fn` 在这里就是 train_cli
         @wraps(fn)
-        def wrapper_inner(*args, **kwargs):
-            argspec = inspect.getfullargspec(fn)
-            argtype = argspec.annotations[argspec.args[0]]
-            if len(args) > 0 and type(args[0]) is argtype:
+        def wrapper_inner(*args, **kwargs): # 这个函数会替代 train_cli 被执行
+            argspec = inspect.getfullargspec(fn) # inspect 检查被装饰的函数fn的参数类型
+            argtype = argspec.annotations[argspec.args[0]] # 获取函数参数的类型，在lerobo当中为TrainRLServerPipelineConfig
+            if len(args) > 0 and type(args[0]) is argtype: 
                 cfg = args[0]
                 args = args[1:]
             else:
-                cli_args = sys.argv[1:]
-                plugin_args = parse_plugin_args(PLUGIN_DISCOVERY_SUFFIX, cli_args)
+                # 从命令行获取所有参数
+                cli_args = sys.argv[1:] # ["--config_path", "config/Isaac_lab_car_env/train/train_gym_hil_env_xbox.json"]
+                plugin_args = parse_plugin_args(PLUGIN_DISCOVERY_SUFFIX, cli_args) # 解析插件参数
+                # 加载插件
                 for plugin_cli_arg, plugin_path in plugin_args.items():
                     try:
                         load_plugin(plugin_path)
@@ -214,15 +216,21 @@ def wrap(config_path: Path | None = None):
                         # add the relevant CLI arg to the error message
                         raise PluginLoadError(f"{e}\nFailed plugin CLI Arg: {plugin_cli_arg}") from e
                     cli_args = filter_arg(plugin_cli_arg, cli_args)
+                
+                # 查找名为 "config_path" 的参数
                 config_path_cli = parse_arg("config_path", cli_args)
+                # 如果传入参数包含了 --policy.path 会触发覆盖效果policy的部分
                 if has_method(argtype, "__get_path_fields__"):
-                    path_fields = argtype.__get_path_fields__()
+                    # config配置从这里读取加载
+                    path_fields = argtype.__get_path_fields__() # 调用类当中的 __get_path_fields__ 方法，获取需要过滤的参数，得到返回列表policy
                     cli_args = filter_path_args(path_fields, cli_args)
+                # 如果传入参数包含了 --config_path 调用类方法从from_pretrained读取配置
                 if has_method(argtype, "from_pretrained") and config_path_cli:
                     cli_args = filter_arg("config_path", cli_args)
-                    cfg = argtype.from_pretrained(config_path_cli, cli_args=cli_args)
+                    cfg = argtype.from_pretrained(config_path_cli, cli_args=cli_args) # 调用类的 from_pretrained 方法加载配置
                 else:
                     cfg = draccus.parse(config_class=argtype, config_path=config_path, args=cli_args)
+            # 调用原始函数 fn，并传入创建好的 cfg 对象
             response = fn(cfg, *args, **kwargs)
             return response
 

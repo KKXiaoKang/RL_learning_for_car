@@ -786,9 +786,15 @@ def concatenate_batch_transitions(
     Warning:
         This function modifies the left_batch_transitions object in place.
     """
+    """
+        # 假设在线批次有32个样本 | 离线批次有32个样本
+        # 在线状态: {"observation.image": torch.Size([32, 3, 84, 84])}
+        # 离线状态: {"observation.image": torch.Size([32, 3, 84, 84])}
+        # 融合后: {"observation.image": torch.Size([64, 3, 84, 84])}
+    """
     # Concatenate state fields
     left_batch_transitions["state"] = {
-        key: torch.cat(
+        key: torch.cat( # 特征融合 torch.cat
             [left_batch_transitions["state"][key], right_batch_transition["state"][key]],
             dim=0,
         )
@@ -796,16 +802,16 @@ def concatenate_batch_transitions(
     }
 
     # Concatenate basic fields
-    left_batch_transitions["action"] = torch.cat(
+    left_batch_transitions["action"] = torch.cat( # 特征融合 torch.cat
         [left_batch_transitions["action"], right_batch_transition["action"]], dim=0
     )
-    left_batch_transitions["reward"] = torch.cat(
+    left_batch_transitions["reward"] = torch.cat( # 特征融合 torch.cat
         [left_batch_transitions["reward"], right_batch_transition["reward"]], dim=0
     )
 
     # Concatenate next_state fields
     left_batch_transitions["next_state"] = {
-        key: torch.cat(
+        key: torch.cat( # 特征融合 torch.cat
             [left_batch_transitions["next_state"][key], right_batch_transition["next_state"][key]],
             dim=0,
         )
@@ -813,10 +819,10 @@ def concatenate_batch_transitions(
     }
 
     # Concatenate done and truncated fields
-    left_batch_transitions["done"] = torch.cat(
+    left_batch_transitions["done"] = torch.cat( # 特征融合 torch.cat
         [left_batch_transitions["done"], right_batch_transition["done"]], dim=0
     )
-    left_batch_transitions["truncated"] = torch.cat(
+    left_batch_transitions["truncated"] = torch.cat( # 特征融合 torch.cat
         [left_batch_transitions["truncated"], right_batch_transition["truncated"]],
         dim=0,
     )
@@ -834,7 +840,7 @@ def concatenate_batch_transitions(
             # Concatenate each field
             for key in right_info:
                 if key in left_info:
-                    left_info[key] = torch.cat([left_info[key], right_info[key]], dim=0)
+                    left_info[key] = torch.cat([left_info[key], right_info[key]], dim=0) # 特征融合 torch.cat
                 else:
                     left_info[key] = right_info[key]
 

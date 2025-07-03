@@ -256,358 +256,436 @@ def start_learner_threads(
 
 
 def add_actor_information_and_train(
-    cfg: TrainRLServerPipelineConfig,
-    wandb_logger: WandBLogger | None,
-    shutdown_event: any,  # Event,
-    transition_queue: Queue,
-    interaction_message_queue: Queue,
-    parameters_queue: Queue,
+    cfg: TrainRLServerPipelineConfig,  # 训练配置对象，包含所有超参数和设置
+    wandb_logger: WandBLogger | None,  # Weights & Biases日志记录器，用于跟踪训练进度
+    shutdown_event: any,  # Event,  # 用于信号关闭的事件对象
+    transition_queue: Queue,  # 用于接收来自Actor的转换数据（经验）的队列
+    interaction_message_queue: Queue,  # 用于接收来自Actor的交互消息的队列
+    parameters_queue: Queue,  # 用于向Actor发送策略参数的队列
 ):
     """
-    Handles data transfer from the actor to the learner, manages training updates,
-    and logs training progress in an online reinforcement learning setup.
+    处理从Actor到Learner的数据传输，管理训练更新，并在在线强化学习设置中记录训练进度。
 
-    This function continuously:
-    - Transfers transitions from the actor to the replay buffer.
-    - Logs received interaction messages.
-    - Ensures training begins only when the replay buffer has a sufficient number of transitions.
-    - Samples batches from the replay buffer and performs multiple critic updates.
-    - Periodically updates the actor, critic, and temperature optimizers.
-    - Logs training statistics, including loss values and optimization frequency.
+    此函数持续执行以下操作：
+    - 将转换数据从Actor传输到回放缓冲区
+    - 记录接收到的交互消息
+    - 确保只有在回放缓冲区有足够数量的转换数据时才开始训练
+    - 从回放缓冲区采样批次并执行多次评论家更新
+    - 定期更新Actor、评论家和温度优化器
+    - 记录训练统计信息，包括损失值和优化频率
 
-    NOTE: This function doesn't have a single responsibility, it should be split into multiple functions
-    in the future. The reason why we did that is the  GIL in Python. It's super slow the performance
-    are divided by 200. So we need to have a single thread that does all the work.
+    注意：此函数没有单一职责，将来应该拆分为多个函数。
+    我们这样做的原因是Python的GIL（全局解释器锁）。性能会降低200倍，所以我们需要一个执行所有工作的单线程。
 
-    Args:
-        cfg (TrainRLServerPipelineConfig): Configuration object containing hyperparameters.
-        wandb_logger (WandBLogger | None): Logger for tracking training progress.
-        shutdown_event (Event): Event to signal shutdown.
-        transition_queue (Queue): Queue for receiving transitions from the actor.
-        interaction_message_queue (Queue): Queue for receiving interaction messages from the actor.
-        parameters_queue (Queue): Queue for sending policy parameters to the actor.
+    参数：
+        cfg (TrainRLServerPipelineConfig): 包含超参数的配置对象
+        wandb_logger (WandBLogger | None): 用于跟踪训练进度的日志记录器
+        shutdown_event (Event): 用于信号关闭的事件
+        transition_queue (Queue): 用于接收来自Actor的转换数据的队列
+        interaction_message_queue (Queue): 用于接收来自Actor的交互消息的队列
+        parameters_queue (Queue): 用于向Actor发送策略参数的队列
     """
-    # Extract all configuration variables at the beginning, it improve the speed performance
-    # of 7%
-    device = get_safe_torch_device(try_device=cfg.policy.device, log=True)
+    # 在开始时提取所有配置变量，这可以提高7%的速度性能
+    # 为PyTorch操作设置主要的计算设备（例如 'cuda' 或 'cpu'）
+    device = get_safe_torch_device(try_device=cfg.policy.device, log=True) 
+    # 为回放缓冲区（Replay Buffer）设置存储设备，通常是 'cpu'，以节省宝贵的GPU显存
     storage_device = get_safe_torch_device(try_device=cfg.policy.storage_device)
+    # 梯度裁剪的最大范数值，用于防止梯度爆炸，稳定训练
     clip_grad_norm_value = cfg.policy.grad_clip_norm
+    # 在正式开始学习前，需要从环境中收集的初始经验（transition）数量
     online_step_before_learning = cfg.policy.online_step_before_learning
+    # 更新与数据比率（Update-to-Data Ratio），表示每从环境中获取一个新样本，就进行多少次梯度更新
     utd_ratio = cfg.policy.utd_ratio
+    # 环境的帧率（Frames Per Second），主要用于保存数据集时的元数据
     fps = cfg.env.fps
+    # 记录训练指标（如损失函数值）的频率，以优化步骤（optimization step）为单位
     log_freq = cfg.log_freq
+    # 保存模型检查点（checkpoint）的频率，以优化步骤为单位
     save_freq = cfg.save_freq
+    # 策略网络（Actor）和温度参数（Temperature）的更新频率，相对于评论家网络（Critic）的更新
     policy_update_freq = cfg.policy.policy_update_freq
+    # 将更新后的策略参数推送到Actor的频率，以秒为单位
     policy_parameters_push_frequency = cfg.policy.actor_learner_config.policy_parameters_push_frequency
+    # 是否启用保存检查点功能的布尔标志
     saving_checkpoint = cfg.save_checkpoint
+    # 在线训练的总步数
     online_steps = cfg.policy.online_steps
+    # 是否为数据加载器启用异步预取功能，以提高数据加载效率
     async_prefetch = cfg.policy.async_prefetch
 
-    # Initialize logging for multiprocessing
-    if not use_threads(cfg):
+    # 为多进程初始化日志记录
+    if not use_threads(cfg):  # 如果不是使用线程模式（即使用多进程模式）
+        # 创建日志目录
         log_dir = os.path.join(cfg.output_dir, "logs")
+        # 确保日志目录存在
         os.makedirs(log_dir, exist_ok=True)
+        # 为当前进程创建特定的日志文件
         log_file = os.path.join(log_dir, f"learner_train_process_{os.getpid()}.log")
+        # 初始化日志记录，显示进程ID
         init_logging(log_file=log_file, display_pid=True)
+        # 记录日志初始化完成的信息
         logging.info("Initialized logging for actor information and training process")
 
+    # 记录开始初始化策略的信息
     logging.info("Initializing policy")
 
+    # 创建策略网络（Policy），这是强化学习中的核心组件，负责根据环境状态选择动作
     policy: SACPolicy = make_policy(
-        cfg=cfg.policy,
-        env_cfg=cfg.env,
+        cfg=cfg.policy,  # 策略配置
+        env_cfg=cfg.env,  # 环境配置
     )
 
+    # 确保策略是一个神经网络模块
     assert isinstance(policy, nn.Module)
 
+    # 将策略网络设置为训练模式，启用梯度计算
     policy.train()
 
+    # 将策略网络的参数推送到Actor，以便Actor可以开始使用这个策略
     push_actor_policy_to_queue(parameters_queue=parameters_queue, policy=policy)
 
+    # 记录上次推送策略的时间，用于控制推送频率
     last_time_policy_pushed = time.time()
 
+    # 创建优化器（例如 Adam）和学习率调度器（本实现中为 None）
     optimizers, lr_scheduler = make_optimizers_and_scheduler(cfg=cfg, policy=policy)
 
-    # If we are resuming, we need to load the training state
+    # 如果需要恢复训练，则从上次的优化步骤和交互步骤开始
     resume_optimization_step, resume_interaction_step = load_training_state(cfg=cfg, optimizers=optimizers)
 
+    # 记录策略网络的初始信息，包括网络结构和参数数量
     log_training_info(cfg=cfg, policy=policy)
 
+    # 初始化回放缓冲区（Replay Buffer），用于存储从环境中收集的经验数据 - 在线Buffer
     replay_buffer = initialize_replay_buffer(cfg, device, storage_device)
+    # 设置批量大小（Batch Size），用于控制每次训练的样本数量
     batch_size = cfg.batch_size
+    # 初始化离线回放缓冲区（Offline Replay Buffer），用于存储从数据集加载的经验数据
     offline_replay_buffer = None
 
-    if cfg.dataset is not None:
+    # 如果配置中指定了数据集，则初始化离线回放缓冲区
+    if cfg.dataset is not None:  # 如果配置中包含数据集信息
+        # 初始化离线回放缓冲区
         offline_replay_buffer = initialize_offline_replay_buffer(
-            cfg=cfg,
-            device=device,
-            storage_device=storage_device,
+            cfg=cfg,  # 配置对象
+            device=device,  # 计算设备
+            storage_device=storage_device,  # 存储设备
         )
+        # 如果同时使用在线和离线数据，则将批量大小减半，因为我们将从两个缓冲区采样
         batch_size: int = batch_size // 2  # We will sample from both replay buffer
 
+    # 记录开始学习者线程的信息
     logging.info("Starting learner thread")
-    interaction_message = None
+    # 初始化人工干预信息变量
+    interaction_message = None # 人工干预信息
+    # 设置优化步骤计数器，如果恢复训练则从上次的步骤开始，否则从0开始
     optimization_step = resume_optimization_step if resume_optimization_step is not None else 0
+    # 设置交互步骤偏移量，用于处理恢复训练时的步骤计数
     interaction_step_shift = resume_interaction_step if resume_interaction_step is not None else 0
 
+    # 初始化数据集仓库ID变量
     dataset_repo_id = None
+    # 如果配置中包含数据集信息，则获取数据集仓库ID
     if cfg.dataset is not None:
         dataset_repo_id = cfg.dataset.repo_id
 
-    # Initialize iterators
-    online_iterator = None
-    offline_iterator = None
+    # 初始化迭代器变量
+    online_iterator = None  # 在线数据迭代器
+    offline_iterator = None  # 离线数据迭代器
 
-    # NOTE: THIS IS THE MAIN LOOP OF THE LEARNER
+    # 注意：这是学习者的主循环
     while True:
-        # Exit the training loop if shutdown is requested
+        # 如果请求关闭，则退出训练循环
         if shutdown_event is not None and shutdown_event.is_set():
             logging.info("[LEARNER] Shutdown signal received. Exiting...")
             break
 
-        # Process all available transitions to the replay buffer, send by the actor server
+        # 处理所有可用的转换数据到回放缓冲区，这些数据由Actor服务器发送
         process_transitions(
-            transition_queue=transition_queue,
-            replay_buffer=replay_buffer,
-            offline_replay_buffer=offline_replay_buffer,
-            device=device,
-            dataset_repo_id=dataset_repo_id,
-            shutdown_event=shutdown_event,
+            transition_queue=transition_queue,  # 转换数据队列
+            replay_buffer=replay_buffer,  # 在线回放缓冲区
+            offline_replay_buffer=offline_replay_buffer,  # 离线回放缓冲区
+            device=device,  # 计算设备
+            dataset_repo_id=dataset_repo_id,  # 数据集仓库ID
+            shutdown_event=shutdown_event,  # 关闭事件
         )
 
-        # Process all available interaction messages sent by the actor server
+        # 处理所有可用的交互消息，这些消息由Actor服务器发送
         interaction_message = process_interaction_messages(
-            interaction_message_queue=interaction_message_queue,
-            interaction_step_shift=interaction_step_shift,
-            wandb_logger=wandb_logger,
-            shutdown_event=shutdown_event,
+            interaction_message_queue=interaction_message_queue,  # 交互消息队列
+            interaction_step_shift=interaction_step_shift,  # 交互步骤偏移量
+            wandb_logger=wandb_logger,  # 日志记录器
+            shutdown_event=shutdown_event,  # 关闭事件
         )
 
-        # Wait until the replay buffer has enough samples to start training
+        # 等待直到回放缓冲区有足够的样本开始训练
         if len(replay_buffer) < online_step_before_learning:
             continue
 
+        # 如果在线迭代器还没有初始化，则创建它
         if online_iterator is None:
             online_iterator = replay_buffer.get_iterator(
-                batch_size=batch_size, async_prefetch=async_prefetch, queue_size=2
+                batch_size=batch_size,  # 批量大小
+                async_prefetch=async_prefetch,  # 是否异步预取
+                queue_size=2  # 队列大小
             )
 
+        # 如果有离线回放缓冲区且离线迭代器还没有初始化，则创建它
         if offline_replay_buffer is not None and offline_iterator is None:
             offline_iterator = offline_replay_buffer.get_iterator(
-                batch_size=batch_size, async_prefetch=async_prefetch, queue_size=2
+                batch_size=batch_size,  # 批量大小
+                async_prefetch=async_prefetch,  # 是否异步预取
+                queue_size=2  # 队列大小
             )
 
+        # 记录一次优化步骤开始的时间
         time_for_one_optimization_step = time.time()
+        # 执行UTD比率减1次数的优化步骤（除了最后一次）
         for _ in range(utd_ratio - 1):
-            # Sample from the iterators
-            batch = next(online_iterator)
+            # 从迭代器中采样数据
+            batch = next(online_iterator) # 根据batch_size大小遍历online_iterator
 
+            # 如果有离线数据集，则同时采样离线数据
             if dataset_repo_id is not None:
-                batch_offline = next(offline_iterator)
+                batch_offline = next(offline_iterator) # 根据batch_size大小遍历offline_iterator
+                # 将在线和离线批次数据连接起来 torch.cat
                 batch = concatenate_batch_transitions(
-                    left_batch_transitions=batch, right_batch_transition=batch_offline
+                    left_batch_transitions=batch,  # 在线批次
+                    right_batch_transition=batch_offline  # 离线批次
                 )
 
-            actions = batch["action"]
-            rewards = batch["reward"]
-            observations = batch["state"]
-            next_observations = batch["next_state"]
-            done = batch["done"]
+            # 从批次中提取各个组件 - 基础四元组 (s, a, s', r) - 后面添加一个基础任务完成位 done
+            actions = batch["action"]  # 动作
+            rewards = batch["reward"]  # 奖励
+            observations = batch["state"]  # 当前状态
+            next_observations = batch["next_state"]  # 下一状态
+            done = batch["done"]  # 完成标志
+            # 检查转换数据中是否有NaN值
             check_nan_in_transition(observations=observations, actions=actions, next_state=next_observations)
 
+            # 获取观测特征和下一观测特征
             observation_features, next_observation_features = get_observation_features(
-                policy=policy, observations=observations, next_observations=next_observations
+                policy=policy,  # 策略网络
+                observations=observations,  # 当前观测
+                next_observations=next_observations  # 下一观测
             )
 
-            # Create a batch dictionary with all required elements for the forward method
+            # 创建包含前向传播所需所有元素的批次字典
             forward_batch = {
-                "action": actions,
-                "reward": rewards,
-                "state": observations,
-                "next_state": next_observations,
-                "done": done,
-                "observation_feature": observation_features,
-                "next_observation_feature": next_observation_features,
-                "complementary_info": batch["complementary_info"],
+                "action": actions,  # 动作
+                "reward": rewards,  # 奖励
+                "state": observations,  # 当前状态
+                "next_state": next_observations,  # 下一状态
+                "done": done,  # 完成标志
+                "observation_feature": observation_features,  # 观测特征
+                "next_observation_feature": next_observation_features,  # 下一观测特征
+                "complementary_info": batch["complementary_info"],  # 补充信息
             }
 
-            # Use the forward method for critic loss
+            # 使用前向传播方法计算评论家损失
             critic_output = policy.forward(forward_batch, model="critic")
 
-            # Main critic optimization
-            loss_critic = critic_output["loss_critic"]
-            optimizers["critic"].zero_grad()
-            loss_critic.backward()
+            # 主要的评论家优化
+            loss_critic = critic_output["loss_critic"]  # 获取评论家损失
+            optimizers["critic"].zero_grad()  # 清零评论家优化器的梯度
+            loss_critic.backward()  # 反向传播
+            # 对评论家网络参数进行梯度裁剪
             critic_grad_norm = torch.nn.utils.clip_grad_norm_(
-                parameters=policy.critic_ensemble.parameters(), max_norm=clip_grad_norm_value
+                parameters=policy.critic_ensemble.parameters(),  # 评论家集成网络的参数
+                max_norm=clip_grad_norm_value  # 最大梯度范数
             )
-            optimizers["critic"].step()
+            optimizers["critic"].step()  # 更新评论家网络参数
 
-            # Discrete critic optimization (if available)
-            if policy.config.num_discrete_actions is not None:
+            # 离散评论家优化（如果可用）
+            if policy.config.num_discrete_actions is not None:  # 如果有离散动作
+                # 计算离散评论家输出
                 discrete_critic_output = policy.forward(forward_batch, model="discrete_critic")
-                loss_discrete_critic = discrete_critic_output["loss_discrete_critic"]
-                optimizers["discrete_critic"].zero_grad()
-                loss_discrete_critic.backward()
+                loss_discrete_critic = discrete_critic_output["loss_discrete_critic"]  # 获取离散评论家损失
+                optimizers["discrete_critic"].zero_grad()  # 清零离散评论家优化器的梯度
+                loss_discrete_critic.backward()  # 反向传播
+                # 对离散评论家网络参数进行梯度裁剪
                 discrete_critic_grad_norm = torch.nn.utils.clip_grad_norm_(
-                    parameters=policy.discrete_critic.parameters(), max_norm=clip_grad_norm_value
+                    parameters=policy.discrete_critic.parameters(),  # 离散评论家网络参数
+                    max_norm=clip_grad_norm_value  # 最大梯度范数
                 )
-                optimizers["discrete_critic"].step()
+                optimizers["discrete_critic"].step()  # 更新离散评论家网络参数
 
-            # Update target networks (main and discrete)
+            # 更新目标网络（主要和离散）
             policy.update_target_networks()
 
-        # Sample for the last update in the UTD ratio
+        # 为UTD比率中的最后一次更新采样数据
         batch = next(online_iterator)
 
+        # 如果有离线数据集，则同时采样离线数据
         if dataset_repo_id is not None:
             batch_offline = next(offline_iterator)
+            # 将在线和离线批次数据连接起来
             batch = concatenate_batch_transitions(
-                left_batch_transitions=batch, right_batch_transition=batch_offline
+                left_batch_transitions=batch,  # 在线批次
+                right_batch_transition=batch_offline  # 离线批次
             )
 
-        actions = batch["action"]
-        rewards = batch["reward"]
-        observations = batch["state"]
-        next_observations = batch["next_state"]
-        done = batch["done"]
+        # 从批次中提取各个组件
+        actions = batch["action"]  # 动作
+        rewards = batch["reward"]  # 奖励
+        observations = batch["state"]  # 当前状态
+        next_observations = batch["next_state"]  # 下一状态
+        done = batch["done"]  # 完成标志
 
+        # 检查转换数据中是否有NaN值
         check_nan_in_transition(observations=observations, actions=actions, next_state=next_observations)
 
+        # 获取观测特征和下一观测特征
         observation_features, next_observation_features = get_observation_features(
-            policy=policy, observations=observations, next_observations=next_observations
+            policy=policy,  # 策略网络
+            observations=observations,  # 当前观测
+            next_observations=next_observations  # 下一观测
         )
 
-        # Create a batch dictionary with all required elements for the forward method
+        # 创建包含前向传播所需所有元素的批次字典
         forward_batch = {
-            "action": actions,
-            "reward": rewards,
-            "state": observations,
-            "next_state": next_observations,
-            "done": done,
-            "observation_feature": observation_features,
-            "next_observation_feature": next_observation_features,
+            "action": actions,  # 动作
+            "reward": rewards,  # 奖励
+            "state": observations,  # 当前状态
+            "next_state": next_observations,  # 下一状态
+            "done": done,  # 完成标志
+            "observation_feature": observation_features,  # 观测特征
+            "next_observation_feature": next_observation_features,  # 下一观测特征
         }
 
+        # 计算评论家输出
         critic_output = policy.forward(forward_batch, model="critic")
 
-        loss_critic = critic_output["loss_critic"]
-        optimizers["critic"].zero_grad()
-        loss_critic.backward()
+        # 获取评论家损失并进行优化
+        loss_critic = critic_output["loss_critic"]  # 获取评论家损失
+        optimizers["critic"].zero_grad()  # 清零评论家优化器的梯度
+        loss_critic.backward()  # 反向传播
+        # 对评论家网络参数进行梯度裁剪并获取梯度范数
         critic_grad_norm = torch.nn.utils.clip_grad_norm_(
-            parameters=policy.critic_ensemble.parameters(), max_norm=clip_grad_norm_value
-        ).item()
-        optimizers["critic"].step()
+            parameters=policy.critic_ensemble.parameters(),  # 评论家集成网络的参数
+            max_norm=clip_grad_norm_value  # 最大梯度范数
+        ).item()  # 转换为标量值
+        optimizers["critic"].step()  # 更新评论家网络参数
 
-        # Initialize training info dictionary
+        # 初始化训练信息字典
         training_infos = {
-            "loss_critic": loss_critic.item(),
-            "critic_grad_norm": critic_grad_norm,
+            "loss_critic": loss_critic.item(),  # 评论家损失
+            "critic_grad_norm": critic_grad_norm,  # 评论家梯度范数
         }
 
-        # Discrete critic optimization (if available)
-        if policy.config.num_discrete_actions is not None:
+        # 离散评论家优化（如果可用）
+        if policy.config.num_discrete_actions is not None:  # 如果有离散动作
+            # 计算离散评论家输出
             discrete_critic_output = policy.forward(forward_batch, model="discrete_critic")
-            loss_discrete_critic = discrete_critic_output["loss_discrete_critic"]
-            optimizers["discrete_critic"].zero_grad()
-            loss_discrete_critic.backward()
+            loss_discrete_critic = discrete_critic_output["loss_discrete_critic"]  # 获取离散评论家损失
+            optimizers["discrete_critic"].zero_grad()  # 清零离散评论家优化器的梯度
+            loss_discrete_critic.backward()  # 反向传播
+            # 对离散评论家网络参数进行梯度裁剪并获取梯度范数
             discrete_critic_grad_norm = torch.nn.utils.clip_grad_norm_(
-                parameters=policy.discrete_critic.parameters(), max_norm=clip_grad_norm_value
-            ).item()
-            optimizers["discrete_critic"].step()
+                parameters=policy.discrete_critic.parameters(),  # 离散评论家网络参数
+                max_norm=clip_grad_norm_value  # 最大梯度范数
+            ).item()  # 转换为标量值
+            optimizers["discrete_critic"].step()  # 更新离散评论家网络参数
 
-            # Add discrete critic info to training info
-            training_infos["loss_discrete_critic"] = loss_discrete_critic.item()
-            training_infos["discrete_critic_grad_norm"] = discrete_critic_grad_norm
+            # 将离散评论家信息添加到训练信息中
+            training_infos["loss_discrete_critic"] = loss_discrete_critic.item()  # 离散评论家损失
+            training_infos["discrete_critic_grad_norm"] = discrete_critic_grad_norm  # 离散评论家梯度范数
 
-        # Actor and temperature optimization (at specified frequency)
-        if optimization_step % policy_update_freq == 0:
-            for _ in range(policy_update_freq):
-                # Actor optimization
-                actor_output = policy.forward(forward_batch, model="actor")
-                loss_actor = actor_output["loss_actor"]
-                optimizers["actor"].zero_grad()
-                loss_actor.backward()
+        # Actor和温度优化（按指定频率进行）
+        if optimization_step % policy_update_freq == 0:  # 如果到了更新Actor和温度的时候
+            for _ in range(policy_update_freq):  # 执行多次更新
+                # Actor优化
+                actor_output = policy.forward(forward_batch, model="actor")  # 计算Actor输出
+                loss_actor = actor_output["loss_actor"]  # 获取Actor损失
+                optimizers["actor"].zero_grad()  # 清零Actor优化器的梯度
+                loss_actor.backward()  # 反向传播
+                # 对Actor网络参数进行梯度裁剪并获取梯度范数
                 actor_grad_norm = torch.nn.utils.clip_grad_norm_(
-                    parameters=policy.actor.parameters(), max_norm=clip_grad_norm_value
-                ).item()
-                optimizers["actor"].step()
+                    parameters=policy.actor.parameters(),  # Actor网络参数
+                    max_norm=clip_grad_norm_value  # 最大梯度范数
+                ).item()  # 转换为标量值
+                optimizers["actor"].step()  # 更新Actor网络参数
 
-                # Add actor info to training info
-                training_infos["loss_actor"] = loss_actor.item()
-                training_infos["actor_grad_norm"] = actor_grad_norm
+                # 将Actor信息添加到训练信息中
+                training_infos["loss_actor"] = loss_actor.item()  # Actor损失
+                training_infos["actor_grad_norm"] = actor_grad_norm  # Actor梯度范数
 
-                # Temperature optimization
-                temperature_output = policy.forward(forward_batch, model="temperature")
-                loss_temperature = temperature_output["loss_temperature"]
-                optimizers["temperature"].zero_grad()
-                loss_temperature.backward()
+                # 温度优化
+                temperature_output = policy.forward(forward_batch, model="temperature")  # 计算温度输出
+                loss_temperature = temperature_output["loss_temperature"]  # 获取温度损失
+                optimizers["temperature"].zero_grad()  # 清零温度优化器的梯度
+                loss_temperature.backward()  # 反向传播
+                # 对温度参数进行梯度裁剪并获取梯度范数
                 temp_grad_norm = torch.nn.utils.clip_grad_norm_(
-                    parameters=[policy.log_alpha], max_norm=clip_grad_norm_value
-                ).item()
-                optimizers["temperature"].step()
+                    parameters=[policy.log_alpha],  # 温度参数（log_alpha）
+                    max_norm=clip_grad_norm_value  # 最大梯度范数
+                ).item()  # 转换为标量值
+                optimizers["temperature"].step()  # 更新温度参数
 
-                # Add temperature info to training info
-                training_infos["loss_temperature"] = loss_temperature.item()
-                training_infos["temperature_grad_norm"] = temp_grad_norm
-                training_infos["temperature"] = policy.temperature
+                # 将温度信息添加到训练信息中
+                training_infos["loss_temperature"] = loss_temperature.item()  # 温度损失
+                training_infos["temperature_grad_norm"] = temp_grad_norm  # 温度梯度范数
+                training_infos["temperature"] = policy.temperature  # 当前温度值
 
-                # Update temperature
+                # 更新温度
                 policy.update_temperature()
 
-        # Push policy to actors if needed
-        if time.time() - last_time_policy_pushed > policy_parameters_push_frequency:
-            push_actor_policy_to_queue(parameters_queue=parameters_queue, policy=policy)
-            last_time_policy_pushed = time.time()
+        # 如果需要，将策略推送给Actor
+        if time.time() - last_time_policy_pushed > policy_parameters_push_frequency:  # 如果距离上次推送的时间超过了指定频率
+            push_actor_policy_to_queue(parameters_queue=parameters_queue, policy=policy)  # 推送策略参数到队列
+            last_time_policy_pushed = time.time()  # 更新上次推送时间
 
-        # Update target networks (main and discrete)
+        # 更新目标网络（主要和离散）
         policy.update_target_networks()
 
-        # Log training metrics at specified intervals
-        if optimization_step % log_freq == 0:
-            training_infos["replay_buffer_size"] = len(replay_buffer)
-            if offline_replay_buffer is not None:
-                training_infos["offline_replay_buffer_size"] = len(offline_replay_buffer)
-            training_infos["Optimization step"] = optimization_step
+        # 按指定间隔记录训练指标
+        if optimization_step % log_freq == 0:  # 如果到了记录日志的时候
+            training_infos["replay_buffer_size"] = len(replay_buffer)  # 在线回放缓冲区大小
+            if offline_replay_buffer is not None:  # 如果有离线回放缓冲区
+                training_infos["offline_replay_buffer_size"] = len(offline_replay_buffer)  # 离线回放缓冲区大小
+            training_infos["Optimization step"] = optimization_step  # 优化步骤
 
-            # Log training metrics
-            if wandb_logger:
-                wandb_logger.log_dict(d=training_infos, mode="train", custom_step_key="Optimization step")
+            # 记录训练指标
+            if wandb_logger:  # 如果有WandB日志记录器
+                wandb_logger.log_dict(d=training_infos, mode="train", custom_step_key="Optimization step")  # 记录训练信息
 
-        # Calculate and log optimization frequency
-        time_for_one_optimization_step = time.time() - time_for_one_optimization_step
-        frequency_for_one_optimization_step = 1 / (time_for_one_optimization_step + 1e-9)
+        # 计算并记录优化频率
+        time_for_one_optimization_step = time.time() - time_for_one_optimization_step  # 计算一次优化步骤所需的时间
+        frequency_for_one_optimization_step = 1 / (time_for_one_optimization_step + 1e-9)  # 计算优化频率（Hz）
 
+        # 记录优化频率到控制台
         logging.info(f"[LEARNER] Optimization frequency loop [Hz]: {frequency_for_one_optimization_step}")
 
-        # Log optimization frequency
-        if wandb_logger:
+        # 记录优化频率到WandB
+        if wandb_logger:  # 如果有WandB日志记录器
             wandb_logger.log_dict(
                 {
-                    "Optimization frequency loop [Hz]": frequency_for_one_optimization_step,
-                    "Optimization step": optimization_step,
+                    "Optimization frequency loop [Hz]": frequency_for_one_optimization_step,  # 优化频率
+                    "Optimization step": optimization_step,  # 优化步骤
                 },
-                mode="train",
-                custom_step_key="Optimization step",
+                mode="train",  # 训练模式
+                custom_step_key="Optimization step",  # 自定义步骤键
             )
 
+        # 增加优化步骤计数器
         optimization_step += 1
+        # 按指定间隔记录优化步骤数量
         if optimization_step % log_freq == 0:
             logging.info(f"[LEARNER] Number of optimization step: {optimization_step}")
 
-        # Save checkpoint at specified intervals
-        if saving_checkpoint and (optimization_step % save_freq == 0 or optimization_step == online_steps):
+        # 按指定间隔保存检查点
+        if saving_checkpoint and (optimization_step % save_freq == 0 or optimization_step == online_steps):  # 如果需要保存检查点且到了保存时间或达到总步数
             save_training_checkpoint(
-                cfg=cfg,
-                optimization_step=optimization_step,
-                online_steps=online_steps,
-                interaction_message=interaction_message,
-                policy=policy,
-                optimizers=optimizers,
-                replay_buffer=replay_buffer,
-                offline_replay_buffer=offline_replay_buffer,
-                dataset_repo_id=dataset_repo_id,
-                fps=fps,
+                cfg=cfg,  # 配置对象
+                optimization_step=optimization_step,  # 当前优化步骤
+                online_steps=online_steps,  # 总在线步数
+                interaction_message=interaction_message,  # 交互消息
+                policy=policy,  # 策略网络
+                optimizers=optimizers,  # 优化器
+                replay_buffer=replay_buffer,  # 在线回放缓冲区
+                offline_replay_buffer=offline_replay_buffer,  # 离线回放缓冲区
+                dataset_repo_id=dataset_repo_id,  # 数据集仓库ID
+                fps=fps,  # 帧率
             )
 
 
@@ -1000,10 +1078,12 @@ def initialize_offline_replay_buffer(
     Returns:
         ReplayBuffer: Initialized offline replay buffer
     """
+    # 如果cfg.resume为False，则创建离线数据集，不是恢复训练
     if not cfg.resume:
         logging.info("make_dataset offline buffer")
-        offline_dataset = make_dataset(cfg)
+        offline_dataset = make_dataset(cfg) # 创建离线数据集
     else:
+        # 如果cfg.resume为True，则加载离线数据集，为恢复训练
         logging.info("load offline dataset")
         dataset_offline_path = os.path.join(cfg.output_dir, "dataset_offline")
         offline_dataset = LeRobotDataset(
@@ -1012,6 +1092,7 @@ def initialize_offline_replay_buffer(
         )
 
     logging.info("Convert to a offline replay buffer")
+    # 将离线数据集转换为离线回放缓冲区
     offline_replay_buffer = ReplayBuffer.from_lerobot_dataset(
         offline_dataset,
         device=device,
@@ -1044,12 +1125,17 @@ def get_observation_features(
     Returns:
         tuple: observation_features, next_observation_features
     """
-
+    # 只有当策略配置了视觉编码器（vision_encoder_name 不为 None）
+    # 且视觉编码器被冻结（freeze_vision_encoder = True）时
+    # 才会启用特征缓存机制
     if policy.config.vision_encoder_name is None or not policy.config.freeze_vision_encoder:
         return None, None
 
-    with torch.no_grad():
+    with torch.no_grad(): # 禁用梯度计算，因为编码器被冻结
+        # 为当前观测提取特征
         observation_features = policy.actor.encoder.get_cached_image_features(observations, normalize=True)
+        
+        # 为下一个观测提取特征
         next_observation_features = policy.actor.encoder.get_cached_image_features(
             next_observations, normalize=True
         )
@@ -1147,14 +1233,19 @@ def process_transitions(
         dataset_repo_id: Repository ID for dataset
         shutdown_event: Event to signal shutdown
     """
+    # 当前policy transition队列不为空，并且shutdown事件没有被设置，则继续处理transition队列中的数据
     while not transition_queue.empty() and not shutdown_event.is_set():
+        # 从transition队列中获取数据
         transition_list = transition_queue.get()
+        # 将数据转换为transition列表
         transition_list = bytes_to_transitions(buffer=transition_list)
 
+        # 遍历transition列表
         for transition in transition_list:
-            transition = move_transition_to_device(transition=transition, device=device)
+            transition = move_transition_to_device(transition=transition, device=device) # 将transition数据移动到cuda
 
             # Skip transitions with NaN values
+            # 检查是否有NaN值，如果有则跳过
             if check_nan_in_transition(
                 observations=transition["state"],
                 actions=transition["action"],
@@ -1163,9 +1254,10 @@ def process_transitions(
                 logging.warning("[LEARNER] NaN detected in transition, skipping")
                 continue
 
-            replay_buffer.add(**transition)
+            replay_buffer.add(**transition) # 将transition数据添加到在线replay_buffer中
 
             # Add to offline buffer if it's an intervention
+            # 如果在线policy数据当中有干预数据，则将数据添加到离线回放缓冲区当中
             if dataset_repo_id is not None and transition.get("complementary_info", {}).get(
                 "is_intervention"
             ):

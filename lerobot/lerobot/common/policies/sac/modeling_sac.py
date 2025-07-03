@@ -57,8 +57,8 @@ class SACPolicy(
         self._init_normalization(dataset_stats) # 🔥 初始化归一化, 通过 dataset_stats 中的 min 和 max 对输入数据进行归一化
         self._init_encoders() # 🔥 初始化编码器
         self._init_critics(continuous_action_dim) # 🔥 初始化critic
-        self._init_actor(continuous_action_dim) # 初始化actor
-        self._init_temperature() # 初始化温度
+        self._init_actor(continuous_action_dim) # 🔥 初始化actor
+        self._init_temperature() # 🔥 初始化温度
 
     def get_optim_params(self) -> dict:
         optim_params = {
@@ -480,43 +480,78 @@ class SACPolicy(
 
     def _init_discrete_critics(self):
         """Build discrete discrete critic ensemble and target networks."""
+        """
+            按需构建离散网络Q的网络集合, 用于末端执行器的抓/放
+            离散网络Q的当前网络:
+                输入: 观测编码
+                输出: Q值向量
+            离散网络Q的目标网络:
+                输入: 观测编码
+                输出: Q值向量
+        """
         self.discrete_critic = DiscreteCritic(
             encoder=self.encoder_critic,
             input_dim=self.encoder_critic.output_dim,
             output_dim=self.config.num_discrete_actions,
-            **asdict(self.config.discrete_critic_network_kwargs),
+            **asdict(self.config.discrete_critic_network_kwargs), # 将config当中的离散Q网络的网络参数转换为字典
         )
         self.discrete_critic_target = DiscreteCritic(
             encoder=self.encoder_critic,
             input_dim=self.encoder_critic.output_dim,
             output_dim=self.config.num_discrete_actions,
-            **asdict(self.config.discrete_critic_network_kwargs),
+            **asdict(self.config.discrete_critic_network_kwargs), # 将config当中的离散Q网络的网络参数转换为字典
         )
 
         # TODO: (maractingi, azouitine) Compile the discrete critic
         self.discrete_critic_target.load_state_dict(self.discrete_critic.state_dict())
 
     def _init_actor(self, continuous_action_dim):
-        """Initialize policy actor network and default target entropy."""
-        # NOTE: The actor select only the continuous action part
+        """初始化策略Actor网络和默认目标熵值。
+        
+        Actor网络架构说明：
+        1. 观测编码器 (SACObservationEncoder): 将原始观测转换为特征向量
+        2. 主干网络 (MLP): 多层感知机，处理编码后的观测特征
+        3. 均值层 (mean_layer): 输出动作的均值
+        4. 标准差层 (std_layer): 输出动作的标准差（用于探索）
+        
+        网络流程：
+        观测输入 → SACObservationEncoder → 观测编码 (256维)
+                                        ↓
+                                    MLP主干网络 (256→256→256)
+                                        ↓
+                                    均值层 (256→action_dim) → 动作均值
+                                    标准差层 (256→action_dim) → 动作标准差
+                                        ↓
+                                    TanhMultivariateNormalDiag → 采样动作
+        """
+        # 注意：Actor只选择连续动作部分，离散动作由离散Critic处理
         self.actor = Policy(
-            encoder=self.encoder_actor,
-            network=MLP(input_dim=self.encoder_actor.output_dim, **asdict(self.config.actor_network_kwargs)),
-            action_dim=continuous_action_dim,
-            encoder_is_shared=self.shared_encoder,
-            **asdict(self.config.policy_kwargs),
+            encoder=self.encoder_actor,  # 观测编码器，将原始观测转换为特征向量
+            network=MLP(  # 主干网络：多层感知机
+                input_dim=self.encoder_actor.output_dim,  # 输入维度：观测编码的维度
+                **asdict(self.config.actor_network_kwargs),  # 网络配置参数（隐藏层维度、激活函数等）
+            ),
+            action_dim=continuous_action_dim,  # 动作维度：连续动作的维度
+            encoder_is_shared=self.shared_encoder,  # 编码器是否在Actor和Critic之间共享
+            **asdict(self.config.policy_kwargs),  # 策略配置参数（标准差范围、是否使用tanh等）
         )
 
+        # 设置目标熵值，用于温度参数的自动调节
         self.target_entropy = self.config.target_entropy
         if self.target_entropy is None:
+            # 如果没有指定目标熵值，则根据动作维度自动计算
+            # 目标熵值 = -动作维度 / 2，这是一个经验公式
             dim = continuous_action_dim + (1 if self.config.num_discrete_actions is not None else 0)
             self.target_entropy = -np.prod(dim) / 2
 
     def _init_temperature(self):
         """Set up temperature parameter and initial log_alpha."""
+        # 初始化熵值
         temp_init = self.config.temperature_init
-        self.log_alpha = nn.Parameter(torch.tensor([math.log(temp_init)]))
-        self.temperature = self.log_alpha.exp().item()
+        # 初始化 log_alpha - 优化器会主要将梯度附加到log_alpha上
+        self.log_alpha = nn.Parameter(torch.tensor([math.log(temp_init)])) # 输入x>0的变量，输出log_alpha可以为正数或者负数，
+        # 从 log_alpha 当中通过exp还原为temperature
+        self.temperature = self.log_alpha.exp().item() # temperature 必须为一个 x > 0 的数字
 
 
 class SACObservationEncoder(nn.Module):
@@ -861,6 +896,12 @@ class CriticEnsemble(nn.Module):
 
 
 class DiscreteCritic(nn.Module):
+    """
+        离散Q网络的评论家头
+        职责: 实现单个离散Q值网络的逻辑
+        输入: 观测编码
+        输出: Q值
+    """
     def __init__(
         self,
         encoder: nn.Module,
@@ -874,8 +915,8 @@ class DiscreteCritic(nn.Module):
         final_activation: Callable[[torch.Tensor], torch.Tensor] | str | None = None,
     ):
         super().__init__()
-        self.encoder = encoder
-        self.output_dim = output_dim
+        self.encoder = encoder # 观测编码器
+        self.output_dim = output_dim # 输出层的大小，针对目标的动作维度（比如Franka 抓/放/保持 三个动作）
 
         self.net = MLP(
             input_dim=input_dim,
@@ -886,7 +927,7 @@ class DiscreteCritic(nn.Module):
             final_activation=final_activation,
         )
 
-        self.output_layer = nn.Linear(in_features=hidden_dims[-1], out_features=self.output_dim)
+        self.output_layer = nn.Linear(in_features=hidden_dims[-1], out_features=self.output_dim) # 网络的最后一层，将前面MLP网络提取的特征映射为最终的输出
         if init_final is not None:
             nn.init.uniform_(self.output_layer.weight, -init_final, init_final)
             nn.init.uniform_(self.output_layer.bias, -init_final, init_final)
@@ -903,84 +944,128 @@ class DiscreteCritic(nn.Module):
 
 
 class Policy(nn.Module):
+    """
+    SAC策略网络（Actor网络）
+    
+    网络架构：
+    1. 观测编码器 (encoder): 将原始观测转换为特征向量
+    2. 主干网络 (network): 多层感知机，处理编码后的观测特征
+    3. 均值层 (mean_layer): 输出动作的均值
+    4. 标准差层 (std_layer): 输出动作的标准差（用于探索）
+    
+    前向传播流程：
+    观测输入 → 编码器 → 观测特征 → 主干网络 → 特征向量
+                                        ↓
+                                    均值层 → 动作均值
+                                    标准差层 → 动作标准差
+                                        ↓
+                                    TanhMultivariateNormalDiag → 采样动作
+    
+    输出：
+    - actions: 采样的动作
+    - log_probs: 动作的对数概率
+    - means: 动作的均值（用于确定性动作选择）
+    """
     def __init__(
         self,
-        encoder: SACObservationEncoder,
-        network: nn.Module,
-        action_dim: int,
-        std_min: float = -5,
-        std_max: float = 2,
-        fixed_std: torch.Tensor | None = None,
-        init_final: float | None = None,
-        use_tanh_squash: bool = False,
-        encoder_is_shared: bool = False,
+        encoder: SACObservationEncoder,  # 观测编码器
+        network: nn.Module,  # 主干网络（通常是MLP）
+        action_dim: int,  # 动作维度
+        std_min: float = -5,  # 标准差的最小值（log空间）
+        std_max: float = 2,  # 标准差的最大值（log空间）
+        fixed_std: torch.Tensor | None = None,  # 固定的标准差（如果为None则学习）
+        init_final: float | None = None,  # 最终层的初始化参数
+        use_tanh_squash: bool = False,  # 是否使用tanh压缩动作
+        encoder_is_shared: bool = False,  # 编码器是否与Critic共享
     ):
         super().__init__()
-        self.encoder: SACObservationEncoder = encoder
-        self.network = network
-        self.action_dim = action_dim
-        self.std_min = std_min
-        self.std_max = std_max
-        self.fixed_std = fixed_std
-        self.use_tanh_squash = use_tanh_squash
-        self.encoder_is_shared = encoder_is_shared
+        self.encoder: SACObservationEncoder = encoder  # 观测编码器
+        self.network = network  # 主干网络
+        self.action_dim = action_dim  # 动作维度
+        self.std_min = std_min  # 标准差最小值
+        self.std_max = std_max  # 标准差最大值
+        self.fixed_std = fixed_std  # 固定标准差
+        self.use_tanh_squash = use_tanh_squash  # 是否使用tanh压缩
+        self.encoder_is_shared = encoder_is_shared  # 编码器是否共享
 
-        # Find the last Linear layer's output dimension
+        # 找到主干网络最后一个线性层的输出维度
         for layer in reversed(network.net):
             if isinstance(layer, nn.Linear):
                 out_features = layer.out_features
                 break
-        # Mean layer
+        
+        # 均值层：将主干网络的输出映射为动作均值
         self.mean_layer = nn.Linear(out_features, action_dim)
         if init_final is not None:
+            # 使用均匀分布初始化
             nn.init.uniform_(self.mean_layer.weight, -init_final, init_final)
             nn.init.uniform_(self.mean_layer.bias, -init_final, init_final)
         else:
+            # 使用正交初始化
             orthogonal_init()(self.mean_layer.weight)
 
-        # Standard deviation layer or parameter
+        # 标准差层：将主干网络的输出映射为动作标准差
         if fixed_std is None:
+            # 如果使用学习型标准差
             self.std_layer = nn.Linear(out_features, action_dim)
             if init_final is not None:
+                # 使用均匀分布初始化
                 nn.init.uniform_(self.std_layer.weight, -init_final, init_final)
                 nn.init.uniform_(self.std_layer.bias, -init_final, init_final)
             else:
+                # 使用正交初始化
                 orthogonal_init()(self.std_layer.weight)
 
     def forward(
         self,
-        observations: torch.Tensor,
-        observation_features: torch.Tensor | None = None,
+        observations: torch.Tensor,  # 观测输入
+        observation_features: torch.Tensor | None = None,  # 预计算的观测特征
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # We detach the encoder if it is shared to avoid backprop through it
-        # This is important to avoid the encoder to be updated through the policy
+        """
+        前向传播
+        
+        Args:
+            observations: 观测字典
+            observation_features: 预计算的观测特征（用于缓存）
+            
+        Returns:
+            actions: 采样的动作
+            log_probs: 动作的对数概率
+            means: 动作的均值
+        """
+        # 如果编码器是共享的，则分离梯度以避免通过编码器进行反向传播
+        # 这很重要，可以避免编码器通过策略网络更新
         obs_enc = self.encoder(observations, cache=observation_features, detach=self.encoder_is_shared)
 
-        # Get network outputs
+        # 获取主干网络的输出
         outputs = self.network(obs_enc)
+        
+        # 计算动作均值
         means = self.mean_layer(outputs)
 
-        # Compute standard deviations
+        # 计算动作标准差
         if self.fixed_std is None:
-            log_std = self.std_layer(outputs)
-            std = torch.exp(log_std)  # Match JAX "exp"
-            std = torch.clamp(std, self.std_min, self.std_max)  # Match JAX default clip
+            # 使用学习型标准差
+            log_std = self.std_layer(outputs)  # 输出log标准差
+            std = torch.exp(log_std)  # 转换为标准差
+            std = torch.clamp(std, self.std_min, self.std_max)  # 裁剪到指定范围
         else:
+            # 使用固定标准差
             std = self.fixed_std.expand_as(means)
 
-        # Build transformed distribution
+        # 构建变换分布：使用tanh变换的多元正态分布
         dist = TanhMultivariateNormalDiag(loc=means, scale_diag=std)
 
-        # Sample actions (reparameterized)
+        # 采样动作（使用重参数化技巧）
         actions = dist.rsample()
 
-        # Compute log_probs
+        # 计算动作的对数概率
         log_probs = dist.log_prob(actions)
 
         return actions, log_probs, means
 
     def get_features(self, observations: torch.Tensor) -> torch.Tensor:
-        """Get encoded features from observations"""
+        """获取观测的编码特征"""
         device = get_device_from_parameters(self)
         observations = observations.to(device)
         if self.encoder is not None:
@@ -1109,61 +1194,97 @@ class SpatialLearnedEmbeddings(nn.Module):
 
 
 class RescaleFromTanh(Transform):
+    """
+    从Tanh范围重新缩放到指定范围的变换
+    
+    这个变换用于将动作从Tanh的[-1, 1]范围重新缩放到动作空间的实际范围[low, high]。
+    
+    变换公式：
+    - 前向变换：y = 0.5 * (x + 1.0) * (high - low) + low
+    - 反向变换：x = 2.0 * (y - low) / (high - low) - 1.0
+    
+    作用：
+    - 将标准化的动作范围映射到实际的动作空间
+    - 保持变换的可逆性
+    - 提供正确的雅可比行列式用于概率计算
+    """
     def __init__(self, low: float = -1, high: float = 1):
         super().__init__()
 
-        self.low = low
-
-        self.high = high
+        self.low = low  # 动作空间的下界
+        self.high = high  # 动作空间的上界
 
     def _call(self, x):
-        # Rescale from (-1, 1) to (low, high)
-
+        """前向变换：从[-1, 1]重新缩放到[low, high]"""
+        # 重新缩放公式：y = 0.5 * (x + 1.0) * (high - low) + low
         return 0.5 * (x + 1.0) * (self.high - self.low) + self.low
 
     def _inverse(self, y):
-        # Rescale from (low, high) back to (-1, 1)
-
+        """反向变换：从[low, high]重新缩放到[-1, 1]"""
+        # 反向缩放公式：x = 2.0 * (y - low) / (high - low) - 1.0
         return 2.0 * (y - self.low) / (self.high - self.low) - 1.0
 
     def log_abs_det_jacobian(self, x, y):
+        """计算雅可比行列式的对数绝对值"""
         # log|d(rescale)/dx| = sum(log(0.5 * (high - low)))
-
         scale = 0.5 * (self.high - self.low)
 
         return torch.sum(torch.log(scale), dim=-1)
 
 
 class TanhMultivariateNormalDiag(TransformedDistribution):
+    """
+    Tanh变换的多元正态分布
+    
+    这个分布用于SAC中的动作采样，它结合了：
+    1. 基础分布：多元正态分布（对角协方差矩阵）
+    2. 变换：Tanh变换，将动作压缩到[-1, 1]范围
+    3. 可选变换：从[-1, 1]重新缩放到动作空间的实际范围
+    
+    作用：
+    - 确保动作在有效范围内
+    - 提供平滑的动作分布
+    - 支持重参数化采样（用于梯度计算）
+    
+    使用场景：
+    - SAC算法中的动作采样
+    - 连续动作空间的策略网络
+    """
     def __init__(self, loc, scale_diag, low=None, high=None):
+        # 创建基础分布：多元正态分布（对角协方差矩阵）
         base_dist = MultivariateNormal(loc, torch.diag_embed(scale_diag))
 
-        transforms = [TanhTransform(cache_size=1)]
+        # 定义变换序列
+        transforms = [TanhTransform(cache_size=1)]  # Tanh变换
 
+        # 如果指定了动作范围，添加重新缩放变换
         if low is not None and high is not None:
             low = torch.as_tensor(low)
-
             high = torch.as_tensor(high)
-
+            # 在Tanh变换之前插入重新缩放变换
             transforms.insert(0, RescaleFromTanh(low, high))
 
+        # 创建变换分布
         super().__init__(base_dist, transforms)
 
     def mode(self):
-        # Mode is mean of base distribution, passed through transforms
-
+        """获取分布的众数（最可能的动作）"""
+        # 众数是基础分布的均值经过变换后的结果
         x = self.base_dist.mean
 
+        # 依次应用所有变换
         for transform in self.transforms:
             x = transform(x)
 
         return x
 
     def stddev(self):
+        """获取变换后分布的标准差"""
         std = self.base_dist.stddev
 
         x = std
 
+        # 依次应用所有变换
         for transform in self.transforms:
             x = transform(x)
 

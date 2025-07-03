@@ -144,14 +144,22 @@ class TrainPipelineConfig(HubMixin):
     ) -> "TrainPipelineConfig":
         model_id = str(pretrained_name_or_path)
         config_file: str | None = None
+        """
+            找到、加载并解析一个名为 train_config.json 的配置文件，
+            并用其内容创建一个 TrainPipelineConfig (或其子类) 的实例
+        """
         if Path(model_id).is_dir():
+            # 如果提供的是一个目录文件夹，那么会检查里面是否包含了train_config.json
+            # 如 outputs/my_run/checkpoints/last/policy/train_config.json
             if TRAIN_CONFIG_NAME in os.listdir(model_id):
                 config_file = os.path.join(model_id, TRAIN_CONFIG_NAME)
             else:
                 print(f"{TRAIN_CONFIG_NAME} not found in {Path(model_id).resolve()}")
         elif Path(model_id).is_file():
+            # 检查提供的路径本身是不是一个文件，如果是一个文件就直接设置路径
             config_file = model_id
         else:
+            # 假设在Hugging Face Hub上
             try:
                 config_file = hf_hub_download(
                     repo_id=model_id,
@@ -168,9 +176,14 @@ class TrainPipelineConfig(HubMixin):
                 raise FileNotFoundError(
                     f"{TRAIN_CONFIG_NAME} not found on the HuggingFace Hub in {model_id}"
                 ) from e
-
+        # 接收额外的命令行参数(通过 **kwargs 传入)
         cli_args = kwargs.pop("cli_args", [])
         with draccus.config_type("json"):
+            """
+                cls : 类本身作为模版
+                config_file : 配置文件路径json路径
+                cli_args: 这是要应用的“补丁”。draccus 会先从 config_file 加载所有数据，然后再用 cli_args 里的参数去覆盖相应的值
+            """
             return draccus.parse(cls, config_file, args=cli_args)
 
 
