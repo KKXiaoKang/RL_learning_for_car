@@ -151,29 +151,30 @@ def actor_cli(cfg: TrainRLServerPipelineConfig):
 
         concurrency_entity = Process
 
-    receive_policy_process = concurrency_entity(
+    # Actor启动时创建三个并发进程/线程 分别用于接收策略参数、发送转换数据、发送交互消息
+    receive_policy_process = concurrency_entity( # 接收策略参数
         target=receive_policy,
         args=(cfg, parameters_queue, shutdown_event, grpc_channel),
         daemon=True,
     )
 
-    transitions_process = concurrency_entity(
+    transitions_process = concurrency_entity( # 发送转换数据
         target=send_transitions,
         args=(cfg, transitions_queue, shutdown_event, grpc_channel),
         daemon=True,
     )
 
-    interactions_process = concurrency_entity(
+    interactions_process = concurrency_entity( # 发送交互消息
         target=send_interactions,
         args=(cfg, interactions_queue, shutdown_event, grpc_channel),
         daemon=True,
     )
 
-    transitions_process.start()
-    interactions_process.start()
-    receive_policy_process.start()
+    transitions_process.start() # 启动发送转换数据进程
+    interactions_process.start() # 启动发送交互消息进程
+    receive_policy_process.start() # 启动接收策略参数进程
 
-    act_with_policy(
+    act_with_policy( # 执行策略交互
         cfg=cfg,
         shutdown_event=shutdown_event,
         parameters_queue=parameters_queue,
@@ -237,15 +238,19 @@ def act_with_policy(
 
     logging.info("make_env online")
 
-    online_env = make_robot_env(cfg=cfg.env)
+    online_env = make_robot_env(cfg=cfg.env) # 根据环境env wrapper创建机器人的交互环境
 
-    set_seed(cfg.seed)
-    device = get_safe_torch_device(cfg.policy.device, log=True)
+    set_seed(cfg.seed) # 设置随机种子
+    device = get_safe_torch_device(cfg.policy.device, log=True) # 获取设备
 
+    """
+        benchmark 会让 PyTorch 在第一次运行卷积操作时，自动测试所有可用的算法，选择最快的那个，然后缓存下来，测试结果会被缓存，后续使用相同输入尺寸时直接使用最优算法
+        allow_tf32 允许在CUDA上使用TF32混合精度计算, 提高性能
+    """
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
 
-    logging.info("make_policy")
+    logging.info("make_policy") # policy初始化
 
     ### Instantiate the policy in both the actor and learner processes
     ### To avoid sending a SACPolicy object through the port, we create a policy instance
@@ -254,52 +259,58 @@ def act_with_policy(
         cfg=cfg.policy,
         env_cfg=cfg.env,
     )
-    policy = policy.eval()
+    policy = policy.eval() # 设置为评估模式
     assert isinstance(policy, nn.Module)
 
-    obs, info = online_env.reset()
+    obs, info = online_env.reset() # 重置环境
 
     # NOTE: For the moment we will solely handle the case of a single environment
-    sum_reward_episode = 0
-    list_transition_to_send_to_learner = []
-    episode_intervention = False
+    sum_reward_episode = 0 # 当前episode的累计奖励
+    list_transition_to_send_to_learner = [] # 用于存储转换数据
+    episode_intervention = False # 是否发生干预
     # Add counters for intervention rate calculation
-    episode_intervention_steps = 0
-    episode_total_steps = 0
+    episode_intervention_steps = 0 # 干预步数
+    episode_total_steps = 0 # 总步数
 
     policy_timer = TimerManager("Policy inference", log=False)
 
+    # 以online_steps(1000K)作为循环次数，在循环内部执行策略交互
     for interaction_step in range(cfg.policy.online_steps):
-        start_time = time.perf_counter()
-        if shutdown_event.is_set():
+        start_time = time.perf_counter() # 记录开始时间
+        if shutdown_event.is_set(): # 检查事件是否被关闭
             logging.info("[ACTOR] Shutting down act_with_policy")
             return
 
-        if interaction_step >= cfg.policy.online_step_before_learning:
+        # 如果当前步数大于online_step_before_learning(100), 使用学习过后的动作
+        if interaction_step >= cfg.policy.online_step_before_learning: 
             # Time policy inference and check if it meets FPS requirement
             with policy_timer:
-                action = policy.select_action(batch=obs)
+                action = policy.select_action(batch=obs) # 选择动作
             policy_fps = policy_timer.fps_last
 
             log_policy_frequency_issue(policy_fps=policy_fps, cfg=cfg, interaction_step=interaction_step)
 
-        else:
+        else: # 如果小于100步, 使用随机动作
             action = online_env.action_space.sample()
 
-        next_obs, reward, done, truncated, info = online_env.step(action)
+        # truncated 表示是否提前终止，比如达到最大步数
+        # done 表示是否完成，比如到达目标位置
+        # info 包含一些重要的交互信息
+        # 执行动作 - 如果使用rl车环境可以查看hil_wrappers.py当中的RLCarGamepadWrapper类
+        next_obs, reward, done, truncated, info = online_env.step(action) 
 
-        sum_reward_episode += float(reward)
+        sum_reward_episode += float(reward) # 累计奖励
         # Increment total steps counter for intervention rate
-        episode_total_steps += 1
+        episode_total_steps += 1 # 总步数
 
         # NOTE: We override the action if the intervention is True, because the action applied is the intervention action
         if "is_intervention" in info and info["is_intervention"]:
             # NOTE: The action space for demonstration before hand is with the full action space
             # but sometimes for example we want to deactivate the gripper
-            action = info["action_intervention"]
-            episode_intervention = True
+            action = info["action_intervention"] # 使用干预动作
+            episode_intervention = True # 该回合为干预回合
             # Increment intervention steps counter
-            episode_intervention_steps += 1
+            episode_intervention_steps += 1 # 干预步数+=1
 
         # NOTE(michel-aractingi): Make sure all info values are supported by the transport layer
         for k, v in info.items():

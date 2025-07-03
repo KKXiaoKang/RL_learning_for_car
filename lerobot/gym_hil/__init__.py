@@ -42,13 +42,6 @@ register(
     max_episode_steps=100,
 )
 
-# Register the base environment for the RL Car
-register(
-    id="gym_hil/RLCar-v0",
-    entry_point="gym_hil.envs.rl_car_gym_env:RLCarGymEnv",
-    max_episode_steps=200,
-)
-
 # Register the viewer wrapper
 register(
     id="gym_hil/PandaPickCubeViewer-v0",
@@ -86,6 +79,13 @@ register(
         "use_viewer": True,
         "gripper_penalty": -0.05,
     },
+)
+
+# Register the base environment for the RL Car
+register(
+    id="gym_hil/RLCar-v0",
+    entry_point="gym_hil.envs.rl_car_gym_env:RLCarGymEnv",
+    max_episode_steps=200,
 )
 
 register(

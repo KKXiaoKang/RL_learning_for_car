@@ -136,6 +136,6 @@ def make_rl_car_gamepad_env(**kwargs):
     """Factory function to create the RLCar environment with gamepad support."""
     # Create the base RLCar environment
     env = gym.make("gym_hil/RLCar-v0", **kwargs)
-    # Wrap it with the gamepad wrapper
+    # Wrap it with the gamepad wrapper - 通过手柄进行包装
     env = RLCarGamepadWrapper(env)
     return env

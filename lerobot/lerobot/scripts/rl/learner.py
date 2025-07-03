@@ -167,8 +167,12 @@ def train(cfg: TrainRLServerPipelineConfig, job_name: str | None = None):
     # Handle resume logic
     cfg = handle_resume_logic(cfg)
 
-    set_seed(seed=cfg.seed)
+    set_seed(seed=cfg.seed) # 设置随机种子
 
+    """
+        benchmark 会让 PyTorch 在第一次运行卷积操作时，自动测试所有可用的算法，选择最快的那个，然后缓存下来，测试结果会被缓存，后续使用相同输入尺寸时直接使用最优算法
+        allow_tf32 允许在CUDA上使用TF32混合精度计算, 提高性能
+    """
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
 
@@ -195,34 +199,50 @@ def start_learner_threads(
         wandb_logger (WandBLogger | None): Logger for metrics
         shutdown_event: Event to signal shutdown
     """
-    # Create multiprocessing queues
-    transition_queue = Queue()
-    interaction_message_queue = Queue()
-    parameters_queue = Queue()
+    """
+        ┌─────────────────┐    gRPC通信    ┌─────────────────┐
+        │   Actor Server  │ ◄────────────► │  Learner Server │
+        │                 │                │                 │
+        │  - 环境交互     │                │  - 策略训练     │
+        │  - 数据收集     │                │  - 参数更新     │
+        │  - 动作执行     │                │  - 模型保存     │
+        └─────────────────┘                └─────────────────┘
+                │                                   │
+                │                                   │
+                ▼                                   ▼
+        ┌─────────────────┐                ┌─────────────────┐
+        │  transition_queue│ ◄────────────► │ parameters_queue│
+        │  (经验数据)      │                │  (策略参数)     │
+        └─────────────────┘                └─────────────────┘
+    """
+    # Create multiprocessing queues 
+    transition_queue = Queue() # # 用于接收来自Actor的转换数据（经验）的队列
+    interaction_message_queue = Queue() # 用于接收来自Actor的交互消息的队列
+    parameters_queue = Queue() # 用于向Actor发送策略参数的队列
 
     concurrency_entity = None
 
     if use_threads(cfg):
         from threading import Thread
 
-        concurrency_entity = Thread
+        concurrency_entity = Thread # 使用多线程
     else:
         from torch.multiprocessing import Process
 
-        concurrency_entity = Process
+        concurrency_entity = Process # 多进程编程
 
     communication_process = concurrency_entity(
-        target=start_learner,
+        target=start_learner,  # 目标函数
         args=(
-            parameters_queue,
-            transition_queue,
-            interaction_message_queue,
-            shutdown_event,
-            cfg,
+            parameters_queue, # 策略参数队列
+            transition_queue, # 转换数据队列
+            interaction_message_queue, # 交互消息队列
+            shutdown_event, # 关闭事件
+            cfg, # 配置对象
         ),
-        daemon=True,
+        daemon=True, # 守护进程，主进程结束时自动结束
     )
-    communication_process.start()
+    communication_process.start() # 启动通信进程
 
     add_actor_information_and_train(
         cfg=cfg,
@@ -442,6 +462,11 @@ def add_actor_information_and_train(
         time_for_one_optimization_step = time.time()
         # 执行UTD比率减1次数的优化步骤（除了最后一次）
         for _ in range(utd_ratio - 1):
+            """
+                在这里UTD过程当中只更新 critic 的梯度 包含如下critic
+                * critic_ensemble 机械臂动作空间
+                * discrete_critic 离散动作空间
+            """
             # 从迭代器中采样数据
             batch = next(online_iterator) # 根据batch_size大小遍历online_iterator
 
@@ -510,7 +535,7 @@ def add_actor_information_and_train(
                 )
                 optimizers["discrete_critic"].step()  # 更新离散评论家网络参数
 
-            # 更新目标网络（主要和离散）
+            # 更新所有Q网络（包括当前Q网络集合、目标Q网络集合、离散空间Q网络）
             policy.update_target_networks()
 
         # 为UTD比率中的最后一次更新采样数据
@@ -591,7 +616,11 @@ def add_actor_information_and_train(
             training_infos["loss_discrete_critic"] = loss_discrete_critic.item()  # 离散评论家损失
             training_infos["discrete_critic_grad_norm"] = discrete_critic_grad_norm  # 离散评论家梯度范数
 
+        """
+            在这个过程当中会把actor 策略网络 和 temperature 温度参数 的梯度进行更新
+        """
         # Actor和温度优化（按指定频率进行）
+        # 当前优化的步数（如果不是断点续训的话都是从0开始） % (policy_update_freq=1) == 0  | 代表每一步都要更新actor和温度
         if optimization_step % policy_update_freq == 0:  # 如果到了更新Actor和温度的时候
             for _ in range(policy_update_freq):  # 执行多次更新
                 # Actor优化
@@ -635,10 +664,11 @@ def add_actor_information_and_train(
             push_actor_policy_to_queue(parameters_queue=parameters_queue, policy=policy)  # 推送策略参数到队列
             last_time_policy_pushed = time.time()  # 更新上次推送时间
 
-        # 更新目标网络（主要和离散）
+        # 更新所有Q网络（包括当前Q网络集合、目标Q网络集合、离散空间Q网络）
         policy.update_target_networks()
 
         # 按指定间隔记录训练指标
+        # 当前步数 % (log_freq=1) == 0  | 代表每log_freq步记录一次日志
         if optimization_step % log_freq == 0:  # 如果到了记录日志的时候
             training_infos["replay_buffer_size"] = len(replay_buffer)  # 在线回放缓冲区大小
             if offline_replay_buffer is not None:  # 如果有离线回放缓冲区
@@ -724,6 +754,7 @@ def start_learner(
         # TODO: Check if its useful
         _ = ProcessSignalHandler(False, display_pid=True)
 
+    # 在 start_learner 函数中创建gRPC服务器
     service = learner_service.LearnerService(
         shutdown_event=shutdown_event,
         parameters_queue=parameters_queue,
@@ -741,11 +772,13 @@ def start_learner(
         ],
     )
 
+    # 注册服务
     services_pb2_grpc.add_LearnerServiceServicer_to_server(
         service,
         server,
     )
 
+    # 启动服务器
     host = cfg.policy.actor_learner_config.learner_host
     port = cfg.policy.actor_learner_config.learner_port
 
