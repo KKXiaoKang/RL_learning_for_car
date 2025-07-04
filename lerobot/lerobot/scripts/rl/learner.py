@@ -396,8 +396,8 @@ def add_actor_information_and_train(
 
     # 记录开始学习者线程的信息
     logging.info("Starting learner thread")
-    # 初始化人工干预信息变量
-    interaction_message = None # 人工干预信息
+    # 初始化 - 回合统计消息 - 由actor发送
+    interaction_message = None 
     # 设置优化步骤计数器，如果恢复训练则从上次的步骤开始，否则从0开始
     optimization_step = resume_optimization_step if resume_optimization_step is not None else 0
     # 设置交互步骤偏移量，用于处理恢复训练时的步骤计数

@@ -158,13 +158,13 @@ def actor_cli(cfg: TrainRLServerPipelineConfig):
         daemon=True,
     )
 
-    transitions_process = concurrency_entity( # 发送转换数据
+    transitions_process = concurrency_entity( # 发送四元组信息到learner
         target=send_transitions,
         args=(cfg, transitions_queue, shutdown_event, grpc_channel),
         daemon=True,
     )
 
-    interactions_process = concurrency_entity( # 发送交互消息
+    interactions_process = concurrency_entity( # 发送回合统计消息
         target=send_interactions,
         args=(cfg, interactions_queue, shutdown_event, grpc_channel),
         daemon=True,
@@ -259,7 +259,7 @@ def act_with_policy(
         cfg=cfg.policy,
         env_cfg=cfg.env,
     )
-    policy = policy.eval() # 设置为评估模式
+    policy = policy.eval() # 设置为评估模式,评估模式下Dropout layer不会随机丢失权重
     assert isinstance(policy, nn.Module)
 
     obs, info = online_env.reset() # 重置环境
@@ -272,7 +272,7 @@ def act_with_policy(
     episode_intervention_steps = 0 # 干预步数
     episode_total_steps = 0 # 总步数
 
-    policy_timer = TimerManager("Policy inference", log=False)
+    policy_timer = TimerManager("Policy inference", log=False) # 策略推理计时器
 
     # 以online_steps(1000K)作为循环次数，在循环内部执行策略交互
     for interaction_step in range(cfg.policy.online_steps):
@@ -281,7 +281,7 @@ def act_with_policy(
             logging.info("[ACTOR] Shutting down act_with_policy")
             return
 
-        # 如果当前步数大于online_step_before_learning(100), 使用学习过后的动作
+        # 如果当前步数大于online_step_before_learning(100), 使用策略选择的动作
         if interaction_step >= cfg.policy.online_step_before_learning: 
             # Time policy inference and check if it meets FPS requirement
             with policy_timer:
@@ -290,7 +290,7 @@ def act_with_policy(
 
             log_policy_frequency_issue(policy_fps=policy_fps, cfg=cfg, interaction_step=interaction_step)
 
-        else: # 如果小于100步, 使用随机动作
+        else: # 如果小于100步, 使用随机动作，学习前使用随机动作进行探索
             action = online_env.action_space.sample()
 
         # truncated 表示是否提前终止，比如达到最大步数
@@ -304,6 +304,7 @@ def act_with_policy(
         episode_total_steps += 1 # 总步数
 
         # NOTE: We override the action if the intervention is True, because the action applied is the intervention action
+        # 检查是否发生人类干预
         if "is_intervention" in info and info["is_intervention"]:
             # NOTE: The action space for demonstration before hand is with the full action space
             # but sometimes for example we want to deactivate the gripper
@@ -313,6 +314,7 @@ def act_with_policy(
             episode_intervention_steps += 1 # 干预步数+=1
 
         # NOTE(michel-aractingi): Make sure all info values are supported by the transport layer
+        # NOTE:确保info中的数据类型兼容传输层
         for k, v in info.items():
             if isinstance(v, np.bool_):
                 info[k] = bool(v)
@@ -321,6 +323,7 @@ def act_with_policy(
             elif isinstance(v, np.integer):
                 info[k] = int(v)
 
+        # NOTE:创建转换数据并存储list_transition_to_send_to_learner列表当中
         list_transition_to_send_to_learner.append(
             Transition(
                 state=obs,
@@ -332,52 +335,55 @@ def act_with_policy(
                 complementary_info=info,
             )
         )
-        # assign obs to the next obs and continue the rollout
+        # NOTE:assign obs to the next obs and continue the rollout
         obs = next_obs
 
+        # NOTE:如果此时的状态是done完成 或者 是truncated提前终止，则进行更新策略参数
         if done or truncated:
             logging.info(f"[ACTOR] Global step {interaction_step}: Episode reward: {sum_reward_episode}")
-
+            # NOTE:更新策略参数
             update_policy_parameters(policy=policy.actor, parameters_queue=parameters_queue, device=device)
 
+            # NOTE:如果list_transition_to_send_to_learner列表不为空，则将列表中的转换数据推送到传输队列中
             if len(list_transition_to_send_to_learner) > 0:
                 push_transitions_to_transport_queue(
-                    transitions=list_transition_to_send_to_learner,
-                    transitions_queue=transitions_queue,
+                    transitions=list_transition_to_send_to_learner, # 四元组列表
+                    transitions_queue=transitions_queue, # 传输队列
                 )
-                list_transition_to_send_to_learner = []
+                list_transition_to_send_to_learner = [] # NOTE: 传输完毕，清空列表
 
-            stats = get_frequency_stats(policy_timer)
-            policy_timer.reset()
+            stats = get_frequency_stats(policy_timer) # 获取策略推理频率统计
+            policy_timer.reset() # 重置策略推理计时器
 
-            # Calculate intervention rate
-            intervention_rate = 0.0
-            if episode_total_steps > 0:
-                intervention_rate = episode_intervention_steps / episode_total_steps
+            # NOTE:Calculate intervention rate
+            intervention_rate = 0.0 # 干预率
+            if episode_total_steps > 0: # 如果总步数大于0
+                intervention_rate = episode_intervention_steps / episode_total_steps # 干预率 = 干预步数 / 总步数
 
-            # Send episodic reward to the learner
+            # NOTE:Send episodic reward to the learner - 发送该回合的统计信息
             interactions_queue.put(
                 python_object_to_bytes(
                     {
-                        "Episodic reward": sum_reward_episode,
-                        "Interaction step": interaction_step,
-                        "Episode intervention": int(episode_intervention),
-                        "Intervention rate": intervention_rate,
+                        "Episodic reward": sum_reward_episode, # 此次episode的累计奖励
+                        "Interaction step": interaction_step, # 此次episode的交互步数
+                        "Episode intervention": int(episode_intervention), # 此次episode是否发生干预
+                        "Intervention rate": intervention_rate, # 此次episode的干预率
                         **stats,
                     }
                 )
             )
 
-            # Reset intervention counters
-            sum_reward_episode = 0.0
-            episode_intervention = False
+            # NOTE:Reset intervention counters - 该回合已结束
+            sum_reward_episode = 0.0       
+            episode_intervention = False   
             episode_intervention_steps = 0
             episode_total_steps = 0
             obs, info = online_env.reset()
-
+        
+        # NOTE: 频率控制 - 如果fps不为空，则进行频率控制
         if cfg.env.fps is not None:
-            dt_time = time.perf_counter() - start_time
-            busy_wait(1 / cfg.env.fps - dt_time)
+            dt_time = time.perf_counter() - start_time # 计算执行时间
+            busy_wait(1 / cfg.env.fps - dt_time) # 使用 busy_wait 进行精确的时间控制，确保每秒执行的次数不超过cfg.env.fps
 
 
 #################################################
@@ -681,9 +687,9 @@ def push_transitions_to_transport_queue(transitions: list, transitions_queue):
         message_queue: Queue to send messages to learner
         chunk_size: Size of each chunk to send
     """
-    transition_to_send_to_learner = []
+    transition_to_send_to_learner = [] # 当前要存放的列表
     for transition in transitions:
-        tr = move_transition_to_device(transition=transition, device="cpu")
+        tr = move_transition_to_device(transition=transition, device="cpu") # 将当前action
         for key, value in tr["state"].items():
             if torch.isnan(value).any():
                 logging.warning(f"Found NaN values in transition {key}")
