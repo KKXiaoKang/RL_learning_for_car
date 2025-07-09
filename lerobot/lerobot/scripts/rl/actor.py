@@ -342,7 +342,7 @@ def act_with_policy(
         if done or truncated:
             logging.info(f"[ACTOR] Global step {interaction_step}: Episode reward: {sum_reward_episode}")
             # NOTE:更新策略参数
-            update_policy_parameters(policy=policy.actor, parameters_queue=parameters_queue, device=device)
+            update_policy_parameters(policy=policy, parameters_queue=parameters_queue, device=device)
 
             # NOTE:如果list_transition_to_send_to_learner列表不为空，则将列表中的转换数据推送到传输队列中
             if len(list_transition_to_send_to_learner) > 0:
@@ -669,9 +669,19 @@ def update_policy_parameters(policy: SACPolicy, parameters_queue: Queue, device)
     bytes_state_dict = get_last_item_from_queue(parameters_queue, block=False)
     if bytes_state_dict is not None:
         logging.info("[ACTOR] Load new parameters from Learner.")
-        state_dict = bytes_to_state_dict(bytes_state_dict)
-        state_dict = move_state_dict_to_device(state_dict, device=device)
-        policy.load_state_dict(state_dict)
+        state_dicts = bytes_to_state_dict(bytes_state_dict)
+
+        # Load actor state dict
+        actor_state_dict = move_state_dict_to_device(state_dicts["policy"], device=device)
+        policy.actor.load_state_dict(actor_state_dict)
+
+        # Load discrete critic if present
+        if hasattr(policy, "discrete_critic") and "discrete_critic" in state_dicts:
+            discrete_critic_state_dict = move_state_dict_to_device(
+                state_dicts["discrete_critic"], device=device
+            )
+            policy.discrete_critic.load_state_dict(discrete_critic_state_dict)
+            logging.info("[ACTOR] Loaded discrete critic parameters from Learner.")
 
 
 #################################################
