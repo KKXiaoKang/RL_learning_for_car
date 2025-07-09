@@ -2,6 +2,12 @@ from typing import Any, Dict, Tuple
 
 import numpy as np
 from gymnasium import spaces
+import rospy
+import message_filters
+from kuavo_msgs.msg import jointCmd
+from geometry_msgs.msg import PoseStamped
+from kuavo_msgs.srv import resetIsaaclab
+
 
 from gym_hil.isaacLab_gym_env import IsaacLabGymEnv
 
@@ -10,14 +16,15 @@ class RLCarGymEnv(IsaacLabGymEnv):
     """
     A gymnasium environment for the RL car task in Isaac Lab.
     This class defines the task-specific logic, including reward calculation,
-    termination conditions, and observation/action spaces, based on the
-    logic from the original GymEnvWrapper.
+    termination conditions, and observation/action spaces. It implements the
+    ROS communication details for this specific task.
     """
     
     metadata = {"render_modes": ["human"], "render_fps": 30}
 
     def __init__(self, debug: bool = False):
-        # Call the base class constructor to set up ROS communication
+        # The base class __init__ will initialize the node and call 
+        # _setup_ros_communication, so it must be called first.
         super().__init__()
 
         # Define observation and action spaces based on sac.py
@@ -58,6 +65,70 @@ class RLCarGymEnv(IsaacLabGymEnv):
         self.reach_agent_radius = 1.0
 
         self.last_action = np.zeros(self.action_space.shape, dtype=np.float32)
+
+    def _setup_ros_communication(self):
+        """Sets up the ROS publishers, subscribers, and service clients for the RL Car task."""
+        # Publishers
+        self.cmd_pub = rospy.Publisher('/joint_cmd', jointCmd, queue_size=1)
+        
+        # Service Clients
+        self.reset_client = rospy.ServiceProxy('/isaac_lab_reset_scene', resetIsaaclab)
+
+        # Subscribers with message_filters for synchronization
+        robot_pose_sub = message_filters.Subscriber('/robot_pose', PoseStamped)
+        goal_pose_sub = message_filters.Subscriber('/goal_pose', PoseStamped)
+        goal_torso_pose_sub = message_filters.Subscriber('/goal_torso_pose', PoseStamped)
+
+        self.ts = message_filters.ApproximateTimeSynchronizer(
+            [robot_pose_sub, goal_pose_sub, goal_torso_pose_sub],
+            queue_size=10,
+            slop=0.1
+        )
+        self.ts.registerCallback(self._obs_callback)
+
+    def _obs_callback(self, robot_pose, goal_pose, goal_torso_pose):
+        """Synchronously handles incoming observation messages and populates the observation buffer."""
+        with self.obs_lock:
+            robot_state = np.array([
+                robot_pose.pose.position.x, robot_pose.pose.position.y, robot_pose.pose.position.z,
+                robot_pose.pose.orientation.x, robot_pose.pose.orientation.y, 
+                robot_pose.pose.orientation.z, robot_pose.pose.orientation.w
+            ])
+            
+            goal_state = np.array([
+                goal_pose.pose.position.x, goal_pose.pose.position.y, goal_pose.pose.position.z,
+                goal_pose.pose.orientation.x, goal_pose.pose.orientation.y, 
+                goal_pose.pose.orientation.z, goal_pose.pose.orientation.w
+            ])
+
+            goal_torso_state = np.array([
+                goal_torso_pose.pose.position.x, goal_torso_pose.pose.position.y, goal_torso_pose.pose.position.z,
+                goal_torso_pose.pose.orientation.x, goal_torso_pose.pose.orientation.y, 
+                goal_torso_pose.pose.orientation.z, goal_torso_pose.pose.orientation.w
+            ])
+            
+            self.latest_obs = np.concatenate([robot_state, goal_state, goal_torso_state]).astype(np.float32)
+            self.new_obs_event.set()
+
+    def _send_action(self, action: np.ndarray):
+        """Publishes an action to the robot."""
+        cmd = jointCmd()
+        cmd.tau = action.tolist()
+        self.cmd_pub.publish(cmd)
+
+    def _reset_simulation(self):
+        """Calls the ROS service to reset the Isaac Lab simulation."""
+        try:
+            rospy.wait_for_service('/isaac_lab_reset_scene', timeout=5.0)
+            # The '0' indicates to use a new random seed within the simulation
+            resp = self.reset_client(0) 
+            if not resp.success:
+                raise RuntimeError(f"Failed to reset simulation: {resp.message}")
+            rospy.loginfo("Simulation reset successfully via ROS service.")
+        except rospy.ServiceException as e:
+            raise RuntimeError(f"Service call to reset simulation failed: {str(e)}")
+        except rospy.ROSException as e:
+             raise RuntimeError(f"Failed to connect to reset service: {str(e)}")
 
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
         """Execute one time step within the environment."""
@@ -160,7 +231,6 @@ class RLCarGymEnv(IsaacLabGymEnv):
 
 
 if __name__ == "__main__":
-    import rospy
     import traceback
     
     print("Starting RLCarGymEnv test script...")
