@@ -1875,6 +1875,15 @@ def make_robot_env(cfg: EnvConfig) -> gym.Env:
             env = TorchActionWrapper(env=env, device=cfg.device)
             return env
     
+        if "RLKuavo" in cfg.task:
+            env = gym.make(f"gym_hil/{cfg.task}")
+            # Wrappers to make the environment compatible with the rest of the script.
+            env = GymHilObservationProcessorWrapper(env=env)
+            env = GymHilDeviceWrapper(env=env, device=cfg.device)
+            env = BatchCompatibleWrapper(env=env)
+            env = TorchActionWrapper(env=env, device=cfg.device)
+            return env
+    
         # TODO (azouitine)
         env = gym.make(
             f"gym_hil/{cfg.task}",

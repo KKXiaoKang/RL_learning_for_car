@@ -750,3 +750,141 @@ class RLCarGamepadController(GamepadController):
         # This controller returns a 2D action, not 3D deltas.
         # This method is here for compatibility with the base class.
         raise NotImplementedError("RLCarGamepadController uses get_action(), not get_deltas().")
+
+class RLKuavoGamepadController(GamepadController):
+    """
+    Generate velocity commands from gamepad input for the Kuavo robot.
+    This controller only affects the `cmd_vel` portion of the action space,
+    leaving the arm joints at a neutral (zero) command during intervention.
+    """
+
+    def __init__(self, config_path=None, deadzone=0.1, enable_roll_pitch_control=False):
+        """
+        Initialize the Kuavo gamepad controller.
+
+        Args:
+            config_path: Path to the controller configuration JSON file.
+            deadzone: Joystick deadzone to prevent drift.
+            enable_roll_pitch_control: If True, enables control over angular x and y velocities.
+        """
+        # We don't use the step sizes from the base class, but it's good practice to call super.
+        super().__init__(config_path=config_path, deadzone=deadzone)
+
+        self.enable_roll_pitch_control = enable_roll_pitch_control
+
+        if self.enable_roll_pitch_control:
+            # Matches RLKuavoGymEnv vel_action_scale for 6D control
+            self.vel_action_scale = np.array([0.5, 0.5, 0.5, 0.25, 0.25, 0.25])
+            self.vel_dim = 6
+        else:
+            # Matches RLKuavoGymEnv vel_action_scale for 4D control
+            self.vel_action_scale = np.array([0.5, 0.5, 0.5, 0.25])
+            self.vel_dim = 4
+
+        self.arm_dim = 14
+        self.action_dim = self.vel_dim + self.arm_dim
+
+    def _print_controls(self):
+        """Override to print Kuavo-specific controls."""
+        if self.controller_type == "bt2pro":
+            print("\n--- RLKuavo Gamepad Controls (bt2pro) ---")
+            print("  Button 7: Press and hold for manual intervention")
+            print("  Left Stick (Up/Down): Forward/Backward (linear x)")
+            print("  Left Stick (Left/Right): Strafe Left/Right (linear y)")
+            print("  Right Stick (Up/Down): Move Up/Down (linear z)")
+            print("  Right Stick (Left/Right): Turn Left/Right (angular z)")
+            print("\n  Button 6: End episode with SUCCESS")
+            print("  Button 0: End episode with FAILURE")
+            print("  Button 3: Rerecord episode")
+            print("---------------------------------\n")
+        else:  # For xbox-like controllers
+            buttons = self.controller_config.get("buttons", {})
+            print("\n--- RLKuavo Gamepad Controls (Xbox-like) ---")
+            print(f"  {buttons.get('rb', 'RB')} button: Press and hold for manual intervention")
+            print("  Left Stick (Up/Down): Forward/Backward (linear x)")
+            print("  Left Stick (Left/Right): Strafe Left/Right (linear y)")
+            print("  Right Stick (Up/Down): Move Up/Down (linear z)")
+            print("  Right Stick (Left/Right): Turn Left/Right (angular z)")
+            if self.enable_roll_pitch_control:
+                print(f"  {buttons.get('lt', 'LT')}/{buttons.get('rt', 'RT')} triggers: Roll (angular x)")
+            print(f"\n  {buttons.get('y', 'Y')}/Triangle: End episode with SUCCESS")
+            print(f"  {buttons.get('a', 'A')}/Cross: End episode with FAILURE")
+            print(f"  {buttons.get('x', 'X')}/Square: Rerecord episode")
+            print("---------------------------------\n")
+
+    def get_action(self) -> np.ndarray:
+        """Get the full action vector from the gamepad state."""
+        import pygame
+
+        try:
+            axes_input = np.zeros(self.vel_dim)
+
+            if self.controller_type == "bt2pro":
+                # Using bt2pro specific mappings
+                # [lx, ly, rx, ry, lt, rt]
+                lx, ly = self.joystick.get_axis(0), -self.joystick.get_axis(1)
+                rx, ry = self.joystick.get_axis(2), -self.joystick.get_axis(3)
+                
+                axes_input[0] = ly  # Linear X
+                axes_input[1] = lx  # Linear Y
+                axes_input[2] = ry  # Linear Z
+                axes_input[3] = rx  # Angular Z
+                if self.enable_roll_pitch_control:
+                    # Placeholder for roll/pitch on bt2pro
+                    pass
+
+            else: # Xbox-like controller
+                axes = self.controller_config.get("axes", {})
+                axis_inversion = self.controller_config.get("axis_inversion", {})
+
+                # Axis names for clarity
+                ax_lu, ax_ld, ax_ru, ax_rd = "left_y", "left_x", "right_y", "right_x"
+                
+                # Get axis indices
+                axis_indices = {name: axes.get(name, default_idx) for name, default_idx in 
+                                [(ax_lu, 1), (ax_ld, 0), (ax_ru, 4), (ax_rd, 3)]} # Note: Xbox controller right stick axes are 3 and 4 in pygame
+                
+                # Read raw axis values
+                raw_axes = {name: self.joystick.get_axis(idx) for name, idx in axis_indices.items()}
+
+                # Apply inversion
+                inversions = {name: axis_inversion.get(name, default) for name, default in
+                              [(ax_lu, True), (ax_ld, False), (ax_ru, True), (ax_rd, False)]}
+
+                processed_axes = {name: -val if inversions[name] else val for name, val in raw_axes.items()}
+
+                # Map to velocity commands
+                axes_input[0] = processed_axes[ax_lu] # Linear X
+                axes_input[1] = processed_axes[ax_ld] # Linear Y
+                axes_input[2] = processed_axes[ax_ru] # Linear Z
+                axes_input[3] = processed_axes[ax_rd] # Angular Z
+                
+                if self.enable_roll_pitch_control:
+                    # Using triggers for roll (angular x)
+                    lt_axis, rt_axis = axes.get("lt", 2), axes.get("rt", 5)
+                    lt_val = (self.joystick.get_axis(lt_axis) + 1) / 2 # Normalize to 0-1
+                    rt_val = (self.joystick.get_axis(rt_axis) + 1) / 2 # Normalize to 0-1
+                    axes_input[4] = rt_val - lt_val # angular.x (roll)
+                    # axes_input[5] would be angular.y (pitch) - not mapped yet
+
+            # Apply deadzone to all axes
+            for i in range(len(axes_input)):
+                if abs(axes_input[i]) < self.deadzone:
+                    axes_input[i] = 0.0
+            
+            # Scale the velocity commands
+            vel_action = axes_input * self.vel_action_scale
+
+            # Create the full action vector with zero for arm joints
+            full_action = np.zeros(self.action_dim, dtype=np.float32)
+            full_action[:self.vel_dim] = vel_action
+            
+            return full_action
+
+        except pygame.error:
+            print("Error reading gamepad. Is it still connected?")
+            return np.zeros(self.action_dim, dtype=np.float32)
+
+    def get_deltas(self):
+        """This controller returns a full action, not 3D deltas."""
+        raise NotImplementedError("RLKuavoGamepadController uses get_action(), not get_deltas().")

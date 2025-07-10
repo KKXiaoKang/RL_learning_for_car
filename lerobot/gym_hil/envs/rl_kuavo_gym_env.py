@@ -47,9 +47,10 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         self.image_size = image_size
 
         # State observation dimension
-        # 7 (left_eef) + 7 (right_eef) + 14 (arm_joints) + 3 (imu_ang_vel) + 3 (imu_lin_accel)
-        # + 12 (wbc) + 3 (box_pos) + 4 (box_orn) = 53
-        state_dim = 53
+        # agent_pos: 7 (left_eef) + 7 (right_eef) + 14 (arm_joints) + 3 (imu_ang_vel) + 3 (imu_lin_accel) + 12 (wbc) = 46
+        # environment_state: 3 (box_pos) + 4 (box_orn) = 7
+        agent_dim = 46
+        env_state_dim = 7
 
         if self.enable_roll_pitch_control:
             vel_dim = 6
@@ -60,11 +61,26 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             
         action_dim = vel_dim + 14  # 14 for arm joints
 
+        agent_box = spaces.Box(-np.inf, np.inf, (agent_dim,), dtype=np.float32)
+        env_box = spaces.Box(-np.inf, np.inf, (env_state_dim,), dtype=np.float32)
+
         # Define observation and action spaces for the Kuavo robot
-        self.observation_space = spaces.Dict({
-            "state": spaces.Box(low=-np.inf, high=np.inf, shape=(state_dim,), dtype=np.float32),
-            "pixels": spaces.Box(0, 255, (image_size[0], image_size[1], 3), dtype=np.uint8)
-        })
+        self.observation_space = spaces.Dict(
+            {
+                "pixels": spaces.Dict(
+                    {
+                        "front": spaces.Box(
+                            0,
+                            255,
+                            (self.image_size[0], self.image_size[1], 3),
+                            dtype=np.uint8,
+                        )
+                    }
+                ),
+                "agent_pos": agent_box,
+                "environment_state": env_box,
+            }
+        )
 
         # Action space
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(action_dim,), dtype=np.float32)
@@ -171,7 +187,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
                 cv_image = self.bridge.imgmsg_to_cv2(image, "bgr8")
                 # TODO: Resize image if necessary, for now assuming it's the correct size
                 # cv_image = cv2.resize(cv_image, self.image_size)
-                rgb_image = cv_image[:, :, ::-1] # BGR to RGB
+                rgb_image = cv_image[:, :, ::-1].copy() # BGR to RGB
 
                 # Process state data
                 left_eef_data = np.array([
@@ -194,14 +210,19 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
                     box_support.pose.orientation.z, box_support.pose.orientation.w
                 ])
 
-                state_obs = np.concatenate([
+                agent_pos_obs = np.concatenate([
                     left_eef_data, right_eef_data, arm_data, ang_vel_data,
-                    lin_accel_data, wbc_data, box_pos_data, box_orn_data
+                    lin_accel_data, wbc_data
+                ]).astype(np.float32)
+
+                env_state_obs = np.concatenate([
+                    box_pos_data, box_orn_data
                 ]).astype(np.float32)
 
                 self.latest_obs = {
-                    "state": state_obs,
-                    "pixels": rgb_image
+                    "pixels": {"front": rgb_image},
+                    "agent_pos": agent_pos_obs,
+                    "environment_state": env_state_obs,
                 }
                 self.new_obs_event.set()
 
@@ -277,11 +298,12 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         info = {}
         
         # Extract data from observation
-        state = obs['state']
-        left_eef_pos = state[0:3]
-        right_eef_pos = state[7:10]
-        box_pos = state[46:49]
-        box_orn = state[49:53]
+        agent_state = obs['agent_pos']
+        env_state = obs['environment_state']
+        left_eef_pos = agent_state[0:3]
+        right_eef_pos = agent_state[7:10]
+        box_pos = env_state[0:3]
+        box_orn = env_state[3:7]
 
         # Calculate distances
         dist_left_hand_to_box = np.linalg.norm(left_eef_pos - box_pos)
@@ -338,8 +360,8 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         obs = self._get_observation()
 
         # Store initial box pose for reward calculation
-        box_pos = obs['state'][46:49]
-        box_orn = obs['state'][49:53]
+        box_pos = obs['environment_state'][0:3]
+        box_orn = obs['environment_state'][3:7]
         self.initial_box_pose = {'position': box_pos, 'orientation': box_orn}
 
         self.last_action.fill(0.0)
@@ -371,8 +393,9 @@ if __name__ == "__main__":
             # Reset the environment
             obs, info = env.reset()
             print(f"Initial observation received.")
-            print(f"  State shape: {obs['state'].shape}")
-            print(f"  Pixels shape: {obs['pixels'].shape}")
+            print(f"  Agent_pos shape: {obs['agent_pos'].shape}")
+            print(f"  Environment_state shape: {obs['environment_state'].shape}")
+            print(f"  Pixels shape: {obs['pixels']['front'].shape}")
 
             episode_reward = 0
             terminated = False
@@ -389,8 +412,9 @@ if __name__ == "__main__":
                 obs, reward, terminated, truncated, info = env.step(action)
                 
                 print(f"Received observation:")
-                print(f"  State shape: {obs['state'].shape}")
-                print(f"  Pixels shape: {obs['pixels'].shape}")
+                print(f"  Agent_pos shape: {obs['agent_pos'].shape}")
+                print(f"  Environment_state shape: {obs['environment_state'].shape}")
+                print(f"  Pixels shape: {obs['pixels']['front'].shape}")
                 print(f"Reward: {reward:.4f}, Terminated: {terminated}, Info: {info}")
                 
                 episode_reward += reward

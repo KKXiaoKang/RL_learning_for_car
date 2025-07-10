@@ -18,6 +18,7 @@ import gymnasium as gym
 
 from gym_hil.isaacLab_gym_env import IsaacLabGymEnv
 from gym_hil.envs.rl_car_gym_env import RLCarGymEnv
+from gym_hil.envs.rl_kuavo_gym_env import RLKuavoGymEnv
 from gym_hil.mujoco_gym_env import FrankaGymEnv, GymRenderingSpec, MujocoGymEnv
 from gym_hil.wrappers.factory import make_env, wrap_env
 from gym_hil.wrappers.viewer_wrapper import PassiveViewerWrapper
@@ -27,6 +28,7 @@ __all__ = [
     "FrankaGymEnv",
     "IsaacLabGymEnv",
     "RLCarGymEnv",
+    "RLKuavoGymEnv",
     "GymRenderingSpec",
     "PassiveViewerWrapper",
     "make_env",
@@ -91,5 +93,18 @@ register(
 register(
     id="gym_hil/RLCarGamepad-v0",
     entry_point="gym_hil.wrappers.factory:make_rl_car_gamepad_env",
+    max_episode_steps=200,  # Or your preferred step limit
+)
+
+# Register the base environment for the RL Kuavo robot
+register(
+    id="gym_hil/RLKuavo-v0",
+    entry_point="gym_hil.envs.rl_kuavo_gym_env:RLKuavoGymEnv",
+    max_episode_steps=200,
+)
+
+register(
+    id="gym_hil/RLKuavoGamepad-v0",
+    entry_point="gym_hil.wrappers.factory:make_rl_kuavo_gamepad_env",
     max_episode_steps=200,  # Or your preferred step limit
 )
