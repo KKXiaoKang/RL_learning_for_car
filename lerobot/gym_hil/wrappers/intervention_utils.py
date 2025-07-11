@@ -888,3 +888,127 @@ class RLKuavoGamepadController(GamepadController):
     def get_deltas(self):
         """This controller returns a full action, not 3D deltas."""
         raise NotImplementedError("RLKuavoGamepadController uses get_action(), not get_deltas().")
+
+class Quest3Controller(InputController):
+    """Generate intervention signals from Quest3 VR device input."""
+
+    def __init__(self, intervention_threshold=1.0, rerecord_threshold=1.0):
+        """
+        Initialize the Quest3 controller.
+
+        Args:
+            intervention_threshold: Threshold for right_grip to trigger intervention (default: 1.0)
+            rerecord_threshold: Threshold for left_grip to trigger rerecord (default: 1.0)
+        """
+        super().__init__()
+        self.intervention_threshold = intervention_threshold
+        self.rerecord_threshold = rerecord_threshold
+        self.subscriber = None
+        self.latest_joystick_data = None
+        self.ros_available = False
+        
+        # Try to import ROS dependencies
+        try:
+            import rospy
+            from noitom_hi5_hand_udp_python.msg import JoySticks
+            self.rospy = rospy
+            self.JoySticks = JoySticks
+            self.ros_available = True
+        except ImportError as e:
+            print(f"Warning: ROS dependencies not available for Quest3Controller: {e}")
+            print("Please ensure ROS and noitom_hi5_hand_udp_python package are installed")
+
+    def start(self):
+        """Start the ROS subscriber for Quest3 joystick data."""
+        if not self.ros_available:
+            print("Cannot start Quest3Controller: ROS dependencies not available")
+            self.running = False
+            return
+
+        def joystick_callback(msg):
+            """Callback function for joystick data."""
+            self.latest_joystick_data = msg
+            
+            # Check intervention condition based on right_grip
+            if msg.right_grip >= self.intervention_threshold: # - 右摇杆下扳机键 - 干预
+                self.intervention_flag = True
+            else:
+                self.intervention_flag = False
+            
+            # Check for rerecord condition based on left_grip - 左摇杆下扳机键 - 重录回合
+            if msg.left_grip >= self.rerecord_threshold:
+                self.episode_end_status = "rerecord_episode"
+            
+            # Optional: Check for episode end conditions using other buttons
+            # You can extend this based on Quest3 button mappings
+            elif hasattr(msg, 'left_second_button_pressed') and msg.left_second_button_pressed: # 左摇杆-Y键-成功
+                self.episode_end_status = "success"
+            elif hasattr(msg, 'left_first_button_pressed') and msg.left_first_button_pressed: # 左摇杆-X键-失败
+                self.episode_end_status = "failure"
+
+        try:
+            self.subscriber = self.rospy.Subscriber(
+                '/quest_joystick_data', 
+                self.JoySticks, 
+                joystick_callback,
+                queue_size=1
+            )
+            print("Quest3 Controller started - monitoring /quest_joystick_data")
+            print(f"  Right grip >= {self.intervention_threshold}: Enable intervention")
+            print(f"  Left grip >= {self.rerecord_threshold}: Rerecord episode")
+            print("  Left second button: End episode with SUCCESS")
+            print("  Left first button: End episode with FAILURE")
+        except Exception as e:
+            print(f"Failed to start Quest3 subscriber: {e}")
+            self.running = False
+
+    def stop(self):
+        """Stop the ROS subscriber."""
+        if self.subscriber:
+            self.subscriber.unregister()
+            self.subscriber = None
+        print("Quest3 Controller stopped")
+
+    def should_intervene(self):
+        """Return True if right grip exceeds threshold."""
+        return self.intervention_flag
+
+    def update(self):
+        """Update is handled by ROS callback, no action needed."""
+        # Check if we haven't received data recently (optional timeout check)
+        if self.latest_joystick_data is None:
+            # No data received yet, intervention_flag should remain False
+            self.intervention_flag = False
+
+    def get_deltas(self):
+        """
+        Quest3Controller doesn't provide motion deltas directly.
+        This method returns zero deltas as it's primarily for intervention detection.
+        """
+        return 0.0, 0.0, 0.0
+
+    def get_joystick_data(self):
+        """
+        Get the latest joystick data from Quest3.
+        
+        Returns:
+            Latest JoySticks message or None if no data available
+        """
+        return self.latest_joystick_data
+
+    def get_grip_values(self):
+        """
+        Get current grip values from both controllers.
+        
+        Returns:
+            Tuple of (left_grip, right_grip) or (0.0, 0.0) if no data
+        """
+        if self.latest_joystick_data:
+            return (self.latest_joystick_data.left_grip, self.latest_joystick_data.right_grip)
+        return (0.0, 0.0)
+
+    def reset(self):
+        """Reset the controller state."""
+        self.intervention_flag = False
+        self.episode_end_status = None
+        # Note: We don't reset latest_joystick_data as it represents current hardware state

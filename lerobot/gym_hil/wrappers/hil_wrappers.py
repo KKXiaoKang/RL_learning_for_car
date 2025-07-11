@@ -17,6 +17,7 @@
 import logging
 import sys
 import time
+import threading
 
 import gymnasium as gym
 import numpy as np
@@ -518,4 +519,259 @@ class RLKuavoGamepadWrapper(gym.Wrapper):
         """Clean up resources when environment closes."""
         if hasattr(self, "controller"):
             self.controller.stop()
+        return self.env.close()
+
+class RLKuavoMetaVRWrapper(gym.Wrapper):
+    """
+    Wrapper that allows controlling the RLKuavo environment with Meta VR (Quest3) device.
+    When intervention is initiated, it listens to VR-generated control commands from
+    /mm/kuavo_arm_traj and /cmd_vel topics instead of letting the environment publish actions.
+    """
+
+    def __init__(
+        self,
+        env,
+        auto_reset=False,
+        intervention_threshold=1.0,
+        rerecord_threshold=1.0,
+    ):
+        """
+        Initialize the RLKuavo Meta VR controller wrapper.
+        
+        Args:
+            env: The environment to wrap
+            auto_reset: Whether to auto reset the environment when episode ends
+            intervention_threshold: Threshold for right_grip to trigger intervention
+            rerecord_threshold: Threshold for left_grip to trigger rerecord
+        """
+        super().__init__(env)
+        from gym_hil.wrappers.intervention_utils import Quest3Controller
+        
+        # Import ROS dependencies
+        try:
+            import rospy
+            from geometry_msgs.msg import Twist
+            from sensor_msgs.msg import JointState
+            self.rospy = rospy
+            self.Twist = Twist
+            self.JointState = JointState
+            self.ros_available = True
+        except ImportError:
+            print("Warning: ROS dependencies not available for VR intervention listening")
+            self.ros_available = False
+
+        self.controller = Quest3Controller(
+            intervention_threshold=intervention_threshold,
+            rerecord_threshold=rerecord_threshold,
+        )
+
+        self.auto_reset = auto_reset
+        self.controller.start()
+        
+        # State tracking for intervention
+        self.was_intervening = False
+        
+        # The zero action for Kuavo
+        self.zero_action = np.zeros(self.env.action_space.shape, dtype=np.float32)
+        
+        # VR intervention data
+        self.latest_cmd_vel = None
+        self.latest_arm_traj = None
+        self.vr_action_lock = threading.Lock()
+        
+        # Setup ROS subscribers for VR-generated commands
+        if self.ros_available:
+            self._setup_vr_listeners()
+
+    def _setup_vr_listeners(self):
+        """Setup ROS subscribers to listen to VR-generated control commands."""
+        try:
+            # Subscribe to VR-generated control topics
+            self.cmd_vel_sub = self.rospy.Subscriber(
+                '/cmd_vel', self.Twist, self._cmd_vel_callback, queue_size=1
+            )
+            self.arm_traj_sub = self.rospy.Subscriber(
+                '/mm/kuavo_arm_traj', self.JointState, self._arm_traj_callback, queue_size=1
+            )
+            print("VR intervention listeners setup successfully")
+        except Exception as e:
+            print(f"Failed to setup VR listeners: {e}")
+            self.ros_available = False
+
+    def _cmd_vel_callback(self, msg):
+        """Callback for VR-generated cmd_vel messages."""
+        with self.vr_action_lock:
+            self.latest_cmd_vel = msg
+
+    def _arm_traj_callback(self, msg):
+        """Callback for VR-generated arm trajectory messages."""
+        with self.vr_action_lock:
+            self.latest_arm_traj = msg
+
+    def _convert_vr_to_action(self):
+        """Convert VR-generated ROS messages to environment action format."""
+        with self.vr_action_lock:
+            cmd_vel = self.latest_cmd_vel
+            arm_traj = self.latest_arm_traj
+
+        # If no VR data available, return zero action
+        if cmd_vel is None or arm_traj is None:
+            return self.zero_action.copy()
+
+        action = np.zeros(self.env.action_space.shape, dtype=np.float32)
+        
+        # Convert cmd_vel to velocity action
+        if hasattr(self.env, 'enable_roll_pitch_control') and self.env.enable_roll_pitch_control:
+            # 6D velocity control
+            vel_action = np.array([
+                cmd_vel.linear.x,
+                cmd_vel.linear.y, 
+                cmd_vel.linear.z,
+                cmd_vel.angular.x,
+                cmd_vel.angular.y,
+                cmd_vel.angular.z
+            ])
+            # Normalize by vel_action_scale if available
+            if hasattr(self.env, 'vel_action_scale'):
+                vel_action = vel_action / self.env.vel_action_scale
+            action[:6] = vel_action
+            arm_start_idx = 6
+        else:
+            # 4D velocity control  
+            vel_action = np.array([
+                cmd_vel.linear.x,
+                cmd_vel.linear.y,
+                cmd_vel.linear.z, 
+                cmd_vel.angular.z
+            ])
+            # Normalize by vel_action_scale if available
+            if hasattr(self.env, 'vel_action_scale'):
+                vel_action = vel_action / self.env.vel_action_scale
+            action[:4] = vel_action
+            arm_start_idx = 4
+
+        # Convert arm trajectory to normalized action
+        if len(arm_traj.position) >= 14:
+            arm_positions_deg = np.array(arm_traj.position[:14])
+            # Convert degrees to radians
+            arm_positions_rad = np.deg2rad(arm_positions_deg)
+            
+            # Normalize to [-1, 1] using joint centers and scales if available
+            if hasattr(self.env, 'arm_joint_centers') and hasattr(self.env, 'arm_joint_scales'):
+                arm_action = (arm_positions_rad - self.env.arm_joint_centers) / self.env.arm_joint_scales
+                # Clamp to [-1, 1]
+                arm_action = np.clip(arm_action, -1.0, 1.0)
+            else:
+                # Fallback: assume positions are already in reasonable range
+                arm_action = np.clip(arm_positions_rad / np.pi, -1.0, 1.0)
+                
+            action[arm_start_idx:arm_start_idx+14] = arm_action
+
+        return action
+
+    def get_vr_action(self):
+        """
+        Get the current action from the Quest3 VR device and convert VR commands to actions.
+        """
+        self.controller.update()
+
+        intervention_is_active = self.controller.should_intervene()
+        
+        if intervention_is_active and self.ros_available:
+            # During intervention, use VR-generated commands
+            vr_action = self._convert_vr_to_action()
+        else:
+            # Not intervening or ROS not available, use zero action
+            vr_action = self.zero_action.copy()
+            
+        episode_end_status = self.controller.get_episode_end_status()
+
+        terminate_episode = episode_end_status is not None
+        success = episode_end_status == "success"
+        rerecord_episode = episode_end_status == "rerecord_episode"
+
+        return intervention_is_active, vr_action, terminate_episode, success, rerecord_episode
+
+    def step(self, action):
+        """
+        Step the environment, using VR input to override the policy's action when intervention is active.
+        """
+        (
+            is_intervening_now,
+            vr_action,
+            terminate_episode,
+            success,
+            rerecord_episode,
+        ) = self.get_vr_action()
+
+        # Intervention logic with state tracking
+        if is_intervening_now:
+            if not self.was_intervening:
+                # This is the first frame of intervention. Stop the robot.
+                print("VR Intervention started: Sending stop command.")
+                action = self.zero_action
+            else:
+                # Already intervening, use VR-generated action
+                action = vr_action
+        # If not intervening, the original `action` from the policy is used.
+
+        # Update the state for the next step.
+        self.was_intervening = is_intervening_now
+
+        # Control action publishing during intervention by setting the flag on underlying environment
+        if hasattr(self.env, 'unwrapped') and hasattr(self.env.unwrapped, '_should_publish_action'):
+            # During VR intervention, disable action publishing (VR system handles control)
+            self.env.unwrapped._should_publish_action = not (is_intervening_now and self.ros_available)
+        
+        # Step the environment normally
+        obs, reward, terminated, truncated, info = self.env.step(action)
+
+        terminated = terminated or terminate_episode
+
+        if success:
+            reward = 1.0
+
+        info["is_intervention"] = is_intervening_now
+        info["action_intervention"] = action
+        info["rerecord_episode"] = rerecord_episode
+        info["vr_grip_values"] = self.controller.get_grip_values()
+        
+        # Add VR data availability info for debugging
+        if is_intervening_now:
+            with self.vr_action_lock:
+                info["vr_cmd_vel_available"] = self.latest_cmd_vel is not None
+                info["vr_arm_traj_available"] = self.latest_arm_traj is not None
+
+        if terminated:
+            info["next.success"] = success
+            if self.auto_reset:
+                obs, reset_info = self.reset()
+                info.update(reset_info)
+
+        return obs, reward, terminated, False, info
+
+    def reset(self, **kwargs):
+        """Reset the environment."""
+        self.controller.reset()
+        self.was_intervening = False
+        
+        # Clear VR intervention data
+        with self.vr_action_lock:
+            self.latest_cmd_vel = None
+            self.latest_arm_traj = None
+            
+        return self.env.reset(**kwargs)
+
+    def close(self):
+        """Clean up resources when environment closes."""
+        if hasattr(self, "controller"):
+            self.controller.stop()
+            
+        # Clean up ROS subscribers
+        if self.ros_available:
+            if hasattr(self, 'cmd_vel_sub'):
+                self.cmd_vel_sub.unregister()
+            if hasattr(self, 'arm_traj_sub'):
+                self.arm_traj_sub.unregister()
+                
         return self.env.close()

@@ -28,7 +28,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
 
     metadata = {"render_modes": ["human"], "render_fps": 30}
 
-    def __init__(self, debug: bool = False, image_size=(224, 224), enable_roll_pitch_control: bool = False):
+    def __init__(self, debug: bool = True, image_size=(224, 224), enable_roll_pitch_control: bool = False):
         # Separate storage for headerless topics that will be initialized in callbacks.
         # This needs to be done BEFORE super().__init__() which sets up subscribers.
         self.latest_ang_vel = None
@@ -119,6 +119,9 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         # Task-specific state
         self.initial_box_pose = None
         self.last_action = np.zeros(self.action_space.shape, dtype=np.float32)
+        
+        # Control flag for VR intervention (when False, skip action publishing)
+        self._should_publish_action = True
 
     def _ang_vel_callback(self, msg):
         with self.ang_vel_lock:
@@ -154,18 +157,17 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         eef_right_sub = message_filters.Subscriber('/fk/eef_pose_right', PoseStamped)
         image_sub = message_filters.Subscriber('/camera/rgb/image_raw', Image)
         sensors_sub = message_filters.Subscriber('/sensors_data_raw', sensorsData)
-        box_origin_sub = message_filters.Subscriber('/box_origin_pose', PoseStamped)
-        box_support_sub = message_filters.Subscriber('/box_support_pose', PoseStamped)
+        box_real_sub = message_filters.Subscriber('/box_real_pose', PoseStamped)
 
         self.ts = message_filters.ApproximateTimeSynchronizer(
-            [eef_left_sub, eef_right_sub, image_sub, sensors_sub, box_origin_sub, box_support_sub],
+            [eef_left_sub, eef_right_sub, image_sub, sensors_sub, box_real_sub],
             queue_size=10,
             slop=0.1,  # Increased slop for the large number of topics
             allow_headerless=True,  # Allow synchronizing messages without a header
         )
         self.ts.registerCallback(self._obs_callback)
 
-    def _obs_callback(self, left_eef, right_eef, image, sensors, box_origin, box_support):
+    def _obs_callback(self, left_eef, right_eef, image, sensors, box_real):
         """Synchronously handles incoming observation messages and populates the observation buffer."""
         # Retrieve the latest data from headerless topics
         with self.ang_vel_lock:
@@ -203,11 +205,11 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
                 lin_accel_data = np.array(lin_accel.data[:3])
                 wbc_data = np.array(wbc.state.value[:12])
                 box_pos_data = np.array([
-                    box_origin.pose.position.x, box_origin.pose.position.y, box_origin.pose.position.z
+                    box_real.pose.position.x, box_real.pose.position.y, box_real.pose.position.z
                 ])
                 box_orn_data = np.array([
-                    box_support.pose.orientation.x, box_support.pose.orientation.y,
-                    box_support.pose.orientation.z, box_support.pose.orientation.w
+                    box_real.pose.orientation.x, box_real.pose.orientation.y,
+                    box_real.pose.orientation.z, box_real.pose.orientation.w
                 ])
 
                 agent_pos_obs = np.concatenate([
@@ -232,7 +234,14 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
     def _send_action(self, action: np.ndarray):
         """
         Implement this method to publish an action to the Kuavo robot.
+        
+        Args:
+            action: The action array to send
         """
+        if not self._should_publish_action:
+            # During VR intervention, don't publish actions - VR system handles control
+            return
+            
         # De-normalize and publish cmd_vel
         twist_cmd = Twist()
         
@@ -322,8 +331,9 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         orientation_success = orientation_similarity > 0.98 # within ~11 degrees
         hands_close_success = dist_left_hand_to_box < 0.5 and dist_right_hand_to_box < 0.5
         
-        reached_goal = lift_success and orientation_success and hands_close_success
-        
+        # reached_goal = lift_success and orientation_success and hands_close_success
+        reached_goal = lift_success and hands_close_success
+
         reward = 1.0 if reached_goal else 0.0
         done = reached_goal
 
@@ -334,13 +344,17 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         info["dist_right_hand_to_box"] = dist_right_hand_to_box
 
         if self.debug:
-            print(f"z_lift: {z_lift:.3f}, orient_sim: {orientation_similarity:.3f}, success: {reached_goal}")
+            # print(f"z_lift: {z_lift:.3f}, orient_sim: {orientation_similarity:.3f}, success: {reached_goal}")
+            print(f"z_lift: {z_lift:.3f}, success: {reached_goal}")
             
         return reward, done, info
 
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
         """
         Implement the step logic for the Kuavo robot.
+        
+        Args:
+            action: The action to execute
         """
         self._send_action(action)
         obs = self._get_observation()
@@ -363,7 +377,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         box_pos = obs['environment_state'][0:3]
         box_orn = obs['environment_state'][3:7]
         self.initial_box_pose = {'position': box_pos, 'orientation': box_orn}
-
+        rospy.loginfo(f"reset - Initial box position: {box_pos}")
         self.last_action.fill(0.0)
         
         if self.debug:

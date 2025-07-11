@@ -13,6 +13,7 @@ from gym_hil.wrappers.hil_wrappers import (
     ResetDelayWrapper,
     RLCarGamepadWrapper,
     RLKuavoGamepadWrapper,
+    RLKuavoMetaVRWrapper,
 )
 from gym_hil.wrappers.viewer_wrapper import PassiveViewerWrapper
 
@@ -148,4 +149,23 @@ def make_rl_kuavo_gamepad_env(**kwargs):
     env = gym.make("gym_hil/RLKuavo-v0", **kwargs)
     # Wrap it with the gamepad wrapper
     env = RLKuavoGamepadWrapper(env)
+    return env
+
+
+def make_rl_kuavo_meta_vr_env(
+    auto_reset=False,
+    intervention_threshold=1.0,
+    rerecord_threshold=1.0,
+    **kwargs
+):
+    """Factory function to create the RLKuavo environment with Meta VR (Quest3) support."""
+    # Create the base RLKuavo environment
+    env = gym.make("gym_hil/RLKuavo-v0", **kwargs)
+    # Wrap it with the Meta VR wrapper
+    env = RLKuavoMetaVRWrapper(
+        env,
+        auto_reset=auto_reset,
+        intervention_threshold=intervention_threshold,
+        rerecord_threshold=rerecord_threshold,
+    )
     return env

@@ -108,3 +108,9 @@ register(
     entry_point="gym_hil.wrappers.factory:make_rl_kuavo_gamepad_env",
     max_episode_steps=200,  # Or your preferred step limit
 )
+
+register(
+    id="gym_hil/RLKuavoMetaVR-v0",
+    entry_point="gym_hil.wrappers.factory:make_rl_kuavo_meta_vr_env",
+    max_episode_steps=200,  # Or your preferred step limit
+)
