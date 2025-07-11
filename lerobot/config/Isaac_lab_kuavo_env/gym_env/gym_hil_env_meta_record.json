@@ -27,7 +27,7 @@
         "control_mode": "meta_vr"
     },
     "name": "rl_kuavo_MetaVR_env",
-    "mode": null, 
+    "mode": "record", 
     "repo_id": "KANGKKANG/rl_kuavo_711_1200",
     "dataset_root": null,
     "task": "RLKuavoMetaVR-v0",

@@ -1822,12 +1822,31 @@ class GymHilObservationProcessorWrapper(gym.ObservationWrapper):
             # Case for environments with dictionary-based observations (e.g., with cameras)
             if "pixels" in prev_space.spaces:
                 for k in prev_space.spaces["pixels"].spaces:
-                    # This assumes a fixed resized output, which is what LeRobot pipelines expect.
+                    # Use the actual image shape from the environment instead of assuming fixed size
+                    original_shape = prev_space.spaces["pixels"].spaces[k].shape
+                    # Convert from HWC to CHW format for LeRobot
+                    if len(original_shape) == 3 and original_shape[-1] == 3:
+                        # Assume HWC format (height, width, channels)
+                        h, w, c = original_shape
+                        lerobot_shape = (c, h, w)  # CHW format
+                    else:
+                        # Already in CHW format or different format
+                        lerobot_shape = original_shape
+                    
                     new_space[f"observation.images.{k}"] = gym.spaces.Box(
-                        0.0, 255.0, shape=(3, 128, 128), dtype=np.uint8
+                        0.0, 255.0, shape=lerobot_shape, dtype=np.uint8
                     )
             if "agent_pos" in prev_space.spaces:
                 new_space["observation.state"] = prev_space.spaces["agent_pos"]
+            # Handle environment_state by combining it with agent_pos for state observation
+            if "environment_state" in prev_space.spaces:
+                # Combine agent_pos and environment_state into a single observation.state
+                agent_pos_shape = prev_space.spaces["agent_pos"].shape[0]
+                env_state_shape = prev_space.spaces["environment_state"].shape[0] 
+                combined_shape = (agent_pos_shape + env_state_shape,)
+                new_space["observation.state"] = gym.spaces.Box(
+                    low=-np.inf, high=np.inf, shape=combined_shape, dtype=np.float32
+                )
         elif isinstance(prev_space, gym.spaces.Box):
             # Case for environments with box-based observations (e.g., state-only like RLCar)
             new_space["observation.state"] = prev_space
@@ -1841,6 +1860,14 @@ class GymHilObservationProcessorWrapper(gym.ObservationWrapper):
         # wrap it in a dictionary to match what `preprocess_observation` expects.
         if isinstance(observation, np.ndarray):
             observation = {"agent_pos": observation}
+        
+        # If environment_state exists, combine it with agent_pos
+        if "environment_state" in observation and "agent_pos" in observation:
+            combined_state = np.concatenate([observation["agent_pos"], observation["environment_state"]], axis=-1)
+            observation["agent_pos"] = combined_state
+            # Remove environment_state since it's now included in agent_pos
+            del observation["environment_state"]
+            
         return preprocess_observation(observation)
 
 
@@ -1877,8 +1904,32 @@ def make_robot_env(cfg: EnvConfig) -> gym.Env:
     
         if "RLKuavo" in cfg.task:
             env = gym.make(f"gym_hil/{cfg.task}")
-            # Wrappers to make the environment compatible with the rest of the script.
+            # First process observations to LeRobot format
             env = GymHilObservationProcessorWrapper(env=env)
+            
+            # Apply image cropping and resizing if configured
+            if cfg.wrapper and (cfg.wrapper.crop_params_dict is not None or cfg.wrapper.resize_size is not None):
+                # If only resize_size is provided but no crop_params_dict, create default crop params for all image keys
+                crop_params_dict = cfg.wrapper.crop_params_dict
+                if crop_params_dict is None and cfg.wrapper.resize_size is not None:
+                    # Get all image observation keys and create default crop params (full image)
+                    crop_params_dict = {}
+                    for key in env.observation_space:
+                        if "image" in key:
+                            # Get the original image shape to create full-image crop params
+                            img_shape = env.observation_space[key].shape
+                            if len(img_shape) == 3:
+                                h, w = img_shape[1], img_shape[2]  # CHW format: shape[0]=channels, shape[1]=height, shape[2]=width
+                                crop_params_dict[key] = [0, 0, h, w]  # [top, left, height, width]
+                
+                if crop_params_dict:
+                    env = ImageCropResizeWrapper(
+                        env=env,
+                        crop_params_dict=crop_params_dict,
+                        resize_size=cfg.wrapper.resize_size,
+                    )
+            
+            # Convert to device and make compatible with the rest of the script
             env = GymHilDeviceWrapper(env=env, device=cfg.device)
             env = BatchCompatibleWrapper(env=env)
             env = TorchActionWrapper(env=env, device=cfg.device)
