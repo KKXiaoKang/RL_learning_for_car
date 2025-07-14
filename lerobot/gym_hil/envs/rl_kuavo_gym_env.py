@@ -122,6 +122,9 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         
         # Control flag for VR intervention (when False, skip action publishing)
         self._should_publish_action = True
+        
+        # Add flag to track first step after reset
+        self._is_first_step = True
 
     def _ang_vel_callback(self, msg):
         with self.ang_vel_lock:
@@ -358,6 +361,22 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         """
         self._send_action(action)
         obs = self._get_observation()
+        
+        # If this is the first step after reset, recalibrate initial position
+        if self._is_first_step:
+            if self.debug:
+                old_box_pos = self.initial_box_pose['position']
+                new_box_pos = obs['environment_state'][0:3]
+                rospy.loginfo(f"First step - Recalibrating initial box position")
+                rospy.loginfo(f"  Old initial position: {old_box_pos}")
+                rospy.loginfo(f"  New initial position: {new_box_pos}")
+                rospy.loginfo(f"  Position drift: {new_box_pos - old_box_pos}")
+            
+            # Update initial box pose with current observation
+            self.initial_box_pose['position'] = obs['environment_state'][0:3]
+            self.initial_box_pose['orientation'] = obs['environment_state'][3:7]
+            self._is_first_step = False
+        
         reward, done, info = self._compute_reward_and_done(obs)
         self.last_action = action
         return obs, reward, done, False, info
@@ -371,19 +390,32 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         super().reset(seed=seed)
         self._reset_simulation()
         
+        # Wait for simulation to stabilize after reset
+        import time
+        time.sleep(0.5)  # 等待500ms让仿真稳定
+        
+        # Get initial observation to establish baseline
         obs = self._get_observation()
+        
+        # Wait a bit more and get another observation to ensure stability
+        time.sleep(0.2)  # 再等待200ms
+        obs_stable = self._get_observation()
 
-        # Store initial box pose for reward calculation
-        box_pos = obs['environment_state'][0:3]
-        box_orn = obs['environment_state'][3:7]
+        # Store initial box pose for reward calculation (use the stable observation)
+        box_pos = obs_stable['environment_state'][0:3]
+        box_orn = obs_stable['environment_state'][3:7]
         self.initial_box_pose = {'position': box_pos, 'orientation': box_orn}
-        rospy.loginfo(f"reset - Initial box position: {box_pos}")
-        self.last_action.fill(0.0)
         
         if self.debug:
-            rospy.loginfo(f"Environment reset. Initial box position: {box_pos}")
+            rospy.loginfo(f"reset - Initial box position (first): {obs['environment_state'][0:3]}")
+            rospy.loginfo(f"reset - Initial box position (stable): {box_pos}")
+            rospy.loginfo(f"reset - Position difference: {box_pos - obs['environment_state'][0:3]}")
+        
+        self.last_action.fill(0.0)
+        # Reset the first step flag
+        self._is_first_step = True
 
-        return obs, {}
+        return obs_stable, {}
 
 
 if __name__ == "__main__":
