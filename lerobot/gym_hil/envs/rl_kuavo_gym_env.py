@@ -39,6 +39,20 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         self.wbc_lock = threading.Lock()
         
         self.enable_roll_pitch_control = enable_roll_pitch_control
+        
+        # VR intervention state and data - MUST be initialized before super().__init__()
+        # because ROS subscribers will start receiving messages immediately
+        self._is_vr_intervention_active = False
+        self._latest_vr_cmd_vel = None
+        self._latest_vr_arm_traj = None
+        self._vr_action_lock = threading.Lock()
+        self._should_publish_action = True
+        self._is_first_step = True
+        self._vr_intervention_mode = False
+        self.latest_vr_cmd_vel = None
+        self.latest_vr_arm_traj = None
+        self.vr_cmd_vel_lock = threading.Lock()
+        self.vr_arm_traj_lock = threading.Lock()
 
         # Call the base class constructor to set up the node and observation buffer
         super().__init__()
@@ -120,11 +134,8 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         self.initial_box_pose = None
         self.last_action = np.zeros(self.action_space.shape, dtype=np.float32)
         
-        # Control flag for VR intervention (when False, skip action publishing)
-        self._should_publish_action = True
-        
-        # Add flag to track first step after reset
-        self._is_first_step = True
+        # Last converted VR action for recording
+        self._last_vr_action = np.zeros(self.action_space.shape, dtype=np.float32)
 
     def _ang_vel_callback(self, msg):
         with self.ang_vel_lock:
@@ -137,6 +148,94 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
     def _wbc_callback(self, msg):
         with self.wbc_lock:
             self.latest_wbc = msg
+
+    def _vr_cmd_vel_callback(self, msg):
+        """Callback for VR-generated cmd_vel messages."""
+        # Only process VR messages when in VR intervention mode
+        if not self._is_vr_intervention_active:
+            return
+            
+        with self._vr_action_lock:
+            self._latest_vr_cmd_vel = msg
+
+    def _vr_arm_traj_callback(self, msg):
+        """Callback for VR-generated arm trajectory messages."""
+        # Only process VR messages when in VR intervention mode
+        if not self._is_vr_intervention_active:
+            return
+            
+        with self._vr_action_lock:
+            self._latest_vr_arm_traj = msg
+
+    def set_vr_intervention_mode(self, active: bool):
+        """
+        Set whether VR intervention mode is active.
+        
+        Args:
+            active: True to enable VR intervention mode, False to disable
+        """
+        self._is_vr_intervention_active = active
+        self._should_publish_action = not active  # Don't publish when VR is controlling
+        
+        # Clear VR data when disabling intervention mode
+        if not active:
+            with self._vr_action_lock:
+                self._latest_vr_cmd_vel = None
+                self._latest_vr_arm_traj = None
+                print("[VR DEBUG] VR intervention mode disabled, cleared VR data")
+
+    def get_vr_action(self) -> np.ndarray:
+        """
+        Convert VR-generated ROS messages to environment action format.
+        
+        Returns:
+            Action array matching the environment's action space
+        """
+        
+        with self._vr_action_lock:
+            if not self._is_vr_intervention_active:
+                return np.zeros(self.action_space.shape[0], dtype=np.float32)
+            
+            if self._latest_vr_cmd_vel is None and self._latest_vr_arm_traj is None:
+                return np.zeros(self.action_space.shape[0], dtype=np.float32)
+            
+            # Create action array with correct dimensions
+            action = np.zeros(self.action_space.shape[0], dtype=np.float32)
+            
+            # Process cmd_vel data if available
+            if self._latest_vr_cmd_vel is not None:
+                vel_cmd = self._latest_vr_cmd_vel
+                vel_action = np.array([
+                    vel_cmd.linear.x,
+                    vel_cmd.linear.y, 
+                    vel_cmd.linear.z,
+                    vel_cmd.angular.z
+                ], dtype=np.float32)
+                
+                # Scale the velocity commands
+                if hasattr(self, 'vel_action_scale'):
+                    vel_action = vel_action * self.vel_action_scale
+                
+                # Set velocity portion of action
+                action[:4] = vel_action
+            
+            # Process arm trajectory data if available  
+            if self._latest_vr_arm_traj is not None and len(self._latest_vr_arm_traj.position) >= 14:
+                # JointState message has position array directly
+                arm_positions_deg = np.array(self._latest_vr_arm_traj.position[:14], dtype=np.float32)
+                
+                # Convert degrees to radians if needed
+                arm_positions_rad = np.deg2rad(arm_positions_deg)
+                
+                # Normalize to [-1, 1] using joint centers and scales
+                arm_action = (arm_positions_rad - self.arm_joint_centers) / self.arm_joint_scales
+                arm_action = np.clip(arm_action, -1.0, 1.0)
+                
+                action[4:18] = arm_action
+            
+            return action
+
+
 
     def _setup_ros_communication(self):
         """
@@ -154,6 +253,10 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         rospy.Subscriber('/state_estimate/imu_data_filtered/angularVel', Float64MultiArray, self._ang_vel_callback)
         rospy.Subscriber('/state_estimate/imu_data_filtered/linearAccel', Float64MultiArray, self._lin_accel_callback)
         rospy.Subscriber('/humanoid_wbc_observation', mpc_observation, self._wbc_callback)
+        
+        # Subscribers for VR intervention commands - listen to VR-generated control commands
+        rospy.Subscriber('/cmd_vel', Twist, self._vr_cmd_vel_callback)
+        rospy.Subscriber('/mm_kuavo_arm_traj', JointState, self._vr_arm_traj_callback)
 
         # Synchronized subscribers
         eef_left_sub = message_filters.Subscriber('/fk/eef_pose_left', PoseStamped)

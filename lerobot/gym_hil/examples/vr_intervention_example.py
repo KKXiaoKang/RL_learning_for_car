@@ -72,7 +72,7 @@ def run_vr_intervention_demo():
     print("\nDuring intervention:")
     print("- Your VR movements will control the robot")
     print("- Environment actions will be ignored")
-    print("- VR system publishes to /cmd_vel and /mm/kuavo_arm_traj")
+    print("- VR system publishes to /cmd_vel and /mm_kuavo_arm_traj")
     print("-" * 50)
     
     try:

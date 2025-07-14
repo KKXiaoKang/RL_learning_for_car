@@ -525,7 +525,7 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
     """
     Wrapper that allows controlling the RLKuavo environment with Meta VR (Quest3) device.
     When intervention is initiated, it listens to VR-generated control commands from
-    /mm/kuavo_arm_traj and /cmd_vel topics instead of letting the environment publish actions.
+    /mm_kuavo_arm_traj and /cmd_vel topics instead of letting the environment publish actions.
     """
 
     def __init__(
@@ -591,7 +591,7 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
                 '/cmd_vel', self.Twist, self._cmd_vel_callback, queue_size=1
             )
             self.arm_traj_sub = self.rospy.Subscriber(
-                '/mm/kuavo_arm_traj', self.JointState, self._arm_traj_callback, queue_size=1
+                '/mm_kuavo_arm_traj', self.JointState, self._arm_traj_callback, queue_size=1
             )
             print("VR intervention listeners setup successfully")
         except Exception as e:
@@ -671,31 +671,79 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
 
     def get_vr_action(self):
         """
-        Get the current action from the Quest3 VR device and convert VR commands to actions.
-        """
-        self.controller.update()
+        Get the current action from the VR controller if any input is active.
 
-        intervention_is_active = self.controller.should_intervene()
+        Returns:
+            Tuple containing:
+            - is_active: Whether VR input is active
+            - action: The action derived from VR input (numpy array)
+            - terminate_episode: Whether episode termination was requested
+            - success: Whether episode success was signaled
+            - rerecord_episode: Whether episode rerecording was requested
+        """
+        # Update controller state
+        self.controller.update()
         
-        if intervention_is_active and self.ros_available:
-            # During intervention, use VR-generated commands
-            vr_action = self._convert_vr_to_action()
-        else:
-            # Not intervening or ROS not available, use zero action
-            vr_action = self.zero_action.copy()
-            
+        # Get intervention status
+        is_intervention = self.controller.should_intervene()
         episode_end_status = self.controller.get_episode_end_status()
 
         terminate_episode = episode_end_status is not None
         success = episode_end_status == "success"
         rerecord_episode = episode_end_status == "rerecord_episode"
 
-        return intervention_is_active, vr_action, terminate_episode, success, rerecord_episode
+        # Get VR action from ROS topics
+        vr_action = None
+        with self.vr_action_lock:
+            if self.latest_cmd_vel is not None or self.latest_arm_traj is not None:
+                
+                # Create action array
+                action = np.zeros(18, dtype=np.float32)  # 4 velocity + 14 arm joints
+                
+                # Set velocity commands if available
+                if self.latest_cmd_vel is not None:
+                    vel_cmd = self.latest_cmd_vel
+                    action[0] = vel_cmd.linear.x
+                    action[1] = vel_cmd.linear.y 
+                    action[2] = vel_cmd.linear.z
+                    action[3] = vel_cmd.angular.z
+                
+                # Set arm commands if available
+                if self.latest_arm_traj is not None and len(self.latest_arm_traj.position) >= 14:
+                    # JointState message has position array directly (in degrees)
+                    arm_positions_deg = np.array(self.latest_arm_traj.position[:14])
+                    
+                    # Convert degrees to radians
+                    arm_positions_rad = np.deg2rad(arm_positions_deg)
+                    
+                    # Try to get normalization parameters from environment
+                    if (hasattr(self.env, 'unwrapped') and 
+                        hasattr(self.env.unwrapped, 'arm_joint_centers') and 
+                        hasattr(self.env.unwrapped, 'arm_joint_scales')):
+                        # Normalize to [-1, 1] using environment's parameters
+                        arm_action = (arm_positions_rad - self.env.unwrapped.arm_joint_centers) / self.env.unwrapped.arm_joint_scales
+                        arm_action = np.clip(arm_action, -1.0, 1.0)
+                    else:
+                        # Fallback: simple normalization
+                        arm_action = np.clip(arm_positions_rad / np.pi, -1.0, 1.0)
+                    
+                    action[4:18] = arm_action
+                
+                vr_action = action
+
+        return (
+            is_intervention,
+            vr_action,
+            terminate_episode,
+            success,
+            rerecord_episode,
+        )
 
     def step(self, action):
         """
         Step the environment, using VR input to override the policy's action when intervention is active.
         """
+        
         (
             is_intervening_now,
             vr_action,
@@ -707,48 +755,67 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
         # Intervention logic with state tracking
         if is_intervening_now:
             if not self.was_intervening:
-                # This is the first frame of intervention. Stop the robot.
-                print("VR Intervention started: Sending stop command.")
-                action = self.zero_action
+                # This is the first frame of intervention. Set intervention mode in environment.
+                # Set the intervention mode in the underlying environment
+                if hasattr(self.env, 'unwrapped') and hasattr(self.env.unwrapped, 'set_vr_intervention_mode'):
+                    self.env.unwrapped.set_vr_intervention_mode(True)
+                
+                # Use the VR action directly
+                if vr_action is not None:
+                    action = vr_action
+                else:
+                    action = self.zero_action
             else:
-                # Already intervening, use VR-generated action
-                action = vr_action
-        # If not intervening, the original `action` from the policy is used.
+                # Already intervening, use VR-generated action from the environment
+                if hasattr(self.env, 'unwrapped') and hasattr(self.env.unwrapped, 'get_vr_action'):
+                    env_vr_action = self.env.unwrapped.get_vr_action()
+                    # Use VR action if it has non-zero values, otherwise fall back to wrapper VR action
+                    if np.any(env_vr_action != 0):
+                        action = env_vr_action
+                    elif vr_action is not None:
+                        action = vr_action
+                    else:
+                        action = self.zero_action
+                else:
+                    if vr_action is not None:
+                        action = vr_action
+                    else:
+                        action = self.zero_action
+        else:
+            # Not intervening
+            if self.was_intervening:
+                # Clear the intervention mode in the underlying environment
+                if hasattr(self.env, 'unwrapped') and hasattr(self.env.unwrapped, 'set_vr_intervention_mode'):
+                    self.env.unwrapped.set_vr_intervention_mode(False)
 
         # Update the state for the next step.
         self.was_intervening = is_intervening_now
 
-        # Control action publishing during intervention by setting the flag on underlying environment
-        if hasattr(self.env, 'unwrapped') and hasattr(self.env.unwrapped, '_should_publish_action'):
-            # During VR intervention, disable action publishing (VR system handles control)
-            self.env.unwrapped._should_publish_action = not (is_intervening_now and self.ros_available)
-        
-        # Step the environment normally
+        # Step the environment
         obs, reward, terminated, truncated, info = self.env.step(action)
 
-        terminated = terminated or terminate_episode
-
-        if success:
-            reward = 1.0
-
+        # Set info for recording and monitoring
         info["is_intervention"] = is_intervening_now
         info["action_intervention"] = action
         info["rerecord_episode"] = rerecord_episode
         info["vr_grip_values"] = self.controller.get_grip_values()
         
-        # Add VR data availability info for debugging
+        # Add VR data availability and action source info for debugging
         if is_intervening_now:
             with self.vr_action_lock:
                 info["vr_cmd_vel_available"] = self.latest_cmd_vel is not None
                 info["vr_arm_traj_available"] = self.latest_arm_traj is not None
+                info["action_source"] = "vr_intervention"
+        else:
+            info["action_source"] = "policy"
 
-        if terminated:
-            info["next.success"] = success
-            if self.auto_reset:
-                obs, reset_info = self.reset()
-                info.update(reset_info)
+        # Handle episode termination
+        if terminate_episode:
+            terminated = True
+            if success:
+                reward = 1.0
 
-        return obs, reward, terminated, False, info
+        return obs, reward, terminated, truncated, info
 
     def reset(self, **kwargs):
         """Reset the environment."""
@@ -759,6 +826,10 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
         with self.vr_action_lock:
             self.latest_cmd_vel = None
             self.latest_arm_traj = None
+        
+        # Reset intervention mode in the underlying environment
+        if hasattr(self.env, 'unwrapped') and hasattr(self.env.unwrapped, 'set_vr_intervention_mode'):
+            self.env.unwrapped.set_vr_intervention_mode(False)
             
         return self.env.reset(**kwargs)
 

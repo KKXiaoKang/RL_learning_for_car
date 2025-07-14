@@ -13,7 +13,7 @@ monitor_quest3.py (VR data capture)
        ↓
 quest3_node_incremental.py (VR → Robot commands)
        ↓
-[/cmd_vel, /mm/kuavo_arm_traj] (ROS topics)
+[/cmd_vel, /mm_kuavo_arm_traj] (ROS topics)
        ↓
 RLKuavoMetaVRWrapper (Intervention detection & action conversion)
        ↓
@@ -40,7 +40,7 @@ RLKuavoGymEnv (RL environment)
 3. `RLKuavoMetaVRWrapper` switches to intervention mode:
    - Environment **stops** publishing actions
    - VR system takes control via existing ROS topics
-   - Wrapper **listens** to VR-generated `/cmd_vel` and `/mm/kuavo_arm_traj`
+   - Wrapper **listens** to VR-generated `/cmd_vel` and `/mm_kuavo_arm_traj`
    - Converts these ROS messages back to environment action format
    - Maintains RL loop for observation and reward calculation
 
@@ -141,7 +141,7 @@ action = np.concatenate([vel_action, arm_action])
 
 The wrapper subscribes to:
 - `/cmd_vel`: Base velocity commands from VR
-- `/mm/kuavo_arm_traj`: Arm joint commands from VR  
+- `/mm_kuavo_arm_traj`: Arm joint commands from VR  
 - `/quest_joystick_data`: VR controller state (via Quest3Controller)
 
 ## Debugging and Monitoring
