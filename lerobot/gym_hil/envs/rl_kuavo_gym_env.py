@@ -286,7 +286,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         """
         try:
             rospy.wait_for_service('/isaac_lab_reset_scene', timeout=5.0)
-            resp = self.reset_client(0) # 0 for random seed in sim
+            resp = self.reset_client(0) # 0 for random seed in sim | 在这里等待服务端处理完成并且返回结果
             if not resp.success:
                 raise RuntimeError(f"Failed to reset simulation: {resp.message}")
             if self.debug:
@@ -327,7 +327,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         orientation_similarity = abs(np.dot(q1, q2))
 
         # Success condition
-        lift_success = z_lift > 0.2
+        lift_success = z_lift > 0.20 # 20cm视作成功
         orientation_success = orientation_similarity > 0.98 # within ~11 degrees
         hands_close_success = dist_left_hand_to_box < 0.5 and dist_right_hand_to_box < 0.5
         
