@@ -12,7 +12,7 @@
             224,
             224
         ],
-        "control_time_s": 30.0,
+        "control_time_s": 100.0,
         "use_gripper": true,
         "fixed_reset_joint_positions": [
             0.0,

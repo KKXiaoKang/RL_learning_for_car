@@ -100,17 +100,17 @@ register(
 register(
     id="gym_hil/RLKuavo-v0",
     entry_point="gym_hil.envs.rl_kuavo_gym_env:RLKuavoGymEnv",
-    max_episode_steps=500,  # 增加到500步，延长回合时间
+    max_episode_steps=1000,  # 延长到1000步
 )
 
 register(
     id="gym_hil/RLKuavoGamepad-v0",
     entry_point="gym_hil.wrappers.factory:make_rl_kuavo_gamepad_env",
-    max_episode_steps=200,  # Or your preferred step limit
+    max_episode_steps=1000,  # 延长到1000步
 )
 
 register(
     id="gym_hil/RLKuavoMetaVR-v0",
     entry_point="gym_hil.wrappers.factory:make_rl_kuavo_meta_vr_env",
-    max_episode_steps=500,  # 延长回合时间到500步
+    max_episode_steps=1000,  # 延长到1000步
 )

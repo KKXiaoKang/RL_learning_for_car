@@ -12,7 +12,7 @@
             224,
             224
         ],
-        "control_time_s": 30.0,
+        "control_time_s": 100.0,
         "use_gripper": true,
         "fixed_reset_joint_positions": [
             0.0,
@@ -28,7 +28,7 @@
     },
     "name": "rl_kuavo_MetaVR_env",
     "mode": "record", 
-    "repo_id": "KANGKKANG/rl_kuavo_714_1630",
+    "repo_id": "KANGKKANG/rl_kuavo_714_1650",
     "dataset_root": null,
     "task": "RLKuavoMetaVR-v0",
     "num_episodes": 2,
