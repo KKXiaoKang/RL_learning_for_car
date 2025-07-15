@@ -433,7 +433,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         orientation_similarity = abs(np.dot(q1, q2))
 
         # Success condition
-        lift_success = z_lift > 0.20 # 20cm视作成功
+        lift_success = z_lift > 0.10 # 10cm视作成功
         orientation_success = orientation_similarity > 0.98 # within ~11 degrees
         hands_close_success = dist_left_hand_to_box < 0.5 and dist_right_hand_to_box < 0.5
         
