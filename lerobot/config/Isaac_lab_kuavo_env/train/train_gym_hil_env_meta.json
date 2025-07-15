@@ -1,0 +1,151 @@
+{
+    "output_dir": null,
+    "job_name": "rl_car_hil_1_2025_0709_1630",
+    "resume": false,
+    "seed": 42,
+    "num_workers": 4,
+    "batch_size": 256,
+    "steps": 100000,
+    "log_freq": 1,
+    "save_checkpoint": true,
+    "save_freq": 2000,
+    "wandb": {
+        "enable": true,
+        "project": "rl_car_hil",
+        "disable_artifact": true
+    },
+    "dataset": {
+        "repo_id": "KANGKKANG/rl_car_630_1200",
+        "use_imagenet_stats": false
+    },
+    "policy": {
+        "type": "sac",
+        "n_obs_steps": 1,
+        "normalization_mapping": {
+            "STATE": "MIN_MAX",
+            "ACTION": "MIN_MAX"
+        },
+        "dataset_stats": {
+            "observation.state": {
+                "min": [-23.97608757019043, -16.082822799682617, 0.015144743025302887, -0.021461553871631622, -0.001442088047042489, 0.0009592941496521235, -0.3553815484046936, -17.90999984741211, 11.569999694824219, 0.0, 0.0, 0.0, 0.0, 0.0, -20.736108779907227, -19.89254379272461, -27.59720230102539, 0.0009592941496521235, -0.01492336019873619, -0.021461553871631622, -0.3553815484046936],
+                "max": [2.8261027336120605, 14.919340133666992, 0.396026074886322, -0.000002633649273775518, 0.01492336019873619, 0.9999945759773254, 0.9999943375587463, -17.90999984741211, 11.569999694824219, 0.0, 0.0, 0.0, 0.0, 0.0, 6.0660881996154785, 12.667180061340332, 4.901378154754639, 0.9999945759773254, 0.001442088047042489, -0.000002633649273775518, 0.9999943375587463]
+            },
+            "action": {
+                "min": [0.0, 0.0],
+                "max": [1.0, 1.0]
+            }
+        },
+        "input_features": {
+            "observation.state": {
+                "type": "STATE",
+                "shape": [ 21 ]
+            }
+        },
+        "output_features": {
+            "action": {
+                "type": "ACTION",
+                "shape": [ 2 ]
+            }
+        },
+        "device": "cuda",
+        "use_amp": false,
+        "storage_device": "cpu",
+        "vision_encoder_name": null,
+        "freeze_vision_encoder": false,
+        "image_encoder_hidden_dim": 0,
+        "shared_encoder": false,
+        "num_discrete_actions": null,
+        "online_steps": 1000000,
+        "online_env_seed": 1000,
+        "online_buffer_capacity": 100000,
+        "offline_buffer_capacity": 100000,
+        "online_step_before_learning": 1000,
+        "policy_update_freq": 1,
+        "discount": 0.99,
+        "temperature_init": 1.0,
+        "num_critics": 2,
+        "num_subsample_critics": null,
+        "critic_lr": 3e-4,
+        "actor_lr": 3e-4,
+        "temperature_lr": 3e-4,
+        "critic_target_update_weight": 0.005,
+        "utd_ratio": 2,
+        "state_encoder_hidden_dim": 256,
+        "latent_dim": 64,
+        "target_entropy": -6.0,
+        "use_backup_entropy": true,
+        "grad_clip_norm": 10.0,
+        "actor_network_kwargs": {
+            "hidden_dims": [ 256, 256 ],
+            "activate_final": true
+        },
+        "critic_network_kwargs": {
+            "hidden_dims": [ 256, 256 ],
+            "activate_final": true,
+            "final_activation": null
+        },
+        "policy_kwargs": {
+            "use_tanh_squash": true,
+            "std_min": 1e-4,
+            "std_max": 2.0,
+            "init_final": 0.01
+        },
+        "actor_learner_config": {
+            "learner_host": "127.0.0.1",
+            "learner_port": 50051,
+            "policy_parameters_push_frequency": 1,
+            "queue_get_timeout": 2
+        },
+        "concurrency": {
+            "actor": "threads",
+            "learner": "threads"
+        }
+    },
+    "env": {
+        "type": "hil",
+        "wrapper": {
+            "control_time_s": 15.0,
+            "reset_time_s": 2.0,
+            "control_mode": "gamepad",
+            "display_cameras": false,
+            "add_joint_velocity_to_observation": false,
+            "add_ee_pose_to_observation": false,
+            "crop_params_dict": null,
+            "resize_size": null,
+            "fixed_reset_joint_positions": null,
+            "gripper_penalty": 0.0
+        },
+        "name": "rl_car_online_env",
+        "mode": null,
+        "task": "RLCarGamepad-v0",
+        "device": "cuda",
+        "fps": 10,
+        "use_viewer": true,
+        "use_gamepad": true,
+        "repo_id": null,
+        "dataset_root": null,
+        "num_episodes": 50,
+        "episode": 0,
+        "pretrained_policy_name_or_path": null,
+        "push_to_hub": true,
+        "features": {
+            "observation.state": {
+                "type": "STATE",
+                "shape": [
+                    21
+                ]
+            },
+            "action": {
+                "type": "ACTION",
+                "shape": [
+                    2
+                ]
+            }
+        },
+        "features_map": {
+            "observation.state": "observation.state",
+            "action": "action"
+        },
+        "reward_classifier_pretrained_path": null
+    }
+}
