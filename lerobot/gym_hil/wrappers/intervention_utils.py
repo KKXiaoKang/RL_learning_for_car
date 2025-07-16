@@ -928,23 +928,20 @@ class Quest3Controller(InputController):
         def joystick_callback(msg):
             """Callback function for joystick data."""
             self.latest_joystick_data = msg
-            
-            # Check intervention condition based on right_grip
-            if msg.right_grip >= self.intervention_threshold: # - 右摇杆下扳机键 - 干预
+
+            # 干预条件：左或右下扳机键 >= 阈值
+            if (msg.right_grip >= self.intervention_threshold) or (msg.left_grip >= self.intervention_threshold):
                 self.intervention_flag = True
             else:
                 self.intervention_flag = False
-            
-            # Check for rerecord condition based on left_grip - 左摇杆下扳机键 - 重录回合
-            if msg.left_grip >= self.rerecord_threshold:
-                self.episode_end_status = "rerecord_episode"
-            
-            # Optional: Check for episode end conditions using other buttons
-            # You can extend this based on Quest3 button mappings
-            elif hasattr(msg, 'left_second_button_pressed') and msg.left_second_button_pressed: # 左摇杆-Y键-成功
+
+            # 只用按钮触发 episode_end_status
+            if hasattr(msg, 'left_second_button_pressed') and msg.left_second_button_pressed:  # 左摇杆-Y键-成功
                 self.episode_end_status = "success"
-            elif hasattr(msg, 'left_first_button_pressed') and msg.left_first_button_pressed: # 左摇杆-X键-失败
+            elif hasattr(msg, 'left_first_button_pressed') and msg.left_first_button_pressed:  # 左摇杆-X键-失败
                 self.episode_end_status = "failure"
+            else:
+                self.episode_end_status = None
 
         try:
             self.subscriber = self.rospy.Subscriber(

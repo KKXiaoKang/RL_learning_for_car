@@ -78,8 +78,8 @@
         "num_discrete_actions": null,
         "online_steps": 1000000,
         "online_env_seed": 1000,
-        "online_buffer_capacity": 100000,
-        "offline_buffer_capacity": 100000,
+        "online_buffer_capacity": 10000,
+        "offline_buffer_capacity": 10000,
         "online_step_before_learning": 1000,
         "policy_update_freq": 1,
         "discount": 0.99,
@@ -131,8 +131,13 @@
             "display_cameras": false,
             "add_joint_velocity_to_observation": false,
             "add_ee_pose_to_observation": false,
-            "crop_params_dict": null,
-            "resize_size": null,
+            "crop_params_dict": {
+                "observation.images.front": [0, 0, 480, 640]
+            },
+            "resize_size": [
+                224,
+                224
+            ],
             "fixed_reset_joint_positions": null,
             "gripper_penalty": 0.0
         },

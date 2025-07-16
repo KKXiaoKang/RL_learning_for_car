@@ -33,7 +33,7 @@ class BatchTransition(TypedDict):
     next_state: dict[str, torch.Tensor]
     done: torch.Tensor
     truncated: torch.Tensor
-    complementary_info: dict[str, torch.Tensor | float | int] | None = None
+    complementary_info: dict[str, torch.Tensor | float | int | tuple] | None = None
 
 
 def random_crop_vectorized(images: torch.Tensor, output_size: tuple) -> torch.Tensor:
@@ -177,6 +177,13 @@ class ReplayBuffer:
                 elif isinstance(value, (int, float)):
                     # Handle scalar values similar to reward
                     self.complementary_info[key] = torch.empty((self.capacity,), device=self.storage_device)
+                elif isinstance(value, tuple):
+                    # Convert tuple to tensor and get shape
+                    value_tensor = torch.tensor(value)
+                    value_shape = value_tensor.shape
+                    self.complementary_info[key] = torch.empty(
+                        (self.capacity, *value_shape), device=self.storage_device
+                    )
                 else:
                     raise ValueError(f"Unsupported type {type(value)} for complementary_info[{key}]")
 
@@ -223,6 +230,10 @@ class ReplayBuffer:
                         self.complementary_info[key][self.position].copy_(value.squeeze(dim=0))
                     elif isinstance(value, (int, float)):
                         self.complementary_info[key][self.position] = value
+                    elif isinstance(value, tuple):
+                        # Convert tuple to tensor and store
+                        value_tensor = torch.tensor(value)
+                        self.complementary_info[key][self.position].copy_(value_tensor)
 
         self.position = (self.position + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
