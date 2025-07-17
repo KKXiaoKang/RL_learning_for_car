@@ -24,7 +24,9 @@
             0.785
         ],
         "reset_time_s": 2.0,
-        "control_mode": "meta_vr"
+        "control_mode": "meta_vr",
+        "vel_smoothing_factor": 0.4,
+        "arm_smoothing_factor": 0.3
     },
     "name": "rl_kuavo_MetaVR_env",
     "mode": "record", 

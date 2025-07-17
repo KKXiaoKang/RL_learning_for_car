@@ -501,23 +501,38 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         orientation_success = orientation_similarity > 0.98 # within ~11 degrees
         hands_close_success = dist_left_hand_to_box < 0.5 and dist_right_hand_to_box < 0.5
         
-        # reached_goal = lift_success and orientation_success and hands_close_success
-        reached_goal = lift_success and hands_close_success
+        # Dense Reward Calculation
+        reward = 0.0
 
-        reward = 1.0 if reached_goal else 0.0
-        done = reached_goal
+        # 1. Reward for successful lift
+        if lift_success:
+            reward += 100.0
+            
+        # 2. Reward for wbc_data (index 6 for x, index 8 for z) proximity to box_pos_data
+        # Assuming wbc_data[6] and wbc_data[8] represent relevant positions
+        wbc_pos = np.array([agent_state[6], agent_state[8]]) # Assuming wbc_data is part of agent_state, adjust if not
+        box_xz_pos = np.array([box_pos[0], box_pos[2]])
+        dist_wbc_to_box = np.linalg.norm(wbc_pos - box_xz_pos)
+        reward += np.exp(-1.0 * dist_wbc_to_box) * 10.0 # Exponential decay, scale by 10
+        
+        # 3. Reward for left and right EEF position.x proximity to box_pos_data.x
+        dist_left_eef_x_to_box_x = abs(left_eef_pos[0] - box_pos[0])
+        dist_right_eef_x_to_box_x = abs(right_eef_pos[0] - box_pos[0])
+        reward += (np.exp(-5.0 * dist_left_eef_x_to_box_x) + np.exp(-5.0 * dist_right_eef_x_to_box_x)) * 5.0 # Exponential decay, scale by 5
 
-        info["succeed"] = reached_goal
+        # Check for episode termination (can still terminate on success for sparse tasks)
+        terminated = lift_success # Only terminate on lift success for now
+
+        info["succeed"] = lift_success
         info["z_lift"] = z_lift
         info["orientation_similarity"] = orientation_similarity
         info["dist_left_hand_to_box"] = dist_left_hand_to_box
         info["dist_right_hand_to_box"] = dist_right_hand_to_box
 
         if self.debug:
-            # print(f"z_lift: {z_lift:.3f}, orient_sim: {orientation_similarity:.3f}, success: {reached_goal}")
-            print(f"z_lift: {z_lift:.3f}, success: {reached_goal}")
+            print(f"z_lift: {z_lift:.3f}, orient_sim: {orientation_similarity:.3f}, total_reward: {reward:.3f}, terminated: {terminated}")
             
-        return reward, done, info
+        return reward, terminated, info
 
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
         """
