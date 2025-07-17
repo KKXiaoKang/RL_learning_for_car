@@ -156,11 +156,16 @@ def make_rl_kuavo_meta_vr_env(
     auto_reset=False,
     intervention_threshold=1.0,
     rerecord_threshold=1.0,
+    vel_smoothing_factor=0.3,
+    arm_smoothing_factor=0.4,
     **kwargs
 ):
     """Factory function to create the RLKuavo environment with Meta VR (Quest3) support."""
-    # Create the base RLKuavo environment
-    env = gym.make("gym_hil/RLKuavo-v0", **kwargs)
+    # Create the base RLKuavo environment with smoothing parameters
+    env = gym.make("gym_hil/RLKuavo-v0", 
+                   vel_smoothing_factor=vel_smoothing_factor,
+                   arm_smoothing_factor=arm_smoothing_factor,
+                   **kwargs)
     # Wrap it with the Meta VR wrapper
     env = RLKuavoMetaVRWrapper(
         env,

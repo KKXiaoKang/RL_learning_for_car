@@ -28,7 +28,8 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
 
     metadata = {"render_modes": ["human"], "render_fps": 30}
 
-    def __init__(self, debug: bool = True, image_size=(224, 224), enable_roll_pitch_control: bool = False):
+    def __init__(self, debug: bool = True, image_size=(224, 224), enable_roll_pitch_control: bool = False, 
+                 vel_smoothing_factor: float = 0.3, arm_smoothing_factor: float = 0.4):
         # Separate storage for headerless topics that will be initialized in callbacks.
         # This needs to be done BEFORE super().__init__() which sets up subscribers.
         self.latest_ang_vel = None
@@ -136,6 +137,16 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         
         # Last converted VR action for recording
         self._last_vr_action = np.zeros(self.action_space.shape, dtype=np.float32)
+        
+        # Action smoothing parameters
+        self.vel_smoothing_factor = vel_smoothing_factor  # 0.0 = no smoothing, 1.0 = full smoothing
+        self.arm_smoothing_factor = arm_smoothing_factor  # Slightly more smoothing for arm joints
+        self.last_smoothed_vel_action = np.zeros(vel_dim, dtype=np.float32)
+        self.last_smoothed_arm_action = np.zeros(14, dtype=np.float32)
+        self.is_first_action = True
+        
+        if self.debug:
+            rospy.loginfo(f"Action smoothing initialized - Vel factor: {vel_smoothing_factor}, Arm factor: {arm_smoothing_factor}")
 
     def _ang_vel_callback(self, msg):
         with self.ang_vel_lock:
@@ -348,6 +359,10 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             # During VR intervention, don't publish actions - VR system handles control
             return
             
+        # Apply action smoothing for non-VR intervention mode
+        if not self._is_vr_intervention_active:
+            action = self._smooth_action(action)
+        
         # De-normalize and publish cmd_vel
         twist_cmd = Twist()
         
@@ -385,6 +400,55 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         
         joint_cmd.position = joint_action_deg.tolist()
         self.arm_traj_pub.publish(joint_cmd)
+
+    def _smooth_action(self, action: np.ndarray) -> np.ndarray:
+        """
+        Applies smoothing to the action to reduce sudden changes.
+        This is particularly useful for velocity and arm joint actions.
+        
+        Args:
+            action: The raw action array from the policy
+            
+        Returns:
+            The smoothed action array
+        """
+        vel_dim = 4 if not self.enable_roll_pitch_control else 6
+        arm_dim = 14
+
+        # Handle first action (no previous action to smooth with)
+        if self.is_first_action:
+            self.last_smoothed_vel_action = action[:vel_dim]
+            self.last_smoothed_arm_action = action[vel_dim:vel_dim+arm_dim]
+            self.is_first_action = False
+            return action
+
+        # Smooth velocity action using exponential moving average
+        vel_action = action[:vel_dim]
+        smoothed_vel_action = (
+            self.last_smoothed_vel_action * (1 - self.vel_smoothing_factor) + 
+            vel_action * self.vel_smoothing_factor
+        )
+        self.last_smoothed_vel_action = smoothed_vel_action
+
+        # Smooth arm joint action using exponential moving average
+        arm_action = action[vel_dim:vel_dim+arm_dim]
+        smoothed_arm_action = (
+            self.last_smoothed_arm_action * (1 - self.arm_smoothing_factor) + 
+            arm_action * self.arm_smoothing_factor
+        )
+        self.last_smoothed_arm_action = smoothed_arm_action
+
+        # Combine smoothed actions
+        smoothed_action = np.concatenate([smoothed_vel_action, smoothed_arm_action])
+        
+        if self.debug:
+            # Log smoothing statistics occasionally
+            vel_change = np.linalg.norm(vel_action - self.last_smoothed_vel_action)
+            arm_change = np.linalg.norm(arm_action - self.last_smoothed_arm_action)
+            if vel_change > 0.5 or arm_change > 0.5:  # Only log significant changes
+                rospy.loginfo(f"Action smoothing - Vel change: {vel_change:.3f}, Arm change: {arm_change:.3f}")
+        
+        return smoothed_action
 
     def _reset_simulation(self):
         """
@@ -517,6 +581,11 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         self.last_action.fill(0.0)
         # Reset the first step flag
         self._is_first_step = True
+        
+        # Reset action smoothing state
+        self.is_first_action = True
+        self.last_smoothed_vel_action.fill(0.0)
+        self.last_smoothed_arm_action.fill(0.0)
 
         return obs_stable, {}
 

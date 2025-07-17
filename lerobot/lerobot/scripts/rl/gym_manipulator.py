@@ -1903,7 +1903,18 @@ def make_robot_env(cfg: EnvConfig) -> gym.Env:
             return env
     
         if "RLKuavo" in cfg.task:
-            env = gym.make(f"gym_hil/{cfg.task}")
+            # Extract smoothing parameters from config if available
+            vel_smoothing_factor = 0.00001  # default
+            arm_smoothing_factor = 0.00001 # default    
+            if cfg.wrapper:
+                vel_smoothing_factor = getattr(cfg.wrapper, 'vel_smoothing_factor', 0.3)
+                arm_smoothing_factor = getattr(cfg.wrapper, 'arm_smoothing_factor', 0.4)
+            print(" ----- RLKuavo Smoothing Parameters -----")
+            print(f"vel_smoothing_factor: {vel_smoothing_factor}, arm_smoothing_factor: {arm_smoothing_factor}")
+            print(" ----- RLKuavo Smoothing Parameters -----")
+            env = gym.make(f"gym_hil/{cfg.task}", 
+                          vel_smoothing_factor=vel_smoothing_factor,
+                          arm_smoothing_factor=arm_smoothing_factor)
             # First process observations to LeRobot format
             env = GymHilObservationProcessorWrapper(env=env)
             

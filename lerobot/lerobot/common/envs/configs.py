@@ -188,6 +188,8 @@ class EnvTransformConfig:
     gripper_quantization_threshold: float | None = 0.8
     gripper_penalty: float = 0.0
     gripper_penalty_in_reward: bool = False
+    vel_smoothing_factor: float = 0.3
+    arm_smoothing_factor: float = 0.4
 
 
 @EnvConfig.register_subclass(name="gym_manipulator")
