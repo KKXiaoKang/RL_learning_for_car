@@ -15,9 +15,25 @@ from std_msgs.msg import Float64MultiArray
 from kuavo_msgs.msg import sensorsData
 from ocs2_msgs.msg import mpc_observation
 from kuavo_msgs.srv import resetIsaaclab
-
+# Add the following imports for the new message types
+from kuavo_msgs.msg import twoArmHandPoseCmd, twoArmHandPose, armHandPose, ikSolveParam
+from kuavo_msgs.srv import changeTorsoCtrlMode, changeTorsoCtrlModeRequest, changeArmCtrlMode, changeArmCtrlModeRequest
+from enum import Enum
 from gym_hil.isaacLab_gym_env import IsaacLabGymEnv
 
+
+class IncrementalMpcCtrlMode(Enum):
+    """表示Kuavo机器人 Manipulation MPC 控制模式的枚举类"""
+    NoControl = 0
+    """无控制"""
+    ArmOnly = 1
+    """仅控制手臂"""
+    BaseOnly = 2
+    """仅控制底座"""
+    BaseArm = 3
+    """同时控制底座和手臂"""
+    ERROR = -1
+    """错误状态"""
 
 class RLKuavoGymEnv(IsaacLabGymEnv):
     """
@@ -159,6 +175,16 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             rospy.loginfo(f"Action smoothing initialized - Vel factor: {vel_smoothing_factor}, Arm factor: {arm_smoothing_factor}")
             rospy.loginfo(f"WBC observation mode: {'enabled' if self.wbc_observation_enabled else 'disabled'}")
 
+    def change_mobile_ctrl_mode(self, mode: int):
+        # print(f"change_mobile_ctrl_mode: {mode}")
+        mobile_manipulator_service_name = "/mobile_manipulator_mpc_control"
+        try:
+            rospy.wait_for_service(mobile_manipulator_service_name)
+            changeHandTrackingMode_srv = rospy.ServiceProxy(mobile_manipulator_service_name, changeArmCtrlMode)
+            changeHandTrackingMode_srv(mode)
+        except rospy.ROSException:
+            rospy.logerr(f"Service {mobile_manipulator_service_name} not available")
+
     def _ang_vel_callback(self, msg):
         with self.ang_vel_lock:
             self.latest_ang_vel = msg
@@ -271,7 +297,8 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         """
         # Publishers
         self.cmd_vel_pub = rospy.Publisher('/cmd_vel', Twist, queue_size=1)
-        self.arm_traj_pub = rospy.Publisher('/kuavo_arm_traj', JointState, queue_size=1)
+        # Replace the arm_traj_pub with the new publisher
+        self.ee_pose_pub = rospy.Publisher('/mm/two_arm_hand_pose_cmd', twoArmHandPoseCmd, queue_size=10)
 
         # Service Client
         self.reset_client = rospy.ServiceProxy('/isaac_lab_reset_scene', resetIsaaclab)
@@ -463,7 +490,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             twist_cmd.angular.x = vel_action[3]
             twist_cmd.angular.y = vel_action[4]
             twist_cmd.angular.z = vel_action[5]
-            arm_action = action[6:]
+            ee_action = action[6:]
         else:
             vel_action = action[:4] * self.vel_action_scale
             twist_cmd.linear.x = vel_action[0]
@@ -472,23 +499,36 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             twist_cmd.angular.x = 0.0
             twist_cmd.angular.y = 0.0
             twist_cmd.angular.z = vel_action[3]
-            arm_action = action[4:]
+            ee_action = action[4:]
 
         self.cmd_vel_pub.publish(twist_cmd)
 
-        # De-normalize and publish arm trajectory
-        joint_cmd = JointState()
-        joint_cmd.header.stamp = rospy.Time.now()
-        joint_cmd.name = self.arm_joint_names
-        
-        # Scale action from [-1, 1] to the full joint range in radians
-        joint_action_rad = self.arm_joint_centers + arm_action * self.arm_joint_scales
-        
-        # Convert radians to degrees before publishing
-        joint_action_deg = np.rad2deg(joint_action_rad)
-        
-        joint_cmd.position = joint_action_deg.tolist()
-        self.arm_traj_pub.publish(joint_cmd)
+        # Publish end-effector pose command (replace joint-level command)
+        # ee_action: [L_pos(3), L_quat(4), R_pos(3), R_quat(4)]
+        self.change_mobile_ctrl_mode(IncrementalMpcCtrlMode.ArmOnly.value)
+        left_pos = ee_action[0:3]
+        left_quat = ee_action[3:7]
+        right_pos = ee_action[7:10]
+        right_quat = ee_action[10:14]
+        left_elbow_pos = np.zeros(3)
+        right_elbow_pos = np.zeros(3)
+        fixed_quat = [0.0, -0.70711, 0.0, 0.70711]
+
+        msg = twoArmHandPoseCmd()
+        msg.hand_poses.left_pose.pos_xyz = left_pos.tolist()
+        # msg.hand_poses.left_pose.quat_xyzw = left_quat.tolist()
+        msg.hand_poses.left_pose.quat_xyzw = fixed_quat
+        msg.hand_poses.left_pose.elbow_pos_xyz = left_elbow_pos.tolist()
+        msg.hand_poses.right_pose.pos_xyz = right_pos.tolist()
+        # msg.hand_poses.right_pose.quat_xyzw = right_quat.tolist()
+        msg.hand_poses.right_pose.quat_xyzw = fixed_quat
+        msg.hand_poses.right_pose.elbow_pos_xyz = right_elbow_pos.tolist()
+        # Set default IK params (can be customized as needed)
+        msg.use_custom_ik_param = False
+        msg.joint_angles_as_q0 = False
+        msg.ik_param = ikSolveParam()
+        msg.frame = 0  # keep current frame
+        self.ee_pose_pub.publish(msg)
 
     def _smooth_action(self, action: np.ndarray) -> np.ndarray:
         """

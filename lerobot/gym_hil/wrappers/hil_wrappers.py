@@ -791,6 +791,9 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
         # Update the state for the next step.
         self.was_intervening = is_intervening_now
 
+        # # 打印action
+        # print(f"action: {action}")
+    
         # Step the environment
         obs, reward, terminated, truncated, info = self.env.step(action)
 
