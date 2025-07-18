@@ -27,7 +27,7 @@
         "control_mode": "meta_vr",
         "vel_smoothing_factor": 0.2,
         "arm_smoothing_factor": 0.2,
-        "wbc_observation_enabled": false
+        "wbc_observation_enabled": true
     },
     "name": "rl_kuavo_MetaVR_env",
     "mode": null, 

@@ -25,12 +25,13 @@
         ],
         "reset_time_s": 2.0,
         "control_mode": "meta_vr",
-        "vel_smoothing_factor": 0.4,
-        "arm_smoothing_factor": 0.3
+        "vel_smoothing_factor": 0.2,
+        "arm_smoothing_factor": 0.2,
+        "wbc_observation_enabled": false
     },
     "name": "rl_kuavo_MetaVR_env",
     "mode": "record", 
-    "repo_id": "KANGKKANG/rl_kuavo_718_1630",
+    "repo_id": "KANGKKANG/rl_kuavo_718_1730",
     "dataset_root": null,
     "task": "RLKuavoMetaVR-v0",
     "num_episodes": 50,

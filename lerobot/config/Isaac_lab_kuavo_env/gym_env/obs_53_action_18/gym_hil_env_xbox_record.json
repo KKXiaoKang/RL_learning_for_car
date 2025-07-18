@@ -26,7 +26,8 @@
         "reset_time_s": 2.0,
         "control_mode": "gamepad",
         "vel_smoothing_factor": 0.4,
-        "arm_smoothing_factor": 0.3
+        "arm_smoothing_factor": 0.3,
+        "wbc_observation_enabled": true
     },
     "name": "rl_kuavo_gamepad_env",
     "mode": "record",
