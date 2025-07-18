@@ -506,23 +506,30 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         # Publish end-effector pose command (replace joint-level command)
         # ee_action: [L_pos(3), L_quat(4), R_pos(3), R_quat(4)]
         self.change_mobile_ctrl_mode(IncrementalMpcCtrlMode.ArmOnly.value)
-        left_pos = ee_action[0:3]
-        left_quat = ee_action[3:7]
-        right_pos = ee_action[7:10]
-        right_quat = ee_action[10:14]
+
+        if self.wbc_observation_enabled: # 7 + 7 6dof数据
+            left_pos = ee_action[0:3]
+            left_quat = ee_action[3:7]
+            right_pos = ee_action[7:10]
+            right_quat = ee_action[10:14]
+        else: # 3 + 3 position数据
+            left_pos = ee_action[0:3]
+            left_quat = np.array([0.0, -0.70711, 0.0, 0.70711])
+            right_pos = ee_action[3:6]
+            right_quat = np.array([0.0, -0.70711, 0.0, 0.70711])
+
         left_elbow_pos = np.zeros(3)
         right_elbow_pos = np.zeros(3)
-        fixed_quat = [0.0, -0.70711, 0.0, 0.70711]
 
         msg = twoArmHandPoseCmd()
         msg.hand_poses.left_pose.pos_xyz = left_pos.tolist()
-        # msg.hand_poses.left_pose.quat_xyzw = left_quat.tolist()
-        msg.hand_poses.left_pose.quat_xyzw = fixed_quat
+        msg.hand_poses.left_pose.quat_xyzw = left_quat.tolist()
         msg.hand_poses.left_pose.elbow_pos_xyz = left_elbow_pos.tolist()
+
         msg.hand_poses.right_pose.pos_xyz = right_pos.tolist()
-        # msg.hand_poses.right_pose.quat_xyzw = right_quat.tolist()
-        msg.hand_poses.right_pose.quat_xyzw = fixed_quat
+        msg.hand_poses.right_pose.quat_xyzw = right_quat.tolist()
         msg.hand_poses.right_pose.elbow_pos_xyz = right_elbow_pos.tolist()
+        
         # Set default IK params (can be customized as needed)
         msg.use_custom_ik_param = False
         msg.joint_angles_as_q0 = False
