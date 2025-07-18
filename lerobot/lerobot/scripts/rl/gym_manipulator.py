@@ -1906,15 +1906,19 @@ def make_robot_env(cfg: EnvConfig) -> gym.Env:
             # Extract smoothing parameters from config if available
             vel_smoothing_factor = 0.00001  # default
             arm_smoothing_factor = 0.00001 # default    
+            wbc_observation_enabled = True  # default
             if cfg.wrapper:
                 vel_smoothing_factor = getattr(cfg.wrapper, 'vel_smoothing_factor', 0.3)
                 arm_smoothing_factor = getattr(cfg.wrapper, 'arm_smoothing_factor', 0.4)
-            print(" ----- RLKuavo Smoothing Parameters -----")
+                wbc_observation_enabled = getattr(cfg.wrapper, 'wbc_observation_enabled', True)
+            print(" ----- RLKuavo Parameters -----")
             print(f"vel_smoothing_factor: {vel_smoothing_factor}, arm_smoothing_factor: {arm_smoothing_factor}")
-            print(" ----- RLKuavo Smoothing Parameters -----")
+            print(f"wbc_observation_enabled: {wbc_observation_enabled}")
+            print(" ----- RLKuavo Parameters -----")
             env = gym.make(f"gym_hil/{cfg.task}", 
                           vel_smoothing_factor=vel_smoothing_factor,
-                          arm_smoothing_factor=arm_smoothing_factor)
+                          arm_smoothing_factor=arm_smoothing_factor,
+                          wbc_observation_enabled=wbc_observation_enabled)
             # First process observations to LeRobot format
             env = GymHilObservationProcessorWrapper(env=env)
             

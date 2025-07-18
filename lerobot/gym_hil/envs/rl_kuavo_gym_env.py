@@ -29,17 +29,22 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
     metadata = {"render_modes": ["human"], "render_fps": 30}
 
     def __init__(self, debug: bool = True, image_size=(224, 224), enable_roll_pitch_control: bool = False, 
-                 vel_smoothing_factor: float = 0.3, arm_smoothing_factor: float = 0.4):
+                 vel_smoothing_factor: float = 0.3, arm_smoothing_factor: float = 0.4, 
+                 wbc_observation_enabled: bool = True):
         # Separate storage for headerless topics that will be initialized in callbacks.
         # This needs to be done BEFORE super().__init__() which sets up subscribers.
         self.latest_ang_vel = None
         self.latest_lin_accel = None
         self.latest_wbc = None
+        self.latest_robot_pose = None  # New: for robot pose when WBC is disabled
         self.ang_vel_lock = threading.Lock()
         self.lin_accel_lock = threading.Lock()
         self.wbc_lock = threading.Lock()
+        self.robot_pose_lock = threading.Lock()  # New: lock for robot pose
         
         self.enable_roll_pitch_control = enable_roll_pitch_control
+        self.wbc_observation_enabled = wbc_observation_enabled  # New: WBC observation flag
+        self.debug = debug  # Set debug before super().__init__() to avoid AttributeError
         
         # VR intervention state and data - MUST be initialized before super().__init__()
         # because ROS subscribers will start receiving messages immediately
@@ -57,15 +62,20 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
 
         # Call the base class constructor to set up the node and observation buffer
         super().__init__()
-        self.debug = debug
         self.bridge = CvBridge()
         self.image_size = image_size
 
-        # State observation dimension
-        # agent_pos: 7 (left_eef) + 7 (right_eef) + 14 (arm_joints) + 3 (imu_ang_vel) + 3 (imu_lin_accel) + 12 (wbc) = 46
-        # environment_state: 3 (box_pos) + 4 (box_orn) = 7
-        agent_dim = 46
-        env_state_dim = 7
+        # State observation dimension - depends on WBC observation mode
+        if self.wbc_observation_enabled:
+            # agent_pos: 7 (left_eef) + 7 (right_eef) + 14 (arm_joints) + 3 (imu_ang_vel) + 3 (imu_lin_accel) + 12 (wbc) = 46
+            # environment_state: 3 (box_pos) + 4 (box_orn) = 7
+            agent_dim = 46
+            env_state_dim = 7
+        else:
+            # agent_pos: 3 (left_eef_pos) + 3 (right_eef_pos) + 14 (arm_joints) + 3 (robot_pos) = 23
+            # environment_state: 3 (box_pos) = 3
+            agent_dim = 23
+            env_state_dim = 3
 
         if self.enable_roll_pitch_control:
             vel_dim = 6
@@ -147,6 +157,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         
         if self.debug:
             rospy.loginfo(f"Action smoothing initialized - Vel factor: {vel_smoothing_factor}, Arm factor: {arm_smoothing_factor}")
+            rospy.loginfo(f"WBC observation mode: {'enabled' if self.wbc_observation_enabled else 'disabled'}")
 
     def _ang_vel_callback(self, msg):
         with self.ang_vel_lock:
@@ -159,6 +170,11 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
     def _wbc_callback(self, msg):
         with self.wbc_lock:
             self.latest_wbc = msg
+
+    def _robot_pose_callback(self, msg):
+        """Callback for robot pose messages when WBC observation is disabled."""
+        with self.robot_pose_lock:
+            self.latest_robot_pose = msg
 
     def _vr_cmd_vel_callback(self, msg):
         """Callback for VR-generated cmd_vel messages."""
@@ -263,8 +279,17 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         # Subscribers for headerless topics that are not synchronized
         rospy.Subscriber('/state_estimate/imu_data_filtered/angularVel', Float64MultiArray, self._ang_vel_callback)
         rospy.Subscriber('/state_estimate/imu_data_filtered/linearAccel', Float64MultiArray, self._lin_accel_callback)
-        rospy.Subscriber('/humanoid_wbc_observation', mpc_observation, self._wbc_callback)
         
+        # Conditionally subscribe to WBC or robot pose based on flag
+        if self.wbc_observation_enabled:
+            rospy.Subscriber('/humanoid_wbc_observation', mpc_observation, self._wbc_callback)
+            if self.debug:
+                rospy.loginfo("WBC observation enabled - subscribing to /humanoid_wbc_observation")
+        else:
+            rospy.Subscriber('/robot_pose', PoseStamped, self._robot_pose_callback)
+            if self.debug:
+                rospy.loginfo("WBC observation disabled - subscribing to /robot_pose")
+
         # Subscribers for VR intervention commands - listen to VR-generated control commands
         rospy.Subscriber('/cmd_vel', Twist, self._vr_cmd_vel_callback)
         rospy.Subscriber('/mm_kuavo_arm_traj', JointState, self._vr_arm_traj_callback)
@@ -291,13 +316,30 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             ang_vel = self.latest_ang_vel
         with self.lin_accel_lock:
             lin_accel = self.latest_lin_accel
-        with self.wbc_lock:
-            wbc = self.latest_wbc
+            
+        # Get WBC or robot pose data based on mode
+        if self.wbc_observation_enabled:
+            with self.wbc_lock:
+                wbc = self.latest_wbc
+            robot_pose = None
+        else:
+            with self.robot_pose_lock:
+                robot_pose = self.latest_robot_pose
+            wbc = None
 
         # Wait until all data sources are available
-        if ang_vel is None or lin_accel is None or wbc is None:
+        if ang_vel is None or lin_accel is None:
             if self.debug:
-                rospy.logwarn_throttle(1.0, "IMU or WBC data not yet available for observation callback.")
+                rospy.logwarn_throttle(1.0, "IMU data not yet available for observation callback.")
+            return
+            
+        if self.wbc_observation_enabled and wbc is None:
+            if self.debug:
+                rospy.logwarn_throttle(1.0, "WBC data not yet available for observation callback.")
+            return
+        elif not self.wbc_observation_enabled and robot_pose is None:
+            if self.debug:
+                rospy.logwarn_throttle(1.0, "Robot pose data not yet available for observation callback.")
             return
 
         with self.obs_lock:
@@ -309,18 +351,33 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
                 rgb_image = cv_image[:, :, ::-1].copy() # BGR to RGB
 
                 # Process state data
-                left_eef_data = np.array([
-                    left_eef.pose.position.x, left_eef.pose.position.y, left_eef.pose.position.z,
-                    left_eef.pose.orientation.x, left_eef.pose.orientation.y, left_eef.pose.orientation.z, left_eef.pose.orientation.w
-                ])
-                right_eef_data = np.array([
-                    right_eef.pose.position.x, right_eef.pose.position.y, right_eef.pose.position.z,
-                    right_eef.pose.orientation.x, right_eef.pose.orientation.y, right_eef.pose.orientation.z, right_eef.pose.orientation.w
-                ])
+                left_eef_position = np.array([left_eef.pose.position.x, left_eef.pose.position.y, left_eef.pose.position.z])
+                left_eef_orientation = np.array([left_eef.pose.orientation.x, left_eef.pose.orientation.y, left_eef.pose.orientation.z, left_eef.pose.orientation.w])
+                left_eef_data = np.concatenate([left_eef_position, left_eef_orientation])
+                
+                right_eef_position = np.array([right_eef.pose.position.x, right_eef.pose.position.y, right_eef.pose.position.z])
+                right_eef_orientation = np.array([right_eef.pose.orientation.x, right_eef.pose.orientation.y, right_eef.pose.orientation.z, right_eef.pose.orientation.w])
+                right_eef_data = np.concatenate([right_eef_position, right_eef_orientation])
+
+                # arm_data
                 arm_data = np.array(sensors.joint_data.joint_q[12:26])
+                
+                # imu data 
                 ang_vel_data = np.array(ang_vel.data[:3])
                 lin_accel_data = np.array(lin_accel.data[:3])
-                wbc_data = np.array(wbc.state.value[:12])
+                
+                # Process WBC or robot pose data based on mode
+                if self.wbc_observation_enabled:
+                    wbc_data = np.array(wbc.state.value[:12])
+                else:
+                    # Convert robot pose to 12-dimensional data similar to WBC
+                    # Extract position and orientation components
+                    robot_pos = np.array([robot_pose.pose.position.x, robot_pose.pose.position.y, robot_pose.pose.position.z])
+                    robot_orn = np.array([robot_pose.pose.orientation.x, robot_pose.pose.orientation.y, 
+                                        robot_pose.pose.orientation.z, robot_pose.pose.orientation.w])
+                    # Pad with zeros to match WBC data dimension (7)
+                    wbc_data = np.concatenate([robot_pos, robot_orn])  # 3 + 4 = 7
+                
                 box_pos_data = np.array([
                     box_real.pose.position.x, box_real.pose.position.y, box_real.pose.position.z
                 ])
@@ -329,14 +386,46 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
                     box_real.pose.orientation.z, box_real.pose.orientation.w
                 ])
 
-                agent_pos_obs = np.concatenate([
-                    left_eef_data, right_eef_data, arm_data, ang_vel_data,
-                    lin_accel_data, wbc_data
-                ]).astype(np.float32)
 
-                env_state_obs = np.concatenate([
-                    box_pos_data, box_orn_data
-                ]).astype(np.float32)
+                if self.wbc_observation_enabled:
+                    """
+                        46 维度 - agent_pos
+                        7 + 7
+                        14
+                        3 + 3
+                        12
+                    """
+                    agent_pos_obs = np.concatenate([
+                        left_eef_data, right_eef_data, 
+                        arm_data, 
+                        ang_vel_data, lin_accel_data, 
+                        wbc_data
+                    ]).astype(np.float32)
+                else:
+                    """
+                        23 维度 - agent_pos
+                        3 + 3
+                        14 
+                        3
+                    """
+                    agent_pos_obs = np.concatenate([
+                        left_eef_position, right_eef_position, 
+                        arm_data, 
+                        robot_pos
+                    ]).astype(np.float32)
+
+                if self.wbc_observation_enabled:
+                    """
+                        7 维度 - environment_state
+                    """
+                    env_state_obs = np.concatenate([
+                        box_pos_data, box_orn_data
+                    ]).astype(np.float32)
+                else:
+                    """
+                        3 维度 - environment_state
+                    """
+                    env_state_obs = box_pos_data.astype(np.float32)
 
                 self.latest_obs = {
                     "pixels": {"front": rgb_image},
@@ -446,7 +535,8 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             vel_change = np.linalg.norm(vel_action - self.last_smoothed_vel_action)
             arm_change = np.linalg.norm(arm_action - self.last_smoothed_arm_action)
             if vel_change > 0.5 or arm_change > 0.5:  # Only log significant changes
-                rospy.loginfo(f"Action smoothing - Vel change: {vel_change:.3f}, Arm change: {arm_change:.3f}")
+                # rospy.loginfo(f"Action smoothing - Vel change: {vel_change:.3f}, Arm change: {arm_change:.3f}")
+                pass
         
         return smoothed_action
 
@@ -479,10 +569,19 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         # Extract data from observation
         agent_state = obs['agent_pos']
         env_state = obs['environment_state']
-        left_eef_pos = agent_state[0:3]
-        right_eef_pos = agent_state[7:10]
-        box_pos = env_state[0:3]
-        box_orn = env_state[3:7]
+        
+        if self.wbc_observation_enabled:
+            # WBC enabled: agent_state has 46 dimensions
+            left_eef_pos = agent_state[0:3]
+            right_eef_pos = agent_state[7:10]
+            box_pos = env_state[0:3]
+            box_orn = env_state[3:7]
+        else:
+            # WBC disabled: agent_state has 23 dimensions
+            left_eef_pos = agent_state[0:3]
+            right_eef_pos = agent_state[3:6]
+            box_pos = env_state[0:3]
+            box_orn = None  # No orientation data when WBC is disabled
 
         # Calculate distances
         dist_left_hand_to_box = np.linalg.norm(left_eef_pos - box_pos)
@@ -491,14 +590,18 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         # Check conditions for success
         z_lift = box_pos[2] - self.initial_box_pose['position'][2]
         
-        # Quaternion dot product to check orientation deviation
-        q1 = box_orn
-        q2 = self.initial_box_pose['orientation']
-        orientation_similarity = abs(np.dot(q1, q2))
+        # Orientation similarity (only when WBC is enabled)
+        if self.wbc_observation_enabled and box_orn is not None:
+            q1 = box_orn
+            q2 = self.initial_box_pose['orientation']
+            orientation_similarity = abs(np.dot(q1, q2))
+            orientation_success = orientation_similarity > 0.98 # within ~11 degrees
+        else:
+            orientation_similarity = 1.0  # Assume good orientation when WBC is disabled
+            orientation_success = True
 
         # Success condition
         lift_success = z_lift > 0.10 # 10cm视作成功
-        orientation_success = orientation_similarity > 0.98 # within ~11 degrees
         hands_close_success = dist_left_hand_to_box < 0.5 and dist_right_hand_to_box < 0.5
         
         # Dense Reward Calculation
@@ -508,17 +611,28 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         if lift_success:
             reward += 100.0
             
-        # 2. Reward for wbc_data (index 6 for x, index 8 for z) proximity to box_pos_data
-        # Assuming wbc_data[6] and wbc_data[8] represent relevant positions
-        wbc_pos = np.array([agent_state[6], agent_state[8]]) # Assuming wbc_data is part of agent_state, adjust if not
-        box_xz_pos = np.array([box_pos[0], box_pos[2]])
-        dist_wbc_to_box = np.linalg.norm(wbc_pos - box_xz_pos)
-        reward += np.exp(-1.0 * dist_wbc_to_box) * 10.0 # Exponential decay, scale by 10
+        # 2. Reward for torso proximity to box (躯干到box的奖励)
+        if self.wbc_observation_enabled:
+            # WBC enabled: torso position is in wbc_data (first 3 elements of wbc_data)
+            # agent_state structure: [left_eef_data(7), right_eef_data(7), arm_data(14), ang_vel_data(3), lin_accel_data(3), wbc_data(12)]
+            # wbc_data starts at index 34, so torso position is at indices 34-36
+            torso_pos = agent_state[40:43]  # 躯干位置 (x, y, z)
+        else:
+            # WBC disabled: torso position is robot_pos
+            # agent_state structure: [left_eef_position(3), right_eef_position(3), arm_data(14), robot_pos(3)]
+            # robot_pos is at indices 20-22
+            torso_pos = agent_state[20:23]  # 躯干位置 (x, y, z)
         
-        # 3. Reward for left and right EEF position.x proximity to box_pos_data.x
-        dist_left_eef_x_to_box_x = abs(left_eef_pos[0] - box_pos[0])
-        dist_right_eef_x_to_box_x = abs(right_eef_pos[0] - box_pos[0])
-        reward += (np.exp(-5.0 * dist_left_eef_x_to_box_x) + np.exp(-5.0 * dist_right_eef_x_to_box_x)) * 5.0 # Exponential decay, scale by 5
+        # Calculate distance from torso to box
+        dist_torso_to_box = np.linalg.norm(torso_pos - box_pos)
+        # Exponential decay reward for torso proximity to box
+        reward += np.exp(-2.0 * dist_torso_to_box) * 8.0  # Exponential decay, scale by 8
+        
+        # 3. Reward for left and right EEF proximity to box (考虑XYZ三个维度)
+        dist_left_eef_to_box = np.linalg.norm(left_eef_pos - box_pos)  # 3D距离
+        dist_right_eef_to_box = np.linalg.norm(right_eef_pos - box_pos)  # 3D距离
+        # 使用3D距离计算末端接近奖励，提供更全面的接近指导
+        reward += (np.exp(-2.0 * dist_left_eef_to_box) + np.exp(-2.0 * dist_right_eef_to_box)) * 3.0 # Exponential decay, scale by 3
 
         # Check for episode termination (can still terminate on success for sparse tasks)
         terminated = lift_success # Only terminate on lift success for now
@@ -528,9 +642,17 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         info["orientation_similarity"] = orientation_similarity
         info["dist_left_hand_to_box"] = dist_left_hand_to_box
         info["dist_right_hand_to_box"] = dist_right_hand_to_box
+        info["dist_torso_to_box"] = dist_torso_to_box
 
         if self.debug:
-            print(f"z_lift: {z_lift:.3f}, orient_sim: {orientation_similarity:.3f}, total_reward: {reward:.3f}, terminated: {terminated}")
+            # 计算各个奖励项的贡献
+            lift_reward = 100.0 if lift_success else 0.0
+            torso_reward = np.exp(-2.0 * dist_torso_to_box) * 8.0
+            eef_proximity_reward = (np.exp(-2.0 * dist_left_eef_to_box) + np.exp(-2.0 * dist_right_eef_to_box)) * 3.0
+            
+            print(f"z_lift: {z_lift:.3f}, orient_sim: {orientation_similarity:.3f}, torso_dist: {dist_torso_to_box:.3f}, total_reward: {reward:.3f}, terminated: {terminated}")
+            print(f"  Rewards breakdown - Lift: {lift_reward:.3f}, Torso: {torso_reward:.3f}, EEF-proximity: {eef_proximity_reward:.3f}")
+            print(f"  EEF 3D distances - Left: {dist_left_eef_to_box:.3f}, Right: {dist_right_eef_to_box:.3f}")
             
         return reward, terminated, info
 
@@ -556,7 +678,8 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             
             # Update initial box pose with current observation
             self.initial_box_pose['position'] = obs['environment_state'][0:3]
-            self.initial_box_pose['orientation'] = obs['environment_state'][3:7]
+            if self.wbc_observation_enabled:
+                self.initial_box_pose['orientation'] = obs['environment_state'][3:7]
             self._is_first_step = False
         
         reward, done, info = self._compute_reward_and_done(obs)
@@ -585,7 +708,10 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
 
         # Store initial box pose for reward calculation (use the stable observation)
         box_pos = obs_stable['environment_state'][0:3]
-        box_orn = obs_stable['environment_state'][3:7]
+        if self.wbc_observation_enabled:
+            box_orn = obs_stable['environment_state'][3:7]
+        else:
+            box_orn = np.array([0.0, 0.0, 0.0, 1.0])  # Default orientation when WBC is disabled
         self.initial_box_pose = {'position': box_pos, 'orientation': box_orn}
         
         if self.debug:
@@ -616,7 +742,7 @@ if __name__ == "__main__":
         rospy.init_node('rl_kuavo_env_test', anonymous=True)
 
     # Instantiate the environment with debugging enabled
-    env = RLKuavoGymEnv(debug=True, enable_roll_pitch_control=False)
+    env = RLKuavoGymEnv(debug=True, enable_roll_pitch_control=False, wbc_observation_enabled=True)
 
     try:
         num_episodes = 3

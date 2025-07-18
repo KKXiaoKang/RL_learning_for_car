@@ -190,6 +190,7 @@ class EnvTransformConfig:
     gripper_penalty_in_reward: bool = False
     vel_smoothing_factor: float = 0.3
     arm_smoothing_factor: float = 0.4
+    wbc_observation_enabled: bool = True
 
 
 @EnvConfig.register_subclass(name="gym_manipulator")

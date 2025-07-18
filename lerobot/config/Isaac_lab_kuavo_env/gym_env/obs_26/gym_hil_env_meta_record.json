@@ -1,0 +1,72 @@
+{
+    "type": "hil",
+    "wrapper": {
+        "gripper_penalty": -0.02,
+        "display_cameras": false,
+        "add_joint_velocity_to_observation": true,
+        "add_ee_pose_to_observation": true,
+        "crop_params_dict": {
+            "observation.images.front": [0, 0, 480, 640]
+        },
+        "resize_size": [
+            224,
+            224
+        ],
+        "control_time_s": 100.0,
+        "use_gripper": true,
+        "fixed_reset_joint_positions": [
+            0.0,
+            0.195,
+            0.0,
+            -2.43,
+            0.0,
+            2.62,
+            0.785
+        ],
+        "reset_time_s": 2.0,
+        "control_mode": "meta_vr",
+        "vel_smoothing_factor": 0.4,
+        "arm_smoothing_factor": 0.3
+    },
+    "name": "rl_kuavo_MetaVR_env",
+    "mode": "record", 
+    "repo_id": "KANGKKANG/rl_kuavo_718_1230",
+    "dataset_root": null,
+    "task": "RLKuavoMetaVR-v0",
+    "num_episodes": 20,
+    "episode": 0,
+    "pretrained_policy_name_or_path": null,
+    "device": "cuda",
+    "push_to_hub": true,
+    "fps": 10,
+    "use_viewer": true,
+    "use_gamepad": true,
+    "features": {
+        "observation.images.front": {
+            "type": "VISUAL",
+            "shape": [
+                3,
+                224,
+                224
+            ]
+        },
+        "observation.state": {
+            "type": "STATE",
+            "shape": [
+                26
+            ]
+        },
+        "action": {
+            "type": "ACTION",
+            "shape": [
+                18
+            ]
+        }
+    },
+    "features_map": {
+        "observation.images.front": "observation.images.front",
+        "observation.state": "observation.state",
+        "action": "action"
+    },
+    "reward_classifier_pretrained_path": null
+}

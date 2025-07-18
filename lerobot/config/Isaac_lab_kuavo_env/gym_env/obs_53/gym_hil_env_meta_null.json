@@ -25,8 +25,9 @@
         ],
         "reset_time_s": 2.0,
         "control_mode": "meta_vr",
-        "vel_smoothing_factor": 0.4,
-        "arm_smoothing_factor": 0.3
+        "vel_smoothing_factor": 0.2,
+        "arm_smoothing_factor": 0.2,
+        "wbc_observation_enabled": false
     },
     "name": "rl_kuavo_MetaVR_env",
     "mode": null, 
@@ -53,7 +54,7 @@
         "observation.state": {
             "type": "STATE",
             "shape": [
-                53
+                26
             ]
         },
         "action": {
