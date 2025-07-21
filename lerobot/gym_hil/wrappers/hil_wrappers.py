@@ -714,8 +714,8 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
             has_arm_data = (self.latest_arm_traj is not None) or (self.latest_ee_pose_cmd is not None)
             
             if has_cmd_vel or has_arm_data:
-                # Create action array
-                action = np.zeros(18, dtype=np.float32)  # 4 velocity + 14 arm joints
+                # Create action array with correct dimensions from environment
+                action = np.zeros(self.env.action_space.shape[0], dtype=np.float32)
                 
                 # Set velocity commands if available
                 if has_cmd_vel:
@@ -742,13 +742,17 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
                         
                         # Combine into arm_action: [left_pos, left_quat, right_pos, right_quat]
                         arm_action = np.concatenate([left_pos, left_quat, right_pos, right_quat])
-                        action[4:18] = arm_action
+                        # Use the available space in the action array
+                        arm_end_idx = min(4 + len(arm_action), len(action))
+                        action[4:arm_end_idx] = arm_action[:arm_end_idx-4]
                         
                 else:
                     # Non-WBC mode: use joint trajectory data
-                    if self.latest_arm_traj is not None and len(self.latest_arm_traj.position) >= 14:
+                    # Get the number of arm joints from the environment
+                    arm_dim = self.env.action_space.shape[0] - 4  # 4 for velocity
+                    if self.latest_arm_traj is not None and len(self.latest_arm_traj.position) >= arm_dim:
                         # JointState message has position array directly (in degrees)
-                        arm_positions_deg = np.array(self.latest_arm_traj.position[:14])
+                        arm_positions_deg = np.array(self.latest_arm_traj.position[:arm_dim])
                         
                         # Convert degrees to radians
                         arm_positions_rad = np.deg2rad(arm_positions_deg)
@@ -764,7 +768,7 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
                             # Fallback: simple normalization
                             arm_action = np.clip(arm_positions_rad / np.pi, -1.0, 1.0)
                         
-                        action[4:18] = arm_action
+                        action[4:4+arm_dim] = arm_action
                 
                 vr_action = action
 

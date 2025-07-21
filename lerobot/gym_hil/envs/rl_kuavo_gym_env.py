@@ -46,7 +46,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
 
     def __init__(self, debug: bool = True, image_size=(224, 224), enable_roll_pitch_control: bool = False, 
                  vel_smoothing_factor: float = 0.3, arm_smoothing_factor: float = 0.4, 
-                 wbc_observation_enabled: bool = True):
+                 wbc_observation_enabled: bool = True, action_dim: int = None):
         # Separate storage for headerless topics that will be initialized in callbacks.
         # This needs to be done BEFORE super().__init__() which sets up subscribers.
         self.latest_ang_vel = None
@@ -94,13 +94,20 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             env_state_dim = 3
 
         if self.enable_roll_pitch_control:
-            vel_dim = 6
+            self.vel_dim = 6
             self.vel_action_scale = np.array([0.5, 0.5, 0.5, 0.25, 0.25, 0.25])  # m/s and rad/s
         else:
-            vel_dim = 4
+            self.vel_dim = 4
             self.vel_action_scale = np.array([0.5, 0.5, 0.5, 0.25])  # m/s and rad/s
             
-        action_dim = vel_dim + 14  # 14 for arm joints
+        # Use provided action_dim if specified, otherwise use default calculation
+        if self.wbc_observation_enabled:
+            self.arm_dim = 14 # 关节 joint space
+            self.action_dim = self.vel_dim + self.arm_dim # 4 + 14 = 18
+        else:
+            # Default behavior: 14 for arm joints
+            self.arm_dim = 6 # 末端 eef position
+            self.action_dim = self.vel_dim + self.arm_dim # 4 + 6 = 10
 
         agent_box = spaces.Box(-np.inf, np.inf, (agent_dim,), dtype=np.float32)
         env_box = spaces.Box(-np.inf, np.inf, (env_state_dim,), dtype=np.float32)
@@ -124,10 +131,13 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         )
 
         # Action space
-        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(action_dim,), dtype=np.float32)
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(self.action_dim,), dtype=np.float32)
 
-        # Define arm joint names in order
+        # Define arm joint names in order (only use the number of joints specified by arm_dim)
         self.arm_joint_names = [f'zarm_l{i}_joint' for i in range(1, 8)] + [f'zarm_r{i}_joint' for i in range(1, 8)]
+        # Truncate to match arm_dim if necessary
+        if len(self.arm_joint_names) > self.arm_dim:
+            self.arm_joint_names = self.arm_joint_names[:self.arm_dim]
 
         # Parse URDF for joint limits to define action scaling for arms
         urdf_path = os.path.join(os.path.dirname(__file__), '../assets/biped_s45.urdf')
@@ -154,8 +164,8 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         except (ET.ParseError, FileNotFoundError, KeyError) as e:
             rospy.logerr(f"Failed to parse URDF or find all joint limits: {e}")
             # Fallback to a default scaling if URDF parsing fails
-            self.arm_joint_centers = np.zeros(14)
-            self.arm_joint_scales = np.full(14, np.deg2rad(10.0))
+            self.arm_joint_centers = np.zeros(self.arm_dim)
+            self.arm_joint_scales = np.full(self.arm_dim, np.deg2rad(10.0))
 
         # Task-specific state
         self.initial_box_pose = None
@@ -167,11 +177,12 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         # Action smoothing parameters
         self.vel_smoothing_factor = vel_smoothing_factor  # 0.0 = no smoothing, 1.0 = full smoothing
         self.arm_smoothing_factor = arm_smoothing_factor  # Slightly more smoothing for arm joints
-        self.last_smoothed_vel_action = np.zeros(vel_dim, dtype=np.float32)
-        self.last_smoothed_arm_action = np.zeros(14, dtype=np.float32)
+        self.last_smoothed_vel_action = np.zeros(self.vel_dim, dtype=np.float32)
+        self.last_smoothed_arm_action = np.zeros(self.arm_dim, dtype=np.float32)
         self.is_first_action = True
         
         if self.debug:
+            rospy.loginfo(f"Action space dimension: {self.action_dim} (vel: {self.vel_dim}, arm: {self.arm_dim})")
             rospy.loginfo(f"Action smoothing initialized - Vel factor: {vel_smoothing_factor}, Arm factor: {arm_smoothing_factor}")
             rospy.loginfo(f"WBC observation mode: {'enabled' if self.wbc_observation_enabled else 'disabled'}")
 
@@ -273,9 +284,9 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
                 action[:4] = vel_action
             
             # Process arm trajectory data if available  
-            if self._latest_vr_arm_traj is not None and len(self._latest_vr_arm_traj.position) >= 14:
+            if self._latest_vr_arm_traj is not None and len(self._latest_vr_arm_traj.position) >= self.arm_dim:
                 # JointState message has position array directly
-                arm_positions_deg = np.array(self._latest_vr_arm_traj.position[:14], dtype=np.float32)
+                arm_positions_deg = np.array(self._latest_vr_arm_traj.position[:self.arm_dim], dtype=np.float32)
                 
                 # Convert degrees to radians if needed
                 arm_positions_rad = np.deg2rad(arm_positions_deg)
@@ -284,7 +295,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
                 arm_action = (arm_positions_rad - self.arm_joint_centers) / self.arm_joint_scales
                 arm_action = np.clip(arm_action, -1.0, 1.0)
                 
-                action[4:18] = arm_action
+                action[4:4+self.arm_dim] = arm_action
             
             return action
 
@@ -482,6 +493,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         # De-normalize and publish cmd_vel
         twist_cmd = Twist()
         
+        vel_dim = 6 if self.enable_roll_pitch_control else 4
         if self.enable_roll_pitch_control:
             vel_action = action[:6] * self.vel_action_scale
             twist_cmd.linear.x = vel_action[0]
@@ -504,18 +516,31 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         self.cmd_vel_pub.publish(twist_cmd)
 
         # Publish end-effector pose command (replace joint-level command)
-        # ee_action: [L_pos(3), L_quat(4), R_pos(3), R_quat(4)]
+        # ee_action: [L_pos(3), L_quat(4), R_pos(3), R_quat(4)] or [L_pos(3), R_pos(3)]
         self.change_mobile_ctrl_mode(IncrementalMpcCtrlMode.ArmOnly.value)
 
         if self.wbc_observation_enabled: # 7 + 7 6dof数据
-            left_pos = ee_action[0:3]
-            left_quat = ee_action[3:7]
-            right_pos = ee_action[7:10]
-            right_quat = ee_action[10:14]
+            if len(ee_action) >= 14:
+                """
+                    使用action得到的姿态 - 末端eef position
+                """
+                left_pos = ee_action[0:3]
+                left_quat = ee_action[3:7]
+                right_pos = ee_action[7:10]
+                right_quat = ee_action[10:14]
+            else:
+                # Handle reduced action space
+                left_pos = ee_action[0:3] if len(ee_action) >= 3 else np.zeros(3)
+                left_quat = np.array([0.0, -0.70711, 0.0, 0.70711])
+                right_pos = ee_action[3:6] if len(ee_action) >= 6 else np.zeros(3)
+                right_quat = np.array([0.0, -0.70711, 0.0, 0.70711])
         else: # 3 + 3 position数据
-            left_pos = ee_action[0:3]
+            """
+                固定姿态 - 末端eef position
+            """
+            left_pos = ee_action[0:3] if len(ee_action) >= 3 else np.zeros(3)
             left_quat = np.array([0.0, -0.70711, 0.0, 0.70711])
-            right_pos = ee_action[3:6]
+            right_pos = ee_action[3:6] if len(ee_action) >= 6 else np.zeros(3)
             right_quat = np.array([0.0, -0.70711, 0.0, 0.70711])
 
         left_elbow_pos = np.zeros(3)
@@ -537,6 +562,11 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         msg.frame = 0  # keep current frame
         self.ee_pose_pub.publish(msg)
 
+        # 打印action_dim
+        rospy.loginfo(f"self.action_dim : {self.action_dim}")
+        rospy.loginfo(f"self.arm_dim : {self.arm_dim}")
+        rospy.loginfo(f"self.vel_dim : {self.vel_dim}")
+
     def _smooth_action(self, action: np.ndarray) -> np.ndarray:
         """
         Applies smoothing to the action to reduce sudden changes.
@@ -549,12 +579,11 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             The smoothed action array
         """
         vel_dim = 4 if not self.enable_roll_pitch_control else 6
-        arm_dim = 14
 
         # Handle first action (no previous action to smooth with)
         if self.is_first_action:
             self.last_smoothed_vel_action = action[:vel_dim]
-            self.last_smoothed_arm_action = action[vel_dim:vel_dim+arm_dim]
+            self.last_smoothed_arm_action = action[vel_dim:vel_dim+self.arm_dim]
             self.is_first_action = False
             return action
 
@@ -567,7 +596,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         self.last_smoothed_vel_action = smoothed_vel_action
 
         # Smooth arm joint action using exponential moving average
-        arm_action = action[vel_dim:vel_dim+arm_dim]
+        arm_action = action[vel_dim:vel_dim+self.arm_dim]
         smoothed_arm_action = (
             self.last_smoothed_arm_action * (1 - self.arm_smoothing_factor) + 
             arm_action * self.arm_smoothing_factor

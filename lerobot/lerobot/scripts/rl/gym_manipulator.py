@@ -1907,18 +1907,24 @@ def make_robot_env(cfg: EnvConfig) -> gym.Env:
             vel_smoothing_factor = 0.00001  # default
             arm_smoothing_factor = 0.00001 # default    
             wbc_observation_enabled = True  # default
+            action_dim = None  # default
             if cfg.wrapper:
                 vel_smoothing_factor = getattr(cfg.wrapper, 'vel_smoothing_factor', 0.3)
                 arm_smoothing_factor = getattr(cfg.wrapper, 'arm_smoothing_factor', 0.4)
                 wbc_observation_enabled = getattr(cfg.wrapper, 'wbc_observation_enabled', True)
+            # Extract action_dim from features if available
+            if hasattr(cfg, 'features') and 'action' in cfg.features:
+                action_dim = cfg.features['action'].shape[0]
             print(" ----- RLKuavo Parameters -----")
             print(f"vel_smoothing_factor: {vel_smoothing_factor}, arm_smoothing_factor: {arm_smoothing_factor}")
             print(f"wbc_observation_enabled: {wbc_observation_enabled}")
+            print(f"action_dim: {action_dim}")
             print(" ----- RLKuavo Parameters -----")
             env = gym.make(f"gym_hil/{cfg.task}", 
                           vel_smoothing_factor=vel_smoothing_factor,
                           arm_smoothing_factor=arm_smoothing_factor,
-                          wbc_observation_enabled=wbc_observation_enabled)
+                          wbc_observation_enabled=wbc_observation_enabled,
+                          action_dim=action_dim)
             # First process observations to LeRobot format
             env = GymHilObservationProcessorWrapper(env=env)
             
