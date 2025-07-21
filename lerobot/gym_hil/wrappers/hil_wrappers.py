@@ -742,9 +742,19 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
                         
                         # Combine into arm_action: [left_pos, left_quat, right_pos, right_quat]
                         arm_action = np.concatenate([left_pos, left_quat, right_pos, right_quat])
+                        arm_position = np.concatenate([left_pos, right_pos])
+                        arm_orientation = np.concatenate([left_quat, right_quat])
+
                         # Use the available space in the action array
-                        arm_end_idx = min(4 + len(arm_action), len(action))
-                        action[4:arm_end_idx] = arm_action[:arm_end_idx-4]
+                        arm_end_idx = min(4 + len(arm_action), len(action)) # 18 和 10 之间取最小值
+                        print(f" len arm_action: {len(arm_action)}") # 14
+                        print(f" arm_end_idx: {arm_end_idx}") # 10
+                        
+                        # 如果arm_end_idx == 10，则使用arm_position，否则使用arm_action
+                        if arm_end_idx == 10:
+                            action[4:10] = arm_position
+                        else: # 使用左eef和右eef数据
+                            action[4:arm_end_idx] = arm_action
                         
                 else:
                     # Non-WBC mode: use joint trajectory data
