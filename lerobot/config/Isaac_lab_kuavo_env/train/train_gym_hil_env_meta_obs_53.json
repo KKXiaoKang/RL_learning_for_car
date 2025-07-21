@@ -1,6 +1,6 @@
 {
     "output_dir": null,
-    "job_name": "rl_kuavo_MetaVR_hil_1_2025_0716_1830",
+    "job_name": "rl_kuavo_MetaVR_hil_1_2025_0721_1815",
     "resume": false,
     "seed": 42,
     "num_workers": 4,
@@ -78,8 +78,8 @@
         "num_discrete_actions": null,
         "online_steps": 1000000,
         "online_env_seed": 1000,
-        "online_buffer_capacity": 10000,
-        "offline_buffer_capacity": 10000,
+        "online_buffer_capacity": 50000,
+        "offline_buffer_capacity": 50000,
         "online_step_before_learning": 1000,
         "policy_update_freq": 1,
         "discount": 0.99,
