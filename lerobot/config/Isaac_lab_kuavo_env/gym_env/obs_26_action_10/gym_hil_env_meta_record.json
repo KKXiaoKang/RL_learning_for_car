@@ -31,7 +31,7 @@
     },
     "name": "rl_kuavo_MetaVR_env",
     "mode": "record", 
-    "repo_id": "KANGKKANG/rl_kuavo_721_1115",
+    "repo_id": "KANGKKANG/rl_kuavo_721_1215",
     "dataset_root": null,
     "task": "RLKuavoMetaVR-v0",
     "num_episodes": 5,

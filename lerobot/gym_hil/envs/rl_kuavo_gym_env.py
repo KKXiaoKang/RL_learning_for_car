@@ -254,6 +254,11 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         
         Returns:
             Action array matching the environment's action space
+
+            获取vr的如下信息。
+            获取/cmd_vel
+            获取/mm_kuavo_arm_traj
+            在RLKuavoMetaVRWrapper的step当中, 将获取到的值映射到action数组中,该数据用于最终的action_intervention record和buffer都会使用这个key里面的action
         """
         
         with self._vr_action_lock:

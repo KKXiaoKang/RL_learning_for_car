@@ -749,13 +749,26 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
                         arm_end_idx = min(4 + len(arm_action), len(action)) # 18 和 10 之间取最小值
                         print(f" len arm_action: {len(arm_action)}") # 14
                         print(f" arm_end_idx: {arm_end_idx}") # 10
+                        print(f" arm_position: {arm_position}") # eef position打印查看 
+                        
+                        # 添加详细的调试信息
+                        print(f"left_pos: {left_pos}")
+                        print(f"right_pos: {right_pos}")
+                        print(f"arm_position: {arm_position}")
                         
                         # 如果arm_end_idx == 10，则使用arm_position，否则使用arm_action
                         if arm_end_idx == 10:
                             action[4:10] = arm_position
+                            # 打印action数组的映射
+                            print(f"action[4] (left_x): {action[4]}")
+                            print(f"action[5] (left_y): {action[5]}")
+                            print(f"action[6] (left_z): {action[6]}")
+                            print(f"action[7] (right_x): {action[7]}")
+                            print(f"action[8] (right_y): {action[8]}")
+                            print(f"action[9] (right_z): {action[9]}")
                         else: # 使用左eef和右eef数据
                             action[4:arm_end_idx] = arm_action
-                        
+                
                 else:
                     # Non-WBC mode: use joint trajectory data
                     # Get the number of arm joints from the environment
@@ -814,17 +827,25 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
                 # Use the VR action directly
                 if vr_action is not None:
                     action = vr_action
+                    print("------------- Kuavo Meta VR is_intervening_now ------------ ") # 第一帧的时候打印
                 else:
                     action = self.zero_action
             else:
                 # Already intervening, use VR-generated action from the environment
                 if hasattr(self.env, 'unwrapped') and hasattr(self.env.unwrapped, 'get_vr_action'):
-                    env_vr_action = self.env.unwrapped.get_vr_action()
-                    # Use VR action if it has non-zero values, otherwise fall back to wrapper VR action
-                    if np.any(env_vr_action != 0):
-                        action = env_vr_action
-                    elif vr_action is not None:
+                    # env_vr_action = self.env.unwrapped.get_vr_action()
+                    # # Use VR action if it has non-zero values, otherwise fall back to wrapper VR action
+                    # if np.any(env_vr_action != 0):
+                    #     action = env_vr_action
+                    #     print(" ------------ use env vr action ---------------")
+                    # elif vr_action is not None:
+                    #     print(" ------------ use wrapper vr action ---------------")
+                    #     action = vr_action
+                    # else:
+                    #     action = self.zero_action
+                    if vr_action is not None:
                         action = vr_action
+                        print(" ------------ use wrapper vr action ---------------")
                     else:
                         action = self.zero_action
                 else:
