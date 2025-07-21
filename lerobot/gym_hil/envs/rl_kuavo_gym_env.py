@@ -668,8 +668,21 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         dist_left_hand_to_box = np.linalg.norm(left_eef_pos - box_pos)
         dist_right_hand_to_box = np.linalg.norm(right_eef_pos - box_pos)
 
+        # reward
+        reward = 0.0  # <--- 一定要先初始化
+
         # Check conditions for success
         z_lift = box_pos[2] - self.initial_box_pose['position'][2]
+        
+        # 新增：箱子掉到地上
+        box_fallen = z_lift < -0.5
+        if box_fallen:
+            reward -= 50.0
+            terminated = True
+            info["box_fallen"] = True
+        else:
+            terminated = False
+            info["box_fallen"] = False
         
         # Orientation similarity (only when WBC is enabled)
         if self.wbc_observation_enabled and box_orn is not None:
@@ -686,12 +699,10 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         hands_close_success = dist_left_hand_to_box < 0.5 and dist_right_hand_to_box < 0.5
         
         # Dense Reward Calculation
-        reward = 0.0
-
         # 1. Reward for successful lift
         if lift_success:
             reward += 100.0
-            
+        
         # 2. Reward for torso proximity to box (躯干到box的奖励)
         if self.wbc_observation_enabled:
             # WBC enabled: torso position is in wbc_data (first 3 elements of wbc_data)
@@ -716,7 +727,8 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         reward += (np.exp(-2.0 * dist_left_eef_to_box) + np.exp(-2.0 * dist_right_eef_to_box)) * 3.0 # Exponential decay, scale by 3
 
         # Check for episode termination (can still terminate on success for sparse tasks)
-        terminated = lift_success # Only terminate on lift success for now
+        if not box_fallen:
+            terminated = lift_success # Only terminate on lift success for now
 
         info["succeed"] = lift_success
         info["z_lift"] = z_lift
