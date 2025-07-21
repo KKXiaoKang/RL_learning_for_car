@@ -731,9 +731,9 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             torso_reward = np.exp(-2.0 * dist_torso_to_box) * 8.0
             eef_proximity_reward = (np.exp(-2.0 * dist_left_eef_to_box) + np.exp(-2.0 * dist_right_eef_to_box)) * 3.0
             
-            # print(f"z_lift: {z_lift:.3f}, orient_sim: {orientation_similarity:.3f}, torso_dist: {dist_torso_to_box:.3f}, total_reward: {reward:.3f}, terminated: {terminated}")
-            # print(f"  Rewards breakdown - Lift: {lift_reward:.3f}, Torso: {torso_reward:.3f}, EEF-proximity: {eef_proximity_reward:.3f}")
-            # print(f"  EEF 3D distances - Left: {dist_left_eef_to_box:.3f}, Right: {dist_right_eef_to_box:.3f}")
+            print(f"z_lift: {z_lift:.3f}, orient_sim: {orientation_similarity:.3f}, torso_dist: {dist_torso_to_box:.3f}, total_reward: {reward:.3f}, terminated: {terminated}")
+            print(f"  Rewards breakdown - Lift: {lift_reward:.3f}, Torso: {torso_reward:.3f}, EEF-proximity: {eef_proximity_reward:.3f}")
+            print(f"  EEF 3D distances - Left: {dist_left_eef_to_box:.3f}, Right: {dist_right_eef_to_box:.3f}")
             
         return reward, terminated, info
 

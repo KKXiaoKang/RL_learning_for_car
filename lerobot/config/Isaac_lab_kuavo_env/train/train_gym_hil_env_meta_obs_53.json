@@ -83,7 +83,7 @@
         "online_step_before_learning": 1000,
         "policy_update_freq": 1,
         "discount": 0.99,
-        "temperature_init": 1.0,
+        "temperature_init": 0.01,
         "num_critics": 2,
         "num_subsample_critics": null,
         "critic_lr": 3e-4,
@@ -125,7 +125,7 @@
     "env": {
         "type": "hil",
         "wrapper": {
-            "control_time_s": 100.0,
+            "control_time_s": 10.0,
             "reset_time_s": 2.0,
             "control_mode": "meta_vr",
             "vel_smoothing_factor": 0.4,
