@@ -174,5 +174,6 @@ def make_rl_kuavo_meta_vr_env(
         auto_reset=auto_reset,
         intervention_threshold=intervention_threshold,
         rerecord_threshold=rerecord_threshold,
+        wbc_observation_enabled=wbc_observation_enabled,
     )
     return env

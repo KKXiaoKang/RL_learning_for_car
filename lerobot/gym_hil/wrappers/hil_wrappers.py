@@ -534,6 +534,7 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
         auto_reset=False,
         intervention_threshold=1.0,
         rerecord_threshold=1.0,
+        wbc_observation_enabled=True,
     ):
         """
         Initialize the RLKuavo Meta VR controller wrapper.
@@ -552,9 +553,11 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
             import rospy
             from geometry_msgs.msg import Twist
             from sensor_msgs.msg import JointState
+            from kuavo_msgs.msg import twoArmHandPoseCmd
             self.rospy = rospy
             self.Twist = Twist
             self.JointState = JointState
+            self.twoArmHandPoseCmd = twoArmHandPoseCmd
             self.ros_available = True
         except ImportError:
             print("Warning: ROS dependencies not available for VR intervention listening")
@@ -566,6 +569,7 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
         )
 
         self.auto_reset = auto_reset
+        self.wbc_observation_enabled = wbc_observation_enabled
         self.controller.start()
         
         # State tracking for intervention
@@ -577,6 +581,7 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
         # VR intervention data
         self.latest_cmd_vel = None
         self.latest_arm_traj = None
+        self.latest_ee_pose_cmd = None
         self.vr_action_lock = threading.Lock()
         
         # Setup ROS subscribers for VR-generated commands
@@ -593,6 +598,10 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
             self.arm_traj_sub = self.rospy.Subscriber(
                 '/mm_kuavo_arm_traj', self.JointState, self._arm_traj_callback, queue_size=1
             )
+            # Subscribe to end-effector pose commands for WBC mode
+            self.ee_pose_cmd_sub = self.rospy.Subscriber(
+                '/mm/two_arm_hand_pose_cmd', self.twoArmHandPoseCmd, self._ee_pose_cmd_callback, queue_size=1
+            )
             print("VR intervention listeners setup successfully")
         except Exception as e:
             print(f"Failed to setup VR listeners: {e}")
@@ -607,6 +616,11 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
         """Callback for VR-generated arm trajectory messages."""
         with self.vr_action_lock:
             self.latest_arm_traj = msg
+
+    def _ee_pose_cmd_callback(self, msg):
+        """Callback for VR-generated end-effector pose command messages."""
+        with self.vr_action_lock:
+            self.latest_ee_pose_cmd = msg
 
     def _convert_vr_to_action(self):
         """Convert VR-generated ROS messages to environment action format."""
@@ -695,39 +709,62 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
         # Get VR action from ROS topics
         vr_action = None
         with self.vr_action_lock:
-            if self.latest_cmd_vel is not None or self.latest_arm_traj is not None:
-                
+            # Check if we have any VR data available
+            has_cmd_vel = self.latest_cmd_vel is not None
+            has_arm_data = (self.latest_arm_traj is not None) or (self.latest_ee_pose_cmd is not None)
+            
+            if has_cmd_vel or has_arm_data:
                 # Create action array
                 action = np.zeros(18, dtype=np.float32)  # 4 velocity + 14 arm joints
                 
                 # Set velocity commands if available
-                if self.latest_cmd_vel is not None:
+                if has_cmd_vel:
                     vel_cmd = self.latest_cmd_vel
                     action[0] = vel_cmd.linear.x
                     action[1] = vel_cmd.linear.y 
                     action[2] = vel_cmd.linear.z
                     action[3] = vel_cmd.angular.z
                 
-                # Set arm commands if available
-                if self.latest_arm_traj is not None and len(self.latest_arm_traj.position) >= 14:
-                    # JointState message has position array directly (in degrees)
-                    arm_positions_deg = np.array(self.latest_arm_traj.position[:14])
-                    
-                    # Convert degrees to radians
-                    arm_positions_rad = np.deg2rad(arm_positions_deg)
-                    
-                    # Try to get normalization parameters from environment
-                    if (hasattr(self.env, 'unwrapped') and 
-                        hasattr(self.env.unwrapped, 'arm_joint_centers') and 
-                        hasattr(self.env.unwrapped, 'arm_joint_scales')):
-                        # Normalize to [-1, 1] using environment's parameters
-                        arm_action = (arm_positions_rad - self.env.unwrapped.arm_joint_centers) / self.env.unwrapped.arm_joint_scales
-                        arm_action = np.clip(arm_action, -1.0, 1.0)
-                    else:
-                        # Fallback: simple normalization
-                        arm_action = np.clip(arm_positions_rad / np.pi, -1.0, 1.0)
-                    
-                    action[4:18] = arm_action
+                # Set arm commands based on WBC observation mode
+                if not self.wbc_observation_enabled:
+                    # WBC mode: use end-effector pose commands
+                    if self.latest_ee_pose_cmd is not None:
+                        # Extract left and right end-effector poses
+                        left_pose = self.latest_ee_pose_cmd.hand_poses.left_pose
+                        right_pose = self.latest_ee_pose_cmd.hand_poses.right_pose
+                        
+                        # Combine position and orientation data
+                        # Left: pos(3) + quat(4) = 7, Right: pos(3) + quat(4) = 7, Total: 14
+                        left_pos = np.array(left_pose.pos_xyz)
+                        left_quat = np.array(left_pose.quat_xyzw)
+                        right_pos = np.array(right_pose.pos_xyz)
+                        right_quat = np.array(right_pose.quat_xyzw)
+                        
+                        # Combine into arm_action: [left_pos, left_quat, right_pos, right_quat]
+                        arm_action = np.concatenate([left_pos, left_quat, right_pos, right_quat])
+                        action[4:18] = arm_action
+                        
+                else:
+                    # Non-WBC mode: use joint trajectory data
+                    if self.latest_arm_traj is not None and len(self.latest_arm_traj.position) >= 14:
+                        # JointState message has position array directly (in degrees)
+                        arm_positions_deg = np.array(self.latest_arm_traj.position[:14])
+                        
+                        # Convert degrees to radians
+                        arm_positions_rad = np.deg2rad(arm_positions_deg)
+                        
+                        # Try to get normalization parameters from environment
+                        if (hasattr(self.env, 'unwrapped') and 
+                            hasattr(self.env.unwrapped, 'arm_joint_centers') and 
+                            hasattr(self.env.unwrapped, 'arm_joint_scales')):
+                            # Normalize to [-1, 1] using environment's parameters
+                            arm_action = (arm_positions_rad - self.env.unwrapped.arm_joint_centers) / self.env.unwrapped.arm_joint_scales
+                            arm_action = np.clip(arm_action, -1.0, 1.0)
+                        else:
+                            # Fallback: simple normalization
+                            arm_action = np.clip(arm_positions_rad / np.pi, -1.0, 1.0)
+                        
+                        action[4:18] = arm_action
                 
                 vr_action = action
 
@@ -808,6 +845,8 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
             with self.vr_action_lock:
                 info["vr_cmd_vel_available"] = self.latest_cmd_vel is not None
                 info["vr_arm_traj_available"] = self.latest_arm_traj is not None
+                info["vr_ee_pose_cmd_available"] = self.latest_ee_pose_cmd is not None
+                info["wbc_observation_enabled"] = self.wbc_observation_enabled
                 info["action_source"] = "vr_intervention"
         else:
             info["action_source"] = "policy"
@@ -829,6 +868,7 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
         with self.vr_action_lock:
             self.latest_cmd_vel = None
             self.latest_arm_traj = None
+            self.latest_ee_pose_cmd = None
         
         # Reset intervention mode in the underlying environment
         if hasattr(self.env, 'unwrapped') and hasattr(self.env.unwrapped, 'set_vr_intervention_mode'):
@@ -847,5 +887,7 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
                 self.cmd_vel_sub.unregister()
             if hasattr(self, 'arm_traj_sub'):
                 self.arm_traj_sub.unregister()
+            if hasattr(self, 'ee_pose_cmd_sub'):
+                self.ee_pose_cmd_sub.unregister()
                 
         return self.env.close()
