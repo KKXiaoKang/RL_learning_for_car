@@ -32,6 +32,20 @@ from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.policies.sac.configuration_sac import SACConfig, is_image_feature
 from lerobot.common.policies.utils import get_device_from_parameters
 
+# Add ROS imports for visualization
+try:
+    import rospy
+    from sensor_msgs.msg import Image
+    from cv_bridge import CvBridge, CvBridgeError
+    ROS_AVAILABLE = True
+except ImportError:
+    ROS_AVAILABLE = False
+    rospy = None
+    Image = None
+    CvBridge = None
+    CvBridgeError = None
+
+
 DISCRETE_DIMENSION_INDEX = -1  # Gripper is always the last dimension
 
 
@@ -564,6 +578,106 @@ class SACObservationEncoder(nn.Module):
         self._init_image_layers()
         self._init_state_layers()
         self._compute_output_dim()
+        
+        # Initialize feature visualization components
+        self._init_feature_visualization()
+
+    def _init_feature_visualization(self):
+        """Initialize ROS publisher and utilities for feature visualization."""
+        self.enable_feature_viz = True
+
+        if self.enable_feature_viz and ROS_AVAILABLE and rospy is not None:
+            try:
+                # Initialize ROS publisher for feature visualization
+                self.feature_viz_pub = rospy.Publisher('/vision_features/resnet10_features', Image, queue_size=1, tcp_nodelay=True)
+                self.cv_bridge = CvBridge()
+                self.feature_viz_enabled = True
+                rospy.loginfo("Feature visualization enabled - publishing to /vision_features/resnet10_features")
+            except Exception as e:
+                rospy.logwarn(f"Failed to initialize feature visualization: {e}")
+                self.feature_viz_enabled = False
+        else:
+            self.feature_viz_enabled = False
+
+    def _visualize_features(self, features: Tensor, image_key: str = "observation.image.front"):
+        """
+        Convert CNN features to visualization image and publish to ROS topic.
+        
+        Args:
+            features: Feature tensor from ResNet10, shape (B, C, H, W) or (B, feature_dim)
+            image_key: Key identifying which image these features come from
+        """
+        if not self.feature_viz_enabled:
+            return
+            
+        try:
+            with torch.no_grad():
+                # Handle different feature tensor shapes
+                if len(features.shape) == 4:  # (B, C, H, W) - spatial features
+                    # Take first batch item and convert to numpy
+                    feat = features[0].cpu().numpy()  # (C, H, W)
+                    
+                    # Create feature map visualization
+                    # Method 1: Average across channels to create a single heatmap
+                    feat_avg = np.mean(feat, axis=0)  # (H, W)
+                    
+                    # Normalize to 0-255
+                    feat_norm = ((feat_avg - feat_avg.min()) / 
+                               (feat_avg.max() - feat_avg.min() + 1e-8) * 255).astype(np.uint8)
+                    
+                    # Convert grayscale to RGB for visualization
+                    feat_rgb = np.stack([feat_norm, feat_norm, feat_norm], axis=-1)  # (H, W, 3)
+                    
+                    # Resize to reasonable size for visualization (224x224)
+                    import cv2
+                    feat_rgb = cv2.resize(feat_rgb, (224, 224), interpolation=cv2.INTER_NEAREST)
+                    
+                elif len(features.shape) == 2:  # (B, feature_dim) - flattened features
+                    # For flattened features, create a simple visualization
+                    feat = features[0].cpu().numpy()  # (feature_dim,)
+                    
+                    # Reshape to a square-ish grid for visualization
+                    grid_size = int(np.sqrt(len(feat)))
+                    if grid_size * grid_size < len(feat):
+                        grid_size += 1
+                    
+                    # Pad and reshape
+                    padded_feat = np.pad(feat, (0, grid_size * grid_size - len(feat)), 'constant')
+                    feat_grid = padded_feat.reshape(grid_size, grid_size)
+                    
+                    # Normalize to 0-255
+                    feat_norm = ((feat_grid - feat_grid.min()) / 
+                               (feat_grid.max() - feat_grid.min() + 1e-8) * 255).astype(np.uint8)
+                    
+                    # Convert to RGB and resize
+                    feat_rgb = np.stack([feat_norm, feat_norm, feat_norm], axis=-1)
+                    import cv2
+                    feat_rgb = cv2.resize(feat_rgb, (224, 224), interpolation=cv2.INTER_NEAREST)
+                
+                else:
+                    rospy.logwarn(f"Unsupported feature shape for visualization: {features.shape}")
+                    return
+                
+                # Publish as ROS Image message
+                ros_image = self.cv_bridge.cv2_to_imgmsg(feat_rgb, "rgb8")
+                ros_image.header.stamp = rospy.Time.now()
+                ros_image.header.frame_id = f"features_{image_key.replace('.', '_')}"
+                
+                self.feature_viz_pub.publish(ros_image)
+                
+                # Log occasionally for debugging
+                if hasattr(self, '_viz_counter'):
+                    self._viz_counter += 1
+                else:
+                    self._viz_counter = 1
+                    
+                if self._viz_counter % 30 == 1:  # Log every 30 frames
+                    rospy.loginfo(f"Published feature visualization - shape: {features.shape}, "
+                                f"feature range: [{feat.min():.3f}, {feat.max():.3f}], "
+                                f"viz range: [0, 255]")
+                
+        except Exception as e:
+            rospy.logwarn(f"Error in feature visualization: {e}")
 
     def _init_image_layers(self) -> None:
         # If the config clearly indicates no vision, just exit.
@@ -699,7 +813,15 @@ class SACObservationEncoder(nn.Module):
         if normalize:
             obs = self.input_normalization(obs) # 归一化图像
         batched = torch.cat([obs[k] for k in self.image_keys], dim=0) # 🔥 关键步骤：只提取图像键对应的数据, 同时拼接在一起
-        out = self.image_encoder(batched) # 🔥 这里调用 ResNet10 直接输入图片 输出out 输出out 是 1024 维的特征
+        out = self.image_encoder(batched)
+        
+        # Add feature visualization here
+        if self.feature_viz_enabled and len(self.image_keys) > 0:
+            # Visualize features for the first image key
+            first_key = self.image_keys[0]
+            first_image_features = out[:1]  # Take features for first image only
+            self._visualize_features(first_image_features, first_key)
+        
         chunks = torch.chunk(out, len(self.image_keys), dim=0) # 将输出分割为多个小块
         return dict(zip(self.image_keys, chunks, strict=False)) # 返回字典，键为图像键，值为小块
 

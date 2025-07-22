@@ -1336,5 +1336,8 @@ def process_interaction_messages(
 
 
 if __name__ == "__main__":
+    import rospy
+    rospy.init_node("RLPD_learner_node", anonymous=True)
+
     train_cli()
     logging.info("[LEARNER] main finished")
