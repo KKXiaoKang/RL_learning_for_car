@@ -83,7 +83,7 @@
         "online_step_before_learning": 1000,
         "policy_update_freq": 1,
         "discount": 0.99,
-        "temperature_init": 0.01,
+        "temperature_init": 0.2,
         "num_critics": 2,
         "num_subsample_critics": null,
         "critic_lr": 3e-4,
@@ -93,7 +93,7 @@
         "utd_ratio": 2,
         "state_encoder_hidden_dim": 256,
         "latent_dim": 64,
-        "target_entropy": -18.0,
+        "target_entropy": null,
         "use_backup_entropy": true,
         "grad_clip_norm": 10.0,
         "actor_network_kwargs": {

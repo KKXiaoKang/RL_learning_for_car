@@ -174,6 +174,10 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         # Last converted VR action for recording
         self._last_vr_action = np.zeros(self.action_space.shape, dtype=np.float32)
         
+        # For smooth end-effector motion penalty
+        self.last_left_eef_pos = None
+        self.last_right_eef_pos = None
+        
         # Action smoothing parameters
         self.vel_smoothing_factor = vel_smoothing_factor  # 0.0 = no smoothing, 1.0 = full smoothing
         self.arm_smoothing_factor = arm_smoothing_factor  # Slightly more smoothing for arm joints
@@ -638,12 +642,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
     def _compute_reward_and_done(self, obs: Dict[str, np.ndarray]) -> Tuple[float, bool, Dict[str, Any]]:
         """
         Calculates the reward, done condition, and info dict for the current step.
-        The reward is sparse, returning 1.0 for success and 0.0 otherwise.
-
-        Success is defined by three simultaneous conditions:
-        1.  The box is lifted more than 20cm vertically from its initial position.
-        2.  The box's orientation remains stable (within ~11 degrees of initial orientation).
-        3.  Both of the robot's hands are within 50cm of the box's center.
+        Modified to reduce dense rewards and increase discrimination between good and bad behaviors.
         """
         info = {}
         
@@ -677,7 +676,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         # 新增：箱子掉到地上
         box_fallen = z_lift < -0.5
         if box_fallen:
-            reward -= 50.0
+            reward -= 100.0  # Increased penalty for dropping the box
             terminated = True
             info["box_fallen"] = True
         else:
@@ -694,58 +693,110 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             orientation_similarity = 1.0  # Assume good orientation when WBC is disabled
             orientation_success = True
 
-        # Success condition
-        lift_success = z_lift > 0.10 # 10cm视作成功
-        hands_close_success = dist_left_hand_to_box < 0.5 and dist_right_hand_to_box < 0.5
+        # Success condition - more stringent requirements
+        lift_success = z_lift > 0.15  # Increased from 10cm to 15cm
+        hands_close_success = dist_left_hand_to_box < 0.3 and dist_right_hand_to_box < 0.3  # Reduced from 50cm to 30cm
         
-        # Dense Reward Calculation
-        # 1. Reward for successful lift
-        if lift_success:
-            reward += 100.0
+        # SPARSE REWARD DESIGN - Much reduced dense rewards
         
-        # 2. Reward for torso proximity to box (躯干到box的奖励)
+        # 1. Major reward for successful lift (dominant reward)
+        if lift_success and hands_close_success:
+            reward += 1000.0  # Significantly increased success reward
+        
+        # 2. **REDUCED** torso proximity reward (躯干到box的奖励)
         if self.wbc_observation_enabled:
-            # WBC enabled: torso position is in wbc_data (first 3 elements of wbc_data)
-            # agent_state structure: [left_eef_data(7), right_eef_data(7), arm_data(14), ang_vel_data(3), lin_accel_data(3), wbc_data(12)]
-            # wbc_data starts at index 34, so torso position is at indices 34-36
             torso_pos = agent_state[40:43]  # 躯干位置 (x, y, z)
         else:
-            # WBC disabled: torso position is robot_pos
-            # agent_state structure: [left_eef_position(3), right_eef_position(3), arm_data(14), robot_pos(3)]
-            # robot_pos is at indices 20-22
             torso_pos = agent_state[20:23]  # 躯干位置 (x, y, z)
         
         # Calculate distance from torso to box
         dist_torso_to_box = np.linalg.norm(torso_pos - box_pos)
-        # Exponential decay reward for torso proximity to box
-        reward += np.exp(-2.0 * dist_torso_to_box) * 8.0  # Exponential decay, scale by 8
+        # MUCH REDUCED scale factor
+        if dist_torso_to_box < 1.0:  # Only reward when very close
+            reward += np.exp(-3.0 * dist_torso_to_box) * 1.0  # Reduced from 8.0 to 1.0
         
-        # 3. Reward for left and right EEF proximity to box (考虑XYZ三个维度)
-        dist_left_eef_to_box = np.linalg.norm(left_eef_pos - box_pos)  # 3D距离
-        dist_right_eef_to_box = np.linalg.norm(right_eef_pos - box_pos)  # 3D距离
-        # 使用3D距离计算末端接近奖励，提供更全面的接近指导
-        reward += (np.exp(-2.0 * dist_left_eef_to_box) + np.exp(-2.0 * dist_right_eef_to_box)) * 3.0 # Exponential decay, scale by 3
+        # 3. **REDUCED** end-effector proximity reward
+        dist_left_eef_to_box = np.linalg.norm(left_eef_pos - box_pos)
+        dist_right_eef_to_box = np.linalg.norm(right_eef_pos - box_pos)
+        # Only reward when both hands are reasonably close
+        if dist_left_eef_to_box < 0.5 and dist_right_eef_to_box < 0.5:
+            reward += (np.exp(-4.0 * dist_left_eef_to_box) + np.exp(-4.0 * dist_right_eef_to_box)) * 0.5  # Reduced from 3.0 to 0.5
 
-        # Check for episode termination (can still terminate on success for sparse tasks)
+        # 4. End-effector velocity smoothness penalty
+        eef_velocity_penalty = 0.0
+        if self.last_left_eef_pos is not None and self.last_right_eef_pos is not None:
+            # Calculate velocity (position change between steps)
+            left_eef_velocity = np.linalg.norm(left_eef_pos - self.last_left_eef_pos)
+            right_eef_velocity = np.linalg.norm(right_eef_pos - self.last_right_eef_pos)
+            
+            # Penalty for high velocities (encouraging smooth motion)
+            eef_velocity_penalty = -(left_eef_velocity + right_eef_velocity) * 1.0  # Reduced from 2.0 to 1.0
+            reward += eef_velocity_penalty
+        
+        # Update last end-effector positions for next step
+        self.last_left_eef_pos = left_eef_pos.copy()
+        self.last_right_eef_pos = right_eef_pos.copy()
+
+        # 5. **REDUCED** box lifting reward
+        box_lift_reward = 0.0
+        if z_lift > 0.05:  # Only reward significant lifting
+            # Progressive reward with higher requirements
+            if z_lift > 0.15:
+                box_lift_reward = 50.0  # Major reward for significant lift
+            elif z_lift > 0.10:
+                box_lift_reward = 10.0  # Moderate reward for medium lift
+            else:
+                box_lift_reward = z_lift * 20.0  # Small reward for minor lift
+            reward += box_lift_reward
+
+        # 6. **REDUCED** symmetry reward
+        symmetry_reward = 0.0
+        # Only reward symmetry when hands are close to the box
+        if dist_left_hand_to_box < 0.5 and dist_right_hand_to_box < 0.5:
+            box_to_left = left_eef_pos - box_pos
+            box_to_right = right_eef_pos - box_pos
+            
+            # Check if hands are symmetric about the box center (mainly in Y and Z axes)
+            left_yz = box_to_left[1:]  # Y and Z coordinates
+            right_yz = box_to_right[1:]  # Y and Z coordinates
+            
+            # Ideal symmetry: left_yz ≈ -right_yz (mirror positions)
+            symmetry_error = np.linalg.norm(left_yz + right_yz)
+            symmetry_reward = np.exp(-5.0 * symmetry_error) * 0.2  # Reduced from 1.0 to 0.2
+            reward += symmetry_reward
+
+        # 7. **NEW** Penalty for hands being too far apart
+        hands_distance = np.linalg.norm(left_eef_pos - right_eef_pos)
+        if hands_distance > 1.0:  # Penalize if hands are more than 1m apart
+            reward -= (hands_distance - 1.0) * 2.0
+
+        # Check for episode termination
         if not box_fallen:
-            terminated = lift_success # Only terminate on lift success for now
+            terminated = lift_success and hands_close_success  # Only terminate on full success
 
-        info["succeed"] = lift_success
+        info["succeed"] = lift_success and hands_close_success
         info["z_lift"] = z_lift
         info["orientation_similarity"] = orientation_similarity
         info["dist_left_hand_to_box"] = dist_left_hand_to_box
         info["dist_right_hand_to_box"] = dist_right_hand_to_box
         info["dist_torso_to_box"] = dist_torso_to_box
+        info["eef_velocity_penalty"] = eef_velocity_penalty
+        info["box_lift_reward"] = box_lift_reward
+        info["symmetry_reward"] = symmetry_reward
+        info["hands_distance"] = hands_distance
 
         if self.debug:
             # 计算各个奖励项的贡献
-            lift_reward = 100.0 if lift_success else 0.0
-            torso_reward = np.exp(-2.0 * dist_torso_to_box) * 8.0
-            eef_proximity_reward = (np.exp(-2.0 * dist_left_eef_to_box) + np.exp(-2.0 * dist_right_eef_to_box)) * 3.0
+            success_reward = 1000.0 if (lift_success and hands_close_success) else 0.0
+            torso_reward = np.exp(-3.0 * dist_torso_to_box) * 1.0 if dist_torso_to_box < 1.0 else 0.0
+            eef_proximity_reward = 0.0
+            if dist_left_eef_to_box < 0.5 and dist_right_eef_to_box < 0.5:
+                eef_proximity_reward = (np.exp(-4.0 * dist_left_eef_to_box) + np.exp(-4.0 * dist_right_eef_to_box)) * 0.5
             
             print(f"z_lift: {z_lift:.3f}, orient_sim: {orientation_similarity:.3f}, torso_dist: {dist_torso_to_box:.3f}, total_reward: {reward:.3f}, terminated: {terminated}")
-            print(f"  Rewards breakdown - Lift: {lift_reward:.3f}, Torso: {torso_reward:.3f}, EEF-proximity: {eef_proximity_reward:.3f}")
-            print(f"  EEF 3D distances - Left: {dist_left_eef_to_box:.3f}, Right: {dist_right_eef_to_box:.3f}")
+            print(f"  Rewards breakdown - Success: {success_reward:.3f}, Torso: {torso_reward:.3f}, EEF-proximity: {eef_proximity_reward:.3f}")
+            print(f"  Additional rewards - Velocity-penalty: {eef_velocity_penalty:.3f}, Box-lift: {box_lift_reward:.3f}, Symmetry: {symmetry_reward:.3f}")
+            print(f"  Hand distances - Left: {dist_left_eef_to_box:.3f}, Right: {dist_right_eef_to_box:.3f}, Between hands: {hands_distance:.3f}")
             
         return reward, terminated, info
 
@@ -820,6 +871,10 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         self.is_first_action = True
         self.last_smoothed_vel_action.fill(0.0)
         self.last_smoothed_arm_action.fill(0.0)
+        
+        # Reset end-effector position history for velocity penalty
+        self.last_left_eef_pos = None
+        self.last_right_eef_pos = None
 
         return obs_stable, {}
 
