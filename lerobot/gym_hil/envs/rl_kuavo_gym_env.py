@@ -514,6 +514,9 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         if not self._is_vr_intervention_active:
             action = self._smooth_action(action)
         
+        # Apply action constraints
+        action = self._apply_action_constraints(action)
+        
         # De-normalize and publish cmd_vel
         twist_cmd = Twist()
         
@@ -590,6 +593,54 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         # rospy.loginfo(f"self.action_dim : {self.action_dim}")
         # rospy.loginfo(f"self.arm_dim : {self.arm_dim}")
         # rospy.loginfo(f"self.vel_dim : {self.vel_dim}")
+        
+    def _apply_action_constraints(self, action: np.ndarray) -> np.ndarray:
+        """
+        Apply constraints to the action to ensure safe and physically meaningful motions.
+        
+        Constraints:
+        1. End-effector x positions must be positive (forward from base_link)
+        2. Left hand y position must be greater than right hand y position (no crossing)
+        3. Limit extreme movements for safety
+        
+        Args:
+            action: The original action array
+            
+        Returns:
+            The constrained action array
+        """
+        constrained_action = action.copy()
+        
+        # Extract end-effector actions
+        vel_dim = 6 if self.enable_roll_pitch_control else 4
+        ee_action = constrained_action[vel_dim:]
+        
+        if not self.wbc_observation_enabled and len(ee_action) >= 6:
+            # For position-only control: [left_pos(3), right_pos(3)]
+            left_pos = ee_action[0:3]
+            right_pos = ee_action[3:6]
+            
+            # Constraint 1: Ensure x positions are always positive (forward from base_link)
+            # No backward motion allowed - x must be >= 0
+            left_pos[0] = max(left_pos[0], 0.0)  # Ensure x positions are always positive
+            right_pos[0] = max(right_pos[0], 0.0)
+            
+            # Constraint 2: Prevent hand crossing - left hand should have higher y than right hand
+            # If they're about to cross, push them apart
+            if left_pos[1] <= right_pos[1] + 0.1:  # 0.1m minimum separation
+                center_y = (left_pos[1] + right_pos[1]) / 2.0
+                left_pos[1] = center_y + 0.05  # Push left hand to positive y
+                right_pos[1] = center_y - 0.05  # Push right hand to negative y
+            
+            # Constraint 3: Limit extreme z movements (safety)
+            left_pos[2] = np.clip(left_pos[2], -0.8, 0.8)
+            right_pos[2] = np.clip(right_pos[2], -0.8, 0.8)
+            
+            # Update the action array
+            constrained_action[vel_dim:vel_dim+3] = left_pos
+            constrained_action[vel_dim+3:vel_dim+6] = right_pos
+        
+        return constrained_action
 
     def _smooth_action(self, action: np.ndarray) -> np.ndarray:
         """
@@ -658,6 +709,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         """
         Calculates the reward, done condition, and info dict for the current step.
         Modified to reduce dense rewards and increase discrimination between good and bad behaviors.
+        Enhanced with action constraints and better reward shaping for learning.
         """
         info = {}
         
@@ -697,178 +749,202 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         else:
             terminated = False
             info["box_fallen"] = False
-        
-        # Orientation similarity (only when WBC is enabled)
-        if self.wbc_observation_enabled and box_orn is not None:
-            q1 = box_orn
-            q2 = self.initial_box_pose['orientation']
-            orientation_similarity = abs(np.dot(q1, q2))
-            orientation_success = orientation_similarity > 0.98 # within ~11 degrees
-        else:
-            orientation_similarity = 1.0  # Assume good orientation when WBC is disabled
-            orientation_success = True
 
-        # Success condition - more stringent requirements
-        lift_success = z_lift > 0.15  # Increased from 10cm to 15cm
-        hands_close_success = dist_left_hand_to_box < 0.3 and dist_right_hand_to_box < 0.3  # Reduced from 50cm to 30cm
+        # Define success conditions
+        lift_success = z_lift > 0.15  # Must lift box at least 15cm
+        hands_close_success = (dist_left_hand_to_box < 0.3) and (dist_right_hand_to_box < 0.3)
         
-        # SPARSE REWARD DESIGN - Much reduced dense rewards
-        
-        # 1. Major reward for successful lift (dominant reward)
+        # 1. **SUCCESS REWARD** - Highest priority
         if lift_success and hands_close_success:
-            reward += 1000.0  # Significantly increased success reward
+            reward += 1000.0  # Big success reward
+            terminated = True
+
+        # **NEW CONSTRAINT-BASED REWARDS AND PENALTIES**
         
-        # 2. **ENHANCED** torso proximity with trajectory tracking
+        # 2. Position constraint rewards
+        position_constraint_reward = 0.0
+        
+        # 2a. Reward for keeping x positions positive (forward motion)
+        left_x_reward = max(0, left_eef_pos[0]) * 2.0  # Reward positive x positions
+        right_x_reward = max(0, right_eef_pos[0]) * 2.0
+        position_constraint_reward += left_x_reward + right_x_reward
+        
+        # 2b. Penalty for negative x positions (backward motion)
+        if left_eef_pos[0] < 0:
+            position_constraint_reward -= abs(left_eef_pos[0]) * 5.0
+        if right_eef_pos[0] < 0:
+            position_constraint_reward -= abs(right_eef_pos[0]) * 5.0
+        
+        # 2c. Reward for proper hand separation (left y > right y)
+        y_separation = left_eef_pos[1] - right_eef_pos[1]
+        if y_separation > 0.1:  # Good separation
+            position_constraint_reward += min(y_separation * 3.0, 10.0)  # Cap the reward
+        elif y_separation <= 0:  # Hands crossed
+            position_constraint_reward -= 15.0  # Strong penalty for crossing
+        
+        reward += position_constraint_reward
+
+        # 3. **ENHANCED DISTANCE-BASED APPROACH REWARDS**
+        # Make it easier for the agent to get positive rewards by approaching
+
+        approach_reward = 0.0
+        
+        # 3a. Basic proximity rewards with better scaling
+        if dist_left_hand_to_box < 1.0:  # Only reward when reasonably close
+            approach_reward += (1.0 - dist_left_hand_to_box) * 5.0  # Linear reward for closeness
+        if dist_right_hand_to_box < 1.0:
+            approach_reward += (1.0 - dist_right_hand_to_box) * 5.0
+
+        # 3b. Bonus for both hands being close simultaneously
+        if dist_left_hand_to_box < 0.5 and dist_right_hand_to_box < 0.5:
+            approach_reward += 10.0  # Bonus for coordinated approach
+
+        # 3c. Progressive rewards for getting closer
+        avg_distance = (dist_left_hand_to_box + dist_right_hand_to_box) / 2.0
+        if avg_distance < 0.8:
+            approach_reward += 5.0
+        if avg_distance < 0.6:
+            approach_reward += 5.0
+        if avg_distance < 0.4:
+            approach_reward += 10.0
+        if avg_distance < 0.2:
+            approach_reward += 15.0
+
+        reward += approach_reward
+
+        # 4. **TRAJECTORY TRACKING REWARDS** (existing logic with better weights)
+        
+        # Torso distance change reward
+        torso_distance_change_reward = 0.0
         if self.wbc_observation_enabled:
-            torso_pos = agent_state[40:43]  # 躯干位置 (x, y, z)
+            torso_pos = agent_state[40:43]
         else:
-            torso_pos = agent_state[20:23]  # 躯干位置 (x, y, z)
+            torso_pos = agent_state[20:23]
         
-        # Calculate distance from torso to box
         dist_torso_to_box = np.linalg.norm(torso_pos - box_pos)
         
-        # Torso trajectory tracking reward/penalty
-        torso_distance_change_reward = 0.0
         if self.last_dist_torso_to_box is not None:
-            distance_change = self.last_dist_torso_to_box - dist_torso_to_box  # Positive means getting closer
-            if distance_change > 0:  # Getting closer
+            distance_change = self.last_dist_torso_to_box - dist_torso_to_box
+            if distance_change > 0:
                 self.consecutive_approach_steps_torso += 1
-                torso_distance_change_reward = distance_change * 5.0  # Reward for approaching
-                # Bonus for continuous approach
+                torso_distance_change_reward = distance_change * 3.0  # Reduced weight
                 if self.consecutive_approach_steps_torso > 3:
-                    torso_distance_change_reward *= 1.5  # 50% bonus for sustained approach
-            else:  # Getting farther or staying same
+                    torso_distance_change_reward *= 1.5
+            else:
                 self.consecutive_approach_steps_torso = 0
-                if distance_change < -0.01:  # Only penalize significant retreating
-                    torso_distance_change_reward = distance_change * 3.0  # Penalty for retreating
-            
+                if distance_change < -0.02:
+                    torso_distance_change_reward = distance_change * 2.0
             reward += torso_distance_change_reward
-        
-        # Store current distance for next step
-        self.last_dist_torso_to_box = dist_torso_to_box
-        
-        # Static proximity reward (much reduced)
-        if dist_torso_to_box < 1.0:
-            reward += np.exp(-3.0 * dist_torso_to_box) * 0.5  # Further reduced from 1.0 to 0.5
-        
-        # 3. **ENHANCED** end-effector proximity with trajectory tracking
-        dist_left_eef_to_box = np.linalg.norm(left_eef_pos - box_pos)
-        dist_right_eef_to_box = np.linalg.norm(right_eef_pos - box_pos)
-        
-        # Left hand trajectory tracking
+
+        # Left hand distance change reward
         left_distance_change_reward = 0.0
         if self.last_dist_left_hand_to_box is not None:
-            distance_change = self.last_dist_left_hand_to_box - dist_left_eef_to_box  # Positive means getting closer
+            distance_change = self.last_dist_left_hand_to_box - dist_left_hand_to_box
             self.distance_change_history_left.append(distance_change)
             
-            if distance_change > 0:  # Getting closer
+            if distance_change > 0:
                 self.consecutive_approach_steps_left += 1
-                left_distance_change_reward = distance_change * 10.0  # Strong reward for approaching
+                left_distance_change_reward = distance_change * 8.0  # Good weight for learning
                 
-                # Bonus for continuous approach
                 if self.consecutive_approach_steps_left > 3:
-                    left_distance_change_reward *= 2.0  # Double reward for sustained approach
+                    left_distance_change_reward *= 1.5
                     
-                # Bonus for smooth trajectory (consistent direction)
                 if len(self.distance_change_history_left) >= 3:
                     recent_changes = list(self.distance_change_history_left)[-3:]
-                    if all(change > 0 for change in recent_changes):  # All positive (approaching)
+                    if all(change > 0 for change in recent_changes):
                         trajectory_smoothness = min(recent_changes) / max(recent_changes) if max(recent_changes) > 0 else 0
-                        left_distance_change_reward *= (1.0 + trajectory_smoothness)  # Bonus for smooth approach
-            else:  # Getting farther or staying same
+                        left_distance_change_reward *= (1.0 + trajectory_smoothness * 0.5)
+            else:
                 self.consecutive_approach_steps_left = 0
-                if distance_change < -0.02:  # Only penalize significant retreating
-                    left_distance_change_reward = distance_change * 8.0  # Strong penalty for retreating
+                if distance_change < -0.02:
+                    left_distance_change_reward = distance_change * 6.0
             
             reward += left_distance_change_reward
         
-        # Right hand trajectory tracking
+        # Right hand distance change reward
         right_distance_change_reward = 0.0
         if self.last_dist_right_hand_to_box is not None:
-            distance_change = self.last_dist_right_hand_to_box - dist_right_eef_to_box  # Positive means getting closer
+            distance_change = self.last_dist_right_hand_to_box - dist_right_hand_to_box
             self.distance_change_history_right.append(distance_change)
             
-            if distance_change > 0:  # Getting closer
+            if distance_change > 0:
                 self.consecutive_approach_steps_right += 1
-                right_distance_change_reward = distance_change * 10.0  # Strong reward for approaching
+                right_distance_change_reward = distance_change * 8.0
                 
-                # Bonus for continuous approach
                 if self.consecutive_approach_steps_right > 3:
-                    right_distance_change_reward *= 2.0  # Double reward for sustained approach
+                    right_distance_change_reward *= 1.5
                     
-                # Bonus for smooth trajectory (consistent direction)
                 if len(self.distance_change_history_right) >= 3:
                     recent_changes = list(self.distance_change_history_right)[-3:]
-                    if all(change > 0 for change in recent_changes):  # All positive (approaching)
+                    if all(change > 0 for change in recent_changes):
                         trajectory_smoothness = min(recent_changes) / max(recent_changes) if max(recent_changes) > 0 else 0
-                        right_distance_change_reward *= (1.0 + trajectory_smoothness)  # Bonus for smooth approach
-            else:  # Getting farther or staying same
+                        right_distance_change_reward *= (1.0 + trajectory_smoothness * 0.5)
+            else:
                 self.consecutive_approach_steps_right = 0
-                if distance_change < -0.02:  # Only penalize significant retreating
-                    right_distance_change_reward = distance_change * 8.0  # Strong penalty for retreating
+                if distance_change < -0.02:
+                    right_distance_change_reward = distance_change * 6.0
             
             reward += right_distance_change_reward
         
         # Store current distances for next step
-        self.last_dist_left_hand_to_box = dist_left_eef_to_box
-        self.last_dist_right_hand_to_box = dist_right_eef_to_box
-        
-        # Static proximity reward (much reduced, only for very close distances)
-        if dist_left_eef_to_box < 0.3 and dist_right_eef_to_box < 0.3:
-            reward += (np.exp(-4.0 * dist_left_eef_to_box) + np.exp(-4.0 * dist_right_eef_to_box)) * 0.2  # Further reduced from 0.5 to 0.2
+        self.last_dist_left_hand_to_box = dist_left_hand_to_box
+        self.last_dist_right_hand_to_box = dist_right_hand_to_box
+        self.last_dist_torso_to_box = dist_torso_to_box
 
-        # 4. End-effector velocity smoothness penalty
+        # 5. End-effector velocity smoothness penalty (reduced weight)
         eef_velocity_penalty = 0.0
         if self.last_left_eef_pos is not None and self.last_right_eef_pos is not None:
-            # Calculate velocity (position change between steps)
             left_eef_velocity = np.linalg.norm(left_eef_pos - self.last_left_eef_pos)
             right_eef_velocity = np.linalg.norm(right_eef_pos - self.last_right_eef_pos)
-            
-            # Penalty for high velocities (encouraging smooth motion)
-            eef_velocity_penalty = -(left_eef_velocity + right_eef_velocity) * 1.0  # Reduced from 2.0 to 1.0
+            eef_velocity_penalty = -(left_eef_velocity + right_eef_velocity) * 0.5  # Reduced weight
             reward += eef_velocity_penalty
         
-        # Update last end-effector positions for next step
         self.last_left_eef_pos = left_eef_pos.copy()
         self.last_right_eef_pos = right_eef_pos.copy()
 
-        # 5. **REDUCED** box lifting reward
+        # 6. Box lifting reward (existing)
         box_lift_reward = 0.0
-        if z_lift > 0.05:  # Only reward significant lifting
-            # Progressive reward with higher requirements
+        if z_lift > 0.05:
             if z_lift > 0.15:
-                box_lift_reward = 50.0  # Major reward for significant lift
+                box_lift_reward = 50.0
             elif z_lift > 0.10:
-                box_lift_reward = 10.0  # Moderate reward for medium lift
+                box_lift_reward = 10.0
             else:
-                box_lift_reward = z_lift * 20.0  # Small reward for minor lift
+                box_lift_reward = z_lift * 20.0
             reward += box_lift_reward
 
-        # 6. **REDUCED** symmetry reward
+        # 7. Symmetry reward (existing but reduced)
         symmetry_reward = 0.0
-        # Only reward symmetry when hands are close to the box
         if dist_left_hand_to_box < 0.5 and dist_right_hand_to_box < 0.5:
             box_to_left = left_eef_pos - box_pos
             box_to_right = right_eef_pos - box_pos
             
-            # Check if hands are symmetric about the box center (mainly in Y and Z axes)
-            left_yz = box_to_left[1:]  # Y and Z coordinates
-            right_yz = box_to_right[1:]  # Y and Z coordinates
+            left_yz = box_to_left[1:]
+            right_yz = box_to_right[1:]
             
-            # Ideal symmetry: left_yz ≈ -right_yz (mirror positions)
             symmetry_error = np.linalg.norm(left_yz + right_yz)
-            symmetry_reward = np.exp(-5.0 * symmetry_error) * 0.2  # Reduced from 1.0 to 0.2
+            symmetry_reward = np.exp(-5.0 * symmetry_error) * 0.1  # Further reduced
             reward += symmetry_reward
 
-        # 7. **NEW** Penalty for hands being too far apart
+        # 8. Hand distance penalty (existing)
         hands_distance = np.linalg.norm(left_eef_pos - right_eef_pos)
-        if hands_distance > 1.0:  # Penalize if hands are more than 1m apart
-            reward -= (hands_distance - 1.0) * 2.0
+        if hands_distance > 1.0:
+            reward -= (hands_distance - 1.0) * 1.0  # Reduced penalty
 
-        # Check for episode termination
+        # Calculate orientation similarity (if available)
+        orientation_similarity = 1.0  # Default value
+        if self.wbc_observation_enabled and box_orn is not None:
+            initial_box_quat = np.array(self.initial_box_pose['orientation'])
+            current_box_quat = np.array(box_orn)
+            
+            dot_product = np.abs(np.dot(initial_box_quat, current_box_quat))
+            orientation_similarity = dot_product
+
+        # Check for episode termination (only on success, not on proximity)
         if not box_fallen:
-            terminated = lift_success and hands_close_success  # Only terminate on full success
+            terminated = lift_success and hands_close_success
 
+        # Populate info dictionary
         info["succeed"] = lift_success and hands_close_success
         info["z_lift"] = z_lift
         info["orientation_similarity"] = orientation_similarity
@@ -879,30 +955,26 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         info["box_lift_reward"] = box_lift_reward
         info["symmetry_reward"] = symmetry_reward
         info["hands_distance"] = hands_distance
+        info["position_constraint_reward"] = position_constraint_reward
+        info["approach_reward"] = approach_reward
+        info["left_x_pos"] = left_eef_pos[0]
+        info["right_x_pos"] = right_eef_pos[0]
+        info["y_separation"] = y_separation
+        info["avg_hand_distance"] = avg_distance
         info["torso_distance_change_reward"] = torso_distance_change_reward if 'torso_distance_change_reward' in locals() else 0.0
         info["left_distance_change_reward"] = left_distance_change_reward if 'left_distance_change_reward' in locals() else 0.0
         info["right_distance_change_reward"] = right_distance_change_reward if 'right_distance_change_reward' in locals() else 0.0
-        info["consecutive_approach_left"] = self.consecutive_approach_steps_left
-        info["consecutive_approach_right"] = self.consecutive_approach_steps_right
-        info["consecutive_approach_torso"] = self.consecutive_approach_steps_torso
 
         if self.debug:
-            # 计算各个奖励项的贡献
+            # Enhanced debug output
             success_reward = 1000.0 if (lift_success and hands_close_success) else 0.0
-            torso_static_reward = np.exp(-3.0 * dist_torso_to_box) * 0.5 if dist_torso_to_box < 1.0 else 0.0
-            eef_static_reward = 0.0
-            if dist_left_eef_to_box < 0.3 and dist_right_eef_to_box < 0.3:
-                eef_static_reward = (np.exp(-4.0 * dist_left_eef_to_box) + np.exp(-4.0 * dist_right_eef_to_box)) * 0.2
             
-            print(f"z_lift: {z_lift:.3f}, orient_sim: {orientation_similarity:.3f}, torso_dist: {dist_torso_to_box:.3f}, total_reward: {reward:.3f}, terminated: {terminated}")
-            print(f"  Static rewards - Success: {success_reward:.3f}, Torso: {torso_static_reward:.3f}, EEF-proximity: {eef_static_reward:.3f}")
-            torso_change = torso_distance_change_reward if 'torso_distance_change_reward' in locals() else 0.0
-            left_change = left_distance_change_reward if 'left_distance_change_reward' in locals() else 0.0
-            right_change = right_distance_change_reward if 'right_distance_change_reward' in locals() else 0.0
-            print(f"  Trajectory rewards - Torso-change: {torso_change:.3f}, Left-change: {left_change:.3f}, Right-change: {right_change:.3f}")
-            print(f"  Consecutive steps - Left: {self.consecutive_approach_steps_left}, Right: {self.consecutive_approach_steps_right}, Torso: {self.consecutive_approach_steps_torso}")
-            print(f"  Additional rewards - Velocity-penalty: {eef_velocity_penalty:.3f}, Box-lift: {box_lift_reward:.3f}, Symmetry: {symmetry_reward:.3f}")
-            print(f"  Hand distances - Left: {dist_left_eef_to_box:.3f}, Right: {dist_right_eef_to_box:.3f}, Between hands: {hands_distance:.3f}")
+            print(f"z_lift: {z_lift:.3f}, orient_sim: {orientation_similarity:.3f}, avg_dist: {avg_distance:.3f}, total_reward: {reward:.3f}, terminated: {terminated}")
+            print(f"  Success reward: {success_reward:.1f}")
+            print(f"  Position constraints: {position_constraint_reward:.2f} (x_rew: {left_x_reward+right_x_reward:.2f}, y_sep: {y_separation:.2f})")
+            print(f"  Approach reward: {approach_reward:.2f}")
+            print(f"  Distance changes - Left: {left_distance_change_reward if 'left_distance_change_reward' in locals() else 0.0:.2f}, Right: {right_distance_change_reward if 'right_distance_change_reward' in locals() else 0.0:.2f}")
+            print(f"  Hand positions - Left: [{left_eef_pos[0]:.2f}, {left_eef_pos[1]:.2f}, {left_eef_pos[2]:.2f}], Right: [{right_eef_pos[0]:.2f}, {right_eef_pos[1]:.2f}, {right_eef_pos[2]:.2f}]")
             
         return reward, terminated, info
 

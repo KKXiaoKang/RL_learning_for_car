@@ -1,6 +1,6 @@
 {
     "output_dir": null,
-    "job_name": "rl_kuavo_MetaVR_hil_1_2025_0722_1415",
+    "job_name": "rl_kuavo_MetaVR_hil_1_2025_0722_1615",
     "resume": false,
     "seed": 42,
     "num_workers": 4,
@@ -79,7 +79,7 @@
         "online_step_before_learning": 1000,
         "policy_update_freq": 1,
         "discount": 0.99,
-        "temperature_init": 0.1,
+        "temperature_init": 0.05,
         "num_critics": 2,
         "num_subsample_critics": null,
         "critic_lr": 1e-4,
@@ -121,11 +121,11 @@
     "env": {
         "type": "hil",
         "wrapper": {
-            "control_time_s": 15.0,
+            "control_time_s": 20.0,
             "reset_time_s": 2.0,
             "control_mode": "meta_vr",
-            "vel_smoothing_factor": 0.4,
-            "arm_smoothing_factor": 0.3,
+            "vel_smoothing_factor": 0.2,
+            "arm_smoothing_factor": 0.2,
             "wbc_observation_enabled": false,
             "display_cameras": false,
             "add_joint_velocity_to_observation": false,
