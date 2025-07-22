@@ -708,8 +708,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
     def _compute_reward_and_done(self, obs: Dict[str, np.ndarray]) -> Tuple[float, bool, Dict[str, Any]]:
         """
         Calculates the reward, done condition, and info dict for the current step.
-        Modified to reduce dense rewards and increase discrimination between good and bad behaviors.
-        Enhanced with action constraints and better reward shaping for learning.
+        IMPROVED VERSION: Prevents large negative rewards while maintaining learning effectiveness.
         """
         info = {}
         
@@ -734,16 +733,16 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         dist_left_hand_to_box = np.linalg.norm(left_eef_pos - box_pos)
         dist_right_hand_to_box = np.linalg.norm(right_eef_pos - box_pos)
 
-        # reward
-        reward = 0.0  # <--- 一定要先初始化
+        # START WITH BASE POSITIVE REWARD to encourage exploration
+        reward = 1.0  # Base positive reward每步都给一点
 
         # Check conditions for success
         z_lift = box_pos[2] - self.initial_box_pose['position'][2]
         
-        # 新增：箱子掉到地上
+        # Box fallen penalty (softened)
         box_fallen = z_lift < -0.5
         if box_fallen:
-            reward -= 100.0  # Increased penalty for dropping the box
+            reward -= 50.0  # Reduced from 100.0
             terminated = True
             info["box_fallen"] = True
         else:
@@ -756,12 +755,12 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         
         # 1. **SUCCESS REWARD** - Highest priority
         if lift_success and hands_close_success:
-            reward += 1000.0  # Big success reward
+            reward += 500.0  # Reduced from 1000.0 for better scaling
             terminated = True
 
-        # **NEW CONSTRAINT-BASED REWARDS AND PENALTIES**
+        # **IMPROVED CONSTRAINT-BASED REWARDS WITH SOFT PENALTIES**
         
-        # 2. Position constraint rewards
+        # 2. Position constraint rewards (SOFTENED)
         position_constraint_reward = 0.0
         
         # 2a. Reward for keeping x positions positive (forward motion)
@@ -769,24 +768,25 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         right_x_reward = max(0, right_eef_pos[0]) * 2.0
         position_constraint_reward += left_x_reward + right_x_reward
         
-        # 2b. Penalty for negative x positions (backward motion)
+        # 2b. SOFT penalty for negative x positions using tanh
         if left_eef_pos[0] < 0:
-            position_constraint_reward -= abs(left_eef_pos[0]) * 5.0
+            # Soft penalty using tanh to prevent explosion
+            position_constraint_reward -= 10.0 * np.tanh(abs(left_eef_pos[0]))  # Max penalty ~10
         if right_eef_pos[0] < 0:
-            position_constraint_reward -= abs(right_eef_pos[0]) * 5.0
+            position_constraint_reward -= 10.0 * np.tanh(abs(right_eef_pos[0]))  # Max penalty ~10
         
-        # 2c. Reward for proper hand separation (left y > right y)
+        # 2c. SOFT penalty for hand crossing using sigmoid
         y_separation = left_eef_pos[1] - right_eef_pos[1]
         if y_separation > 0.1:  # Good separation
             position_constraint_reward += min(y_separation * 3.0, 10.0)  # Cap the reward
-        elif y_separation <= 0:  # Hands crossed
-            position_constraint_reward -= 15.0  # Strong penalty for crossing
+        elif y_separation <= 0:  # Hands crossed - use soft penalty
+            # Sigmoid penalty: starts small, saturates at ~5.0
+            crossing_penalty = 5.0 * (1 / (1 + np.exp(y_separation + 0.1)))
+            position_constraint_reward -= crossing_penalty
         
         reward += position_constraint_reward
 
-        # 3. **ENHANCED DISTANCE-BASED APPROACH REWARDS**
-        # Make it easier for the agent to get positive rewards by approaching
-
+        # 3. **ENHANCED DISTANCE-BASED APPROACH REWARDS** (unchanged - these are already positive)
         approach_reward = 0.0
         
         # 3a. Basic proximity rewards with better scaling
@@ -812,9 +812,9 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
 
         reward += approach_reward
 
-        # 4. **TRAJECTORY TRACKING REWARDS** (existing logic with better weights)
+        # 4. **IMPROVED TRAJECTORY TRACKING REWARDS** with CLIPPED penalties
         
-        # Torso distance change reward
+        # Torso distance change reward (CLIPPED)
         torso_distance_change_reward = 0.0
         if self.wbc_observation_enabled:
             torso_pos = agent_state[40:43]
@@ -827,16 +827,17 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             distance_change = self.last_dist_torso_to_box - dist_torso_to_box
             if distance_change > 0:
                 self.consecutive_approach_steps_torso += 1
-                torso_distance_change_reward = distance_change * 3.0  # Reduced weight
+                torso_distance_change_reward = distance_change * 3.0  # Positive reward unchanged
                 if self.consecutive_approach_steps_torso > 3:
                     torso_distance_change_reward *= 1.5
             else:
                 self.consecutive_approach_steps_torso = 0
                 if distance_change < -0.02:
-                    torso_distance_change_reward = distance_change * 2.0
+                    # CLIPPED penalty: max penalty of -5.0
+                    torso_distance_change_reward = max(distance_change * 2.0, -5.0)
             reward += torso_distance_change_reward
 
-        # Left hand distance change reward
+        # Left hand distance change reward (CLIPPED)
         left_distance_change_reward = 0.0
         if self.last_dist_left_hand_to_box is not None:
             distance_change = self.last_dist_left_hand_to_box - dist_left_hand_to_box
@@ -844,7 +845,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             
             if distance_change > 0:
                 self.consecutive_approach_steps_left += 1
-                left_distance_change_reward = distance_change * 8.0  # Good weight for learning
+                left_distance_change_reward = distance_change * 8.0  # Positive reward unchanged
                 
                 if self.consecutive_approach_steps_left > 3:
                     left_distance_change_reward *= 1.5
@@ -857,11 +858,12 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             else:
                 self.consecutive_approach_steps_left = 0
                 if distance_change < -0.02:
-                    left_distance_change_reward = distance_change * 6.0
+                    # CLIPPED penalty: max penalty of -10.0
+                    left_distance_change_reward = max(distance_change * 6.0, -10.0)
             
             reward += left_distance_change_reward
         
-        # Right hand distance change reward
+        # Right hand distance change reward (CLIPPED)
         right_distance_change_reward = 0.0
         if self.last_dist_right_hand_to_box is not None:
             distance_change = self.last_dist_right_hand_to_box - dist_right_hand_to_box
@@ -869,7 +871,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             
             if distance_change > 0:
                 self.consecutive_approach_steps_right += 1
-                right_distance_change_reward = distance_change * 8.0
+                right_distance_change_reward = distance_change * 8.0  # Positive reward unchanged
                 
                 if self.consecutive_approach_steps_right > 3:
                     right_distance_change_reward *= 1.5
@@ -882,7 +884,8 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             else:
                 self.consecutive_approach_steps_right = 0
                 if distance_change < -0.02:
-                    right_distance_change_reward = distance_change * 6.0
+                    # CLIPPED penalty: max penalty of -10.0
+                    right_distance_change_reward = max(distance_change * 6.0, -10.0)
             
             reward += right_distance_change_reward
         
@@ -891,18 +894,19 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         self.last_dist_right_hand_to_box = dist_right_hand_to_box
         self.last_dist_torso_to_box = dist_torso_to_box
 
-        # 5. End-effector velocity smoothness penalty (reduced weight)
+        # 5. End-effector velocity smoothness penalty (CLIPPED and reduced)
         eef_velocity_penalty = 0.0
         if self.last_left_eef_pos is not None and self.last_right_eef_pos is not None:
             left_eef_velocity = np.linalg.norm(left_eef_pos - self.last_left_eef_pos)
             right_eef_velocity = np.linalg.norm(right_eef_pos - self.last_right_eef_pos)
-            eef_velocity_penalty = -(left_eef_velocity + right_eef_velocity) * 0.5  # Reduced weight
+            # CLIPPED penalty: max penalty of -2.0
+            eef_velocity_penalty = max(-(left_eef_velocity + right_eef_velocity) * 0.3, -2.0)
             reward += eef_velocity_penalty
         
         self.last_left_eef_pos = left_eef_pos.copy()
         self.last_right_eef_pos = right_eef_pos.copy()
 
-        # 6. Box lifting reward (existing)
+        # 6. Box lifting reward (unchanged - positive)
         box_lift_reward = 0.0
         if z_lift > 0.05:
             if z_lift > 0.15:
@@ -913,7 +917,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
                 box_lift_reward = z_lift * 20.0
             reward += box_lift_reward
 
-        # 7. Symmetry reward (existing but reduced)
+        # 7. Symmetry reward (unchanged - positive when applicable)
         symmetry_reward = 0.0
         if dist_left_hand_to_box < 0.5 and dist_right_hand_to_box < 0.5:
             box_to_left = left_eef_pos - box_pos
@@ -923,13 +927,15 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             right_yz = box_to_right[1:]
             
             symmetry_error = np.linalg.norm(left_yz + right_yz)
-            symmetry_reward = np.exp(-5.0 * symmetry_error) * 0.1  # Further reduced
+            symmetry_reward = np.exp(-5.0 * symmetry_error) * 0.1
             reward += symmetry_reward
 
-        # 8. Hand distance penalty (existing)
+        # 8. Hand distance penalty (CLIPPED)
         hands_distance = np.linalg.norm(left_eef_pos - right_eef_pos)
         if hands_distance > 1.0:
-            reward -= (hands_distance - 1.0) * 1.0  # Reduced penalty
+            # CLIPPED penalty: max penalty of -5.0
+            hand_distance_penalty = min((hands_distance - 1.0) * 1.0, 5.0)
+            reward -= hand_distance_penalty
 
         # Calculate orientation similarity (if available)
         orientation_similarity = 1.0  # Default value
@@ -939,6 +945,10 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             
             dot_product = np.abs(np.dot(initial_box_quat, current_box_quat))
             orientation_similarity = dot_product
+
+        # **FINAL REWARD CLIPPING** - Critical for stability
+        # Clip total reward to reasonable range to prevent explosion
+        reward = np.clip(reward, -50.0, 600.0)  # Reasonable range for SAC
 
         # Check for episode termination (only on success, not on proximity)
         if not box_fallen:
@@ -967,7 +977,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
 
         if self.debug:
             # Enhanced debug output
-            success_reward = 1000.0 if (lift_success and hands_close_success) else 0.0
+            success_reward = 500.0 if (lift_success and hands_close_success) else 0.0
             
             print(f"z_lift: {z_lift:.3f}, orient_sim: {orientation_similarity:.3f}, avg_dist: {avg_distance:.3f}, total_reward: {reward:.3f}, terminated: {terminated}")
             print(f"  Success reward: {success_reward:.1f}")
@@ -975,6 +985,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             print(f"  Approach reward: {approach_reward:.2f}")
             print(f"  Distance changes - Left: {left_distance_change_reward if 'left_distance_change_reward' in locals() else 0.0:.2f}, Right: {right_distance_change_reward if 'right_distance_change_reward' in locals() else 0.0:.2f}")
             print(f"  Hand positions - Left: [{left_eef_pos[0]:.2f}, {left_eef_pos[1]:.2f}, {left_eef_pos[2]:.2f}], Right: [{right_eef_pos[0]:.2f}, {right_eef_pos[1]:.2f}, {right_eef_pos[2]:.2f}]")
+            print(f"  Reward clipped to range [-50, 600]")
             
         return reward, terminated, info
 

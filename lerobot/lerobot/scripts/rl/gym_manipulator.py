@@ -40,12 +40,13 @@ import logging
 import time
 from collections import deque
 from threading import Lock
-from typing import Annotated, Any, Sequence
+from typing import Annotated, Any, Sequence, List
 
 import gymnasium as gym
 import numpy as np
 import torch
 import torchvision.transforms.functional as F  # noqa: N812
+import matplotlib.pyplot as plt
 
 from lerobot.common.cameras import opencv  # noqa: F401
 from lerobot.common.envs.configs import EnvConfig
@@ -867,6 +868,214 @@ class ResetWrapper(gym.Wrapper):
         busy_wait(self.reset_time_s - (time.perf_counter() - start_time))
 
         return super().reset(seed=seed, options=options)
+
+
+def plot_episode_rewards(rewards: List[float], save_path: str = "episode_rewards_analysis.png", show_plot: bool = False) -> str:
+    """
+    绘制回合奖励统计图表，包含趋势、分布、成功率和统计信息
+    
+    Args:
+        rewards: 每个回合的奖励列表
+        save_path: 保存图像的路径
+        show_plot: 是否显示图表窗口
+        
+    Returns:
+        保存的图像文件路径
+    """
+    if not rewards:
+        print("WARNING: 没有奖励数据可供分析")
+        return save_path
+    
+    try:
+        # 设置matplotlib不显示GUI（避免在无GUI环境中卡住）
+        import matplotlib
+        if not show_plot:
+            matplotlib.use('Agg')
+        
+        # 创建2x2的子图布局
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
+        fig.suptitle('Episode Rewards Analysis Report', fontsize=16, fontweight='bold')
+        
+        # 1. 回合奖励趋势图
+        episodes = range(1, len(rewards) + 1)
+        ax1.plot(episodes, rewards, 'b-', marker='o', linewidth=2, markersize=4, alpha=0.7)
+        ax1.set_title('Episode Rewards Over Time', fontsize=14, fontweight='bold')
+        ax1.set_xlabel('Episode Number')
+        ax1.set_ylabel('Reward Value')
+        ax1.grid(True, alpha=0.3)
+        
+        # 添加移动平均线（如果有足够的数据点）
+        if len(rewards) > 5:
+            window_size = min(10, len(rewards) // 3)
+            moving_avg = []
+            for i in range(len(rewards)):
+                start_idx = max(0, i - window_size + 1)
+                moving_avg.append(np.mean(rewards[start_idx:i+1]))
+            ax1.plot(episodes, moving_avg, 'r--', linewidth=3, 
+                    label=f'Moving Average (window={window_size})', alpha=0.8)
+            ax1.legend()
+        
+        # 添加零线作为参考
+        ax1.axhline(y=0, color='gray', linestyle=':', alpha=0.5)
+        ax1.axhline(y=1, color='green', linestyle=':', alpha=0.5, label='Success Threshold')
+        
+        # 2. 奖励分布直方图
+        unique_rewards = len(set(rewards))
+        bins = min(20, max(5, unique_rewards))
+        n, bins_edges, patches = ax2.hist(rewards, bins=bins, alpha=0.7, color='skyblue', 
+                                         edgecolor='black', linewidth=1)
+        ax2.set_title('Reward Distribution', fontsize=14, fontweight='bold')
+        ax2.set_xlabel('Reward Value')
+        ax2.set_ylabel('Frequency')
+        ax2.grid(True, alpha=0.3)
+        
+        # 添加统计线
+        mean_reward = np.mean(rewards)
+        median_reward = np.median(rewards)
+        ax2.axvline(mean_reward, color='red', linestyle='--', linewidth=2, 
+                   label=f'Mean: {mean_reward:.3f}')
+        ax2.axvline(median_reward, color='orange', linestyle='--', linewidth=2, 
+                   label=f'Median: {median_reward:.3f}')
+        ax2.legend()
+        
+        # 3. 成功率饼图
+        success_threshold = 0.9  # 考虑浮点数精度，将接近1.0的值视为成功
+        success_count = sum(1 for r in rewards if r >= success_threshold)
+        failure_count = len(rewards) - success_count
+        
+        if success_count > 0 or failure_count > 0:
+            labels = ['Success', 'Failure']
+            sizes = [success_count, failure_count]
+            colors = ['lightgreen', 'lightcoral']
+            explode = (0.1, 0)  # 突出成功部分
+            
+            wedges, texts, autotexts = ax3.pie(sizes, explode=explode, labels=labels, 
+                                              colors=colors, autopct='%1.1f%%',
+                                              shadow=True, startangle=90)
+            
+            # 美化文本
+            for autotext in autotexts:
+                autotext.set_color('white')
+                autotext.set_fontweight('bold')
+                autotext.set_fontsize(12)
+                
+            ax3.set_title(f'Success Rate\n({success_count}/{len(rewards)} episodes)', 
+                          fontsize=14, fontweight='bold')
+        else:
+            ax3.text(0.5, 0.5, 'No Data', ha='center', va='center', transform=ax3.transAxes)
+            ax3.set_title('Success Rate', fontsize=14, fontweight='bold')
+        
+        # 4. 统计信息表格
+        ax4.axis('tight')
+        ax4.axis('off')
+        
+        # 计算详细统计信息
+        success_rate = (success_count / len(rewards) * 100) if rewards else 0
+        std_reward = np.std(rewards) if len(rewards) > 1 else 0
+        
+        stats_data = [
+            ['Total Episodes', f'{len(rewards)}'],
+            ['Success Rate', f'{success_rate:.1f}%'],
+            ['Mean Reward', f'{mean_reward:.4f}'],
+            ['Std Deviation', f'{std_reward:.4f}'],
+            ['Min Reward', f'{np.min(rewards):.4f}'],
+            ['Max Reward', f'{np.max(rewards):.4f}'],
+            ['Median Reward', f'{median_reward:.4f}'],
+            ['Q1 (25%)', f'{np.percentile(rewards, 25):.4f}'],
+            ['Q3 (75%)', f'{np.percentile(rewards, 75):.4f}']
+        ]
+        
+        table = ax4.table(cellText=stats_data,
+                          colLabels=['Metric', 'Value'],
+                          cellLoc='center',
+                          loc='center',
+                          colWidths=[0.6, 0.4])
+        table.auto_set_font_size(False)
+        table.set_fontsize(11)
+        table.scale(1.2, 1.8)
+        
+        # 设置表格样式
+        for i in range(len(stats_data) + 1):
+            for j in range(2):
+                cell = table[(i, j)]
+                if i == 0:  # 标题行
+                    cell.set_facecolor('#4CAF50')
+                    cell.set_text_props(weight='bold', color='white')
+                else:
+                    if j == 0:  # 指标列
+                        cell.set_facecolor('#f8f9fa')
+                    else:  # 数值列
+                        cell.set_facecolor('#ffffff')
+                    cell.set_text_props(weight='normal')
+        
+        ax4.set_title('Statistical Summary', fontsize=14, fontweight='bold', pad=20)
+        
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
+        
+        if show_plot:
+            plt.show()
+        else:
+            plt.close()  # 关闭图形，释放内存
+        
+        print(f"SUCCESS: 图表已成功保存至 {save_path}")
+        return save_path
+        
+    except Exception as e:
+        print(f"ERROR: 生成图表时出错: {e}")
+        print(f"WARNING: 图表保存可能失败，但程序将继续运行")
+        return save_path
+
+
+def print_rewards_summary(rewards: List[float]):
+    """
+    打印奖励统计摘要
+    
+    Args:
+        rewards: 每个回合的奖励列表
+    """
+    if not rewards:
+        print("WARNING: 没有奖励数据可供分析")
+        return
+    
+    print("\n" + "="*60)
+    print("Episode Rewards Analysis Summary")
+    print("="*60)
+    
+    success_count = sum(1 for r in rewards if r >= 0.9)
+    success_rate = (success_count / len(rewards) * 100) if rewards else 0
+    
+    print(f"Basic Statistics:")
+    print(f"  • Total Episodes: {len(rewards)}")
+    print(f"  • Success Episodes: {success_count}")
+    print(f"  • Success Rate: {success_rate:.1f}%")
+    print(f"  • Mean Reward: {np.mean(rewards):.4f}")
+    print(f"  • Std Deviation: {np.std(rewards):.4f}")
+    print(f"  • Min Reward: {np.min(rewards):.4f}")
+    print(f"  • Max Reward: {np.max(rewards):.4f}")
+    print(f"  • Median Reward: {np.median(rewards):.4f}")
+    
+    # 分析奖励趋势（如果有足够数据）
+    if len(rewards) >= 10:
+        first_half = rewards[:len(rewards)//2]
+        second_half = rewards[len(rewards)//2:]
+        first_half_avg = np.mean(first_half)
+        second_half_avg = np.mean(second_half)
+        improvement = second_half_avg - first_half_avg
+        
+        print(f"\nLearning Trend Analysis:")
+        print(f"  • First Half Average: {first_half_avg:.4f}")
+        print(f"  • Second Half Average: {second_half_avg:.4f}")
+        print(f"  • Improvement: {improvement:+.4f}")
+        
+        if improvement > 0.05:
+            print(f"  STATUS: Learning performance shows upward trend")
+        elif improvement < -0.05:
+            print(f"  WARNING: Learning performance shows downward trend")
+        else:
+            print(f"  STATUS: Learning performance is relatively stable")
+    
+    print("="*60)
 
 
 class BatchCompatibleWrapper(gym.ObservationWrapper):
@@ -2181,6 +2390,7 @@ def record_dataset(env, policy, cfg):
     # Record episodes
     episode_index = 0
     recorded_action = None
+    episode_rewards = []  # 记录每个回合的奖励
     while episode_index < cfg.num_episodes:
         obs, _ = env.reset()
         start_episode_t = time.perf_counter()
@@ -2189,6 +2399,7 @@ def record_dataset(env, policy, cfg):
         # Track success state collection
         success_detected = False
         success_steps_collected = 0
+        episode_total_reward = 0.0  # 追踪当前回合的总奖励
 
         # Run episode steps
         while time.perf_counter() - start_episode_t < cfg.wrapper.control_time_s:
@@ -2200,6 +2411,9 @@ def record_dataset(env, policy, cfg):
 
             # Step environment
             obs, reward, terminated, truncated, info = env.step(action)
+            
+            # 累积当前回合的奖励
+            episode_total_reward += reward
 
             # Check if episode needs to be rerecorded
             if info.get("rerecord_episode", False):
@@ -2261,12 +2475,28 @@ def record_dataset(env, policy, cfg):
             continue
 
         dataset.save_episode()
+        episode_rewards.append(episode_total_reward)  # 记录当前回合的总奖励
         episode_index += 1
 
     # Finalize dataset
     # dataset.consolidate(run_compute_stats=True)
     if cfg.push_to_hub:
         dataset.push_to_hub()
+    
+    # 生成数据录制过程中的奖励统计分析报告
+    if episode_rewards:
+        print("\nGenerating recording process reward statistics analysis report...")
+        
+        # 打印文字统计摘要
+        print_rewards_summary(episode_rewards)
+        
+        # 生成可视化图表
+        plot_save_path = f"recording_rewards_analysis_{cfg.task}_{len(episode_rewards)}eps.png"
+        saved_plot_path = plot_episode_rewards(episode_rewards, save_path=plot_save_path, show_plot=False)
+        print(f"\nRecording process reward analysis chart saved to: {saved_plot_path}")
+        print("Recording process reward statistics analysis completed!")
+    else:
+        print("\nWARNING: No reward data collected during recording, skipping analysis")
 
 
 def replay_episode(env, cfg):
@@ -2289,15 +2519,47 @@ def replay_episode(env, cfg):
     env.reset()
 
     actions = dataset.hf_dataset.select_columns("action")
+    
+    # 记录回放过程中的奖励
+    replay_rewards = []
+    episode_total_reward = 0.0
 
     for idx in range(dataset.num_frames):
         start_episode_t = time.perf_counter()
 
         action = actions[idx]["action"]
-        env.step(action)
+        obs, reward, terminated, truncated, info = env.step(action)
+        
+        # 累积奖励
+        episode_total_reward += reward
+        
+        # 如果回合结束，记录总奖励并重置
+        if terminated or truncated:
+            replay_rewards.append(episode_total_reward)
+            episode_total_reward = 0.0
+            env.reset()
 
         dt_s = time.perf_counter() - start_episode_t
         busy_wait(1 / 10 - dt_s)
+    
+    # 如果最后一个回合没有正常结束，也记录其奖励
+    if episode_total_reward != 0.0:
+        replay_rewards.append(episode_total_reward)
+    
+    # 生成回放过程的奖励统计分析报告
+    if replay_rewards:
+        print("\nGenerating replay process reward statistics analysis report...")
+        
+        # 打印文字统计摘要
+        print_rewards_summary(replay_rewards)
+        
+        # 生成可视化图表
+        plot_save_path = f"replay_rewards_analysis_{cfg.task}_ep{cfg.episode}.png"
+        saved_plot_path = plot_episode_rewards(replay_rewards, save_path=plot_save_path, show_plot=False)
+        print(f"\nReplay process reward analysis chart saved to: {saved_plot_path}")
+        print("Replay process reward statistics analysis completed!")
+    else:
+        print("\nWARNING: No reward data collected during replay, skipping analysis")
 
 
 @parser.wrap()
@@ -2383,6 +2645,21 @@ def main(cfg: EnvConfig):
         print(f"Success rate: {success_rate:.4f}")
     else:
         print("Success rate: 0.0")
+    
+    # 生成奖励统计分析报告
+    if successes:
+        print("\nGenerating reward statistics analysis report...")
+        
+        # 打印文字统计摘要
+        print_rewards_summary(successes)
+        
+        # 生成可视化图表
+        plot_save_path = f"episode_rewards_analysis_{cfg.task}_{cfg.num_episodes}eps.png"
+        saved_plot_path = plot_episode_rewards(successes, save_path=plot_save_path, show_plot=False)
+        print(f"\nReward analysis chart saved to: {saved_plot_path}")
+        print("Reward statistics analysis completed!")
+    else:
+        print("\nWARNING: No reward data collected, skipping analysis")
 
 
 if __name__ == "__main__":
