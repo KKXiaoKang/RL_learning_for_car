@@ -870,7 +870,7 @@ class ResetWrapper(gym.Wrapper):
         return super().reset(seed=seed, options=options)
 
 
-def plot_episode_rewards(rewards: List[float], save_path: str = "episode_rewards_analysis.png", show_plot: bool = False) -> str:
+def plot_episode_rewards(rewards: List[float], save_path: str = "episode_rewards_analysis.png", show_plot: bool = False, success_count: int = None, total_episodes: int = None) -> str:
     """
     绘制回合奖励统计图表，包含趋势、分布、成功率和统计信息
     
@@ -878,6 +878,8 @@ def plot_episode_rewards(rewards: List[float], save_path: str = "episode_rewards
         rewards: 每个回合的奖励列表
         save_path: 保存图像的路径
         show_plot: 是否显示图表窗口
+        success_count: 真正成功的episode数量（如果为None则使用旧的阈值计算）
+        total_episodes: 总episode数量
         
     Returns:
         保存的图像文件路径
@@ -939,9 +941,14 @@ def plot_episode_rewards(rewards: List[float], save_path: str = "episode_rewards
         ax2.legend()
         
         # 3. 成功率饼图
-        success_threshold = 0.9  # 考虑浮点数精度，将接近1.0的值视为成功
-        success_count = sum(1 for r in rewards if r >= success_threshold)
-        failure_count = len(rewards) - success_count
+        if success_count is not None and total_episodes is not None:
+            # 使用传入的准确成功计数
+            failure_count = total_episodes - success_count
+        else:
+            # 回退到旧的阈值计算方式（向后兼容）
+            success_threshold = 0.9  # 考虑浮点数精度，将接近1.0的值视为成功
+            success_count = sum(1 for r in rewards if r >= success_threshold)
+            failure_count = len(rewards) - success_count
         
         if success_count > 0 or failure_count > 0:
             labels = ['Success', 'Failure']
@@ -970,7 +977,10 @@ def plot_episode_rewards(rewards: List[float], save_path: str = "episode_rewards
         ax4.axis('off')
         
         # 计算详细统计信息
-        success_rate = (success_count / len(rewards) * 100) if rewards else 0
+        if success_count is not None and total_episodes is not None:
+            success_rate = (success_count / total_episodes * 100) if total_episodes > 0 else 0
+        else:
+            success_rate = (success_count / len(rewards) * 100) if rewards else 0
         std_reward = np.std(rewards) if len(rewards) > 1 else 0
         
         stats_data = [
@@ -1027,12 +1037,14 @@ def plot_episode_rewards(rewards: List[float], save_path: str = "episode_rewards
         return save_path
 
 
-def print_rewards_summary(rewards: List[float]):
+def print_rewards_summary(rewards: List[float], success_count: int = None, total_episodes: int = None):
     """
     打印奖励统计摘要
     
     Args:
         rewards: 每个回合的奖励列表
+        success_count: 真正成功的episode数量（如果为None则使用旧的阈值计算）
+        total_episodes: 总episode数量
     """
     if not rewards:
         print("WARNING: 没有奖励数据可供分析")
@@ -1042,8 +1054,13 @@ def print_rewards_summary(rewards: List[float]):
     print("Episode Rewards Analysis Summary")
     print("="*60)
     
-    success_count = sum(1 for r in rewards if r >= 0.9)
-    success_rate = (success_count / len(rewards) * 100) if rewards else 0
+    if success_count is not None and total_episodes is not None:
+        # 使用传入的准确成功计数
+        success_rate = (success_count / total_episodes * 100) if total_episodes > 0 else 0
+    else:
+        # 回退到旧的阈值计算方式（向后兼容）
+        success_count = sum(1 for r in rewards if r >= 0.9)
+        success_rate = (success_count / len(rewards) * 100) if rewards else 0
     
     print(f"Basic Statistics:")
     print(f"  • Total Episodes: {len(rewards)}")
@@ -2642,22 +2659,31 @@ def main(cfg: EnvConfig):
             # Determine the episode outcome based on termination reason
             episode_outcome = "unknown"
             
-            # Check for box fallen (failure) - preserve exploration value but apply terminal penalty
+            # Check for box fallen (failure) - highest priority failure
             if info.get("box_fallen", False):
                 episode_outcome = "box_fallen"
                 episode_reward = episode_total_reward  # Keep exploration value (already includes -50 penalty)
-            # Check for timeout (truncated without success) - preserve exploration value
-            elif truncated and not info.get("succeed", False):
+            # Check for timeout without success - failure
+            elif truncated and not terminated:
                 episode_outcome = "timeout"
                 episode_reward = episode_total_reward  # Keep accumulated reward from exploration
-            # Check for success
-            elif info.get("succeed", False):
+            # Check for true success - only if no failures occurred
+            elif terminated and not info.get("box_fallen", False):
+                # Use reward threshold to determine success since environments may not set succeed flag correctly
+                if episode_total_reward > 50:  # High reward indicates successful task completion
+                    episode_outcome = "success"
+                    episode_reward = episode_total_reward
+                else:
+                    episode_outcome = "low_reward_termination"  # Terminated but low reward = failure
+                    episode_reward = episode_total_reward
+            # Explicit success flag check as backup
+            elif info.get("succeed", False) and not info.get("box_fallen", False):
                 episode_outcome = "success"
-                episode_reward = episode_total_reward  # Keep the accumulated reward
-            # Other termination (fallback)
+                episode_reward = episode_total_reward
+            # Other termination cases (failures)
             else:
-                episode_outcome = "other_termination"
-                episode_reward = episode_total_reward  # Keep the accumulated reward
+                episode_outcome = "other_failure"
+                episode_reward = episode_total_reward
             
             # Record the outcome-adjusted reward for this episode
             successes.append(episode_reward)
@@ -2680,50 +2706,85 @@ def main(cfg: EnvConfig):
         success_count = episode_outcomes.count("success")
         box_fall_count = episode_outcomes.count("box_fallen")
         timeout_count = episode_outcomes.count("timeout")
-        other_failure_count = episode_outcomes.count("other_termination")
+        low_reward_count = episode_outcomes.count("low_reward_termination")
+        other_failure_count = episode_outcomes.count("other_failure")
+        unknown_count = episode_outcomes.count("unknown")
         
+        # Calculate success rate (only true successes count)
         success_rate = success_count / len(successes)
+        total_failures = box_fall_count + timeout_count + low_reward_count + other_failure_count + unknown_count
         
-        print(f"\n--- Episode Analysis (with Exploration Value Preserved) ---")
-        print(f"True successes: {success_count}/{cfg.num_episodes} ({success_rate:.1%})")
-        print(f"Box fallen failures: {box_fall_count}/{cfg.num_episodes} ({box_fall_count/cfg.num_episodes:.1%})")
-        print(f"Timeout failures: {timeout_count}/{cfg.num_episodes} ({timeout_count/cfg.num_episodes:.1%})")
-        print(f"Other outcomes: {other_failure_count}/{cfg.num_episodes} ({other_failure_count/cfg.num_episodes:.1%})")
+        print(f"\n=== CORRECTED Episode Analysis ===")
+        print(f"📊 OVERALL PERFORMANCE:")
+        print(f"   • Total Episodes: {cfg.num_episodes}")
+        print(f"   • True Successes: {success_count} ({success_rate:.1%})")
+        print(f"   • Total Failures: {total_failures} ({total_failures/cfg.num_episodes:.1%})")
+        print(f"")
+        print(f"📋 FAILURE BREAKDOWN:")
+        print(f"   • Box Dropped: {box_fall_count} ({box_fall_count/cfg.num_episodes:.1%})")
+        print(f"   • Timeout: {timeout_count} ({timeout_count/cfg.num_episodes:.1%})")
+        print(f"   • Low Reward Termination: {low_reward_count} ({low_reward_count/cfg.num_episodes:.1%})")
+        print(f"   • Other Failures: {other_failure_count} ({other_failure_count/cfg.num_episodes:.1%})")
+        if unknown_count > 0:
+            print(f"   • Unknown Outcomes: {unknown_count} ({unknown_count/cfg.num_episodes:.1%})")
+        
+        print(f"")
+        print(f"💰 REWARD STATISTICS:")
         
         # Calculate rewards by outcome type
         success_rewards = [successes[i] for i, outcome in enumerate(episode_outcomes) if outcome == "success"]
         box_fall_rewards = [successes[i] for i, outcome in enumerate(episode_outcomes) if outcome == "box_fallen"]
         timeout_rewards = [successes[i] for i, outcome in enumerate(episode_outcomes) if outcome == "timeout"]
+        low_reward_rewards = [successes[i] for i, outcome in enumerate(episode_outcomes) if outcome == "low_reward_termination"]
         
+        overall_average = sum(successes) / len(successes)
+        print(f"   • Overall Average Reward: {overall_average:.2f}")
+        print(f"   • Max Reward: {max(successes):.2f}")
+        print(f"   • Min Reward: {min(successes):.2f}")
+        
+        # Detailed breakdown by outcome
         if success_count > 0:
             avg_success_reward = sum(success_rewards) / len(success_rewards)
-            print(f"Average success reward: {avg_success_reward:.1f}")
+            print(f"   • Success Episodes Avg: {avg_success_reward:.1f}")
         
         if box_fall_count > 0:
             avg_box_fall_reward = sum(box_fall_rewards) / len(box_fall_rewards)
-            print(f"Average box fall reward: {avg_box_fall_reward:.1f} (includes exploration value - 50 penalty)")
+            print(f"   • Box Fall Episodes Avg: {avg_box_fall_reward:.1f} (exploration value - 50 penalty)")
         
         if timeout_count > 0:
             avg_timeout_reward = sum(timeout_rewards) / len(timeout_rewards)
-            print(f"Average timeout reward: {avg_timeout_reward:.1f} (exploration value preserved)")
+            print(f"   • Timeout Episodes Avg: {avg_timeout_reward:.1f} (exploration value preserved)")
         
-        overall_average = sum(successes) / len(successes)
-        print(f"Overall average reward: {overall_average:.4f}")
+        if low_reward_count > 0:
+            avg_low_reward = sum(low_reward_rewards) / len(low_reward_rewards)
+            print(f"   • Low Reward Episodes Avg: {avg_low_reward:.1f}")
+        
+        print(f"")
+        print(f"📝 NOTE: Box_fallen and timeout are failures, but rewards include exploration value for learning.")
+        
+        # Debug: Show episode outcomes for verification
+        if cfg.num_episodes <= 20:  # Only for small test runs
+            print(f"\n📋 Episode Outcomes Debug: {episode_outcomes}")
+        
+        success_rate_display = success_rate
     else:
         print("No episodes completed.")
+        success_rate_display = 0.0
     
     # 生成奖励统计分析报告
     if successes:
         print("\nGenerating reward statistics analysis report...")
+        print(f"CORRECTED Success Rate: {success_rate_display:.1%} (True successes only)")
         
         # 打印文字统计摘要
-        print_rewards_summary(successes)
+        print_rewards_summary(successes, success_count=success_count, total_episodes=cfg.num_episodes)
         
-        # 生成可视化图表
+        # 生成可视化图表  
         plot_save_path = f"episode_rewards_analysis_{cfg.task}_{cfg.num_episodes}eps.png"
-        saved_plot_path = plot_episode_rewards(successes, save_path=plot_save_path, show_plot=False)
+        saved_plot_path = plot_episode_rewards(successes, save_path=plot_save_path, show_plot=False, success_count=success_count, total_episodes=cfg.num_episodes)
         print(f"\nReward analysis chart saved to: {saved_plot_path}")
         print("Reward statistics analysis completed!")
+        print(f"FINAL CORRECTED Success Rate: {success_rate_display:.1%}")
     else:
         print("\nWARNING: No reward data collected, skipping analysis")
 
