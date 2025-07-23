@@ -2619,6 +2619,8 @@ def main(cfg: EnvConfig):
 
     num_episode = 0
     successes = []
+    episode_total_reward = 0.0  # Track cumulative reward for current episode
+    
     while num_episode < cfg.num_episodes:
         start_loop_s = time.perf_counter()
         if policy is not None:
@@ -2631,10 +2633,16 @@ def main(cfg: EnvConfig):
 
         # Execute the step: wrap the NumPy action in a torch tensor.
         obs, reward, terminated, truncated, info = env.step(action)
+        
+        # Accumulate reward for current episode
+        episode_total_reward += float(reward)
+        
         if terminated or truncated:
-            successes.append(float(reward))
+            # Record the cumulative reward for this episode
+            successes.append(episode_total_reward)
             obs, _ = env.reset()
             num_episode += 1
+            episode_total_reward = 0.0  # Reset for next episode
 
         dt_s = time.perf_counter() - start_loop_s
         busy_wait(1 / cfg.fps - dt_s)
