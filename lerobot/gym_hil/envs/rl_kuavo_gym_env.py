@@ -184,6 +184,9 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         self.last_dist_right_hand_to_box = None
         self.last_dist_torso_to_box = None
         
+        # Step counting for efficiency reward
+        self.episode_step_count = 0
+        
         # For continuous approach tracking
         self.consecutive_approach_steps_left = 0
         self.consecutive_approach_steps_right = 0
@@ -708,8 +711,8 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
     def _compute_reward_and_done(self, obs: Dict[str, np.ndarray]) -> Tuple[float, bool, Dict[str, Any]]:
         """
         Calculates the reward, done condition, and info dict for the current step.
-        REDESIGNED VERSION: Much smaller reward scale to keep episode rewards reasonable.
-        Target: Single step rewards in [-5, 10], episode rewards in reasonable range.
+        EFFICIENCY-OPTIMIZED VERSION: Rewards faster completion over slower completion.
+        Target: Fast completion should get higher total rewards than slow completion.
         """
         info = {}
         
@@ -734,16 +737,18 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         dist_left_hand_to_box = np.linalg.norm(left_eef_pos - box_pos)
         dist_right_hand_to_box = np.linalg.norm(right_eef_pos - box_pos)
 
-        # START WITH SMALL BASE POSITIVE REWARD to encourage exploration
-        reward = 0.01  # Much smaller base reward (was 1.0)
+        # **NEW: EFFICIENCY-BASED REWARD SYSTEM**
+        # - Very small step reward to discourage slow completion
+        # - Large success reward with efficiency bonus
+        reward = -0.01  # Small negative step penalty to encourage efficiency
 
         # Check conditions for success
         z_lift = box_pos[2] - self.initial_box_pose['position'][2]
         
-        # Box fallen penalty (scaled down)
+        # Box fallen penalty - terminal penalty but preserve exploration value
         box_fallen = z_lift < -0.5
         if box_fallen:
-            reward -= 2.0  # Reduced from 50.0
+            reward -= 50.0  # Large terminal penalty for dropping the box
             terminated = True
             info["box_fallen"] = True
         else:
@@ -754,60 +759,84 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         lift_success = z_lift > 0.15  # Must lift box at least 15cm
         hands_close_success = (dist_left_hand_to_box < 0.3) and (dist_right_hand_to_box < 0.3)
         
-        # 1. **SUCCESS REWARD** - Highest priority (scaled down significantly)
+        # 1. **SUCCESS REWARD WITH EFFICIENCY BONUS** - Highest priority
         if lift_success and hands_close_success:
-            reward += 8.0  # Reduced from 500.0 - this is the main reward
+            # Base success reward
+            base_success_reward = 100.0  # Increased base reward for success
+            
+            # **EFFICIENCY BONUS**: More steps = lower bonus
+            # Optimal completion: 20-50 steps, gets maximum bonus
+            # Slow completion: 100+ steps, gets minimal bonus
+            optimal_steps = 30  # Target completion time
+            max_efficiency_bonus = 200.0  # Maximum bonus for fast completion
+            
+            if self.episode_step_count <= optimal_steps:
+                # Fast completion - full bonus
+                efficiency_bonus = max_efficiency_bonus
+            else:
+                # Slower completion - reduced bonus
+                step_penalty = (self.episode_step_count - optimal_steps) * 2.0
+                efficiency_bonus = max(0.0, max_efficiency_bonus - step_penalty)
+            
+            total_success_reward = base_success_reward + efficiency_bonus
+            reward += total_success_reward
             terminated = True
+            
+            info["base_success_reward"] = base_success_reward
+            info["efficiency_bonus"] = efficiency_bonus
+            info["total_success_reward"] = total_success_reward
+            info["episode_steps"] = self.episode_step_count
 
-        # **CONSTRAINT-BASED REWARDS WITH SMALLER SCALE**
+        # **GUIDANCE REWARDS - MUCH SMALLER SCALE**
+        # These rewards provide guidance but shouldn't dominate the efficiency reward
         
-        # 2. Position constraint rewards (scaled down by ~20x)
+        # 2. Position constraint rewards (minimal guidance)
         position_constraint_reward = 0.0
         
         # 2a. Reward for keeping x positions positive (forward motion)
-        left_x_reward = max(0, left_eef_pos[0]) * 0.1  # Reduced from 2.0
-        right_x_reward = max(0, right_eef_pos[0]) * 0.1  # Reduced from 2.0
+        left_x_reward = max(0, left_eef_pos[0]) * 0.02  # Much smaller guidance reward
+        right_x_reward = max(0, right_eef_pos[0]) * 0.02
         position_constraint_reward += left_x_reward + right_x_reward
         
         # 2b. SOFT penalty for negative x positions using tanh
         if left_eef_pos[0] < 0:
-            position_constraint_reward -= 0.5 * np.tanh(abs(left_eef_pos[0]))  # Reduced from 10.0
+            position_constraint_reward -= 0.1 * np.tanh(abs(left_eef_pos[0]))
         if right_eef_pos[0] < 0:
-            position_constraint_reward -= 0.5 * np.tanh(abs(right_eef_pos[0]))  # Reduced from 10.0
+            position_constraint_reward -= 0.1 * np.tanh(abs(right_eef_pos[0]))
         
         # 2c. SOFT penalty for hand crossing using sigmoid
         y_separation = left_eef_pos[1] - right_eef_pos[1]
         if y_separation > 0.1:  # Good separation
-            position_constraint_reward += min(y_separation * 0.15, 0.5)  # Reduced from 3.0 and 10.0
+            position_constraint_reward += min(y_separation * 0.03, 0.1)
         elif y_separation <= 0:  # Hands crossed - use soft penalty
-            crossing_penalty = 0.25 * (1 / (1 + np.exp(y_separation + 0.1)))  # Reduced from 5.0
+            crossing_penalty = 0.05 * (1 / (1 + np.exp(y_separation + 0.1)))
             position_constraint_reward -= crossing_penalty
         
         reward += position_constraint_reward
 
-        # 3. **DISTANCE-BASED APPROACH REWARDS** (scaled down by ~10x)
+        # 3. **DISTANCE-BASED APPROACH REWARDS** (minimal guidance)
         approach_reward = 0.0
         
-        # 3a. Basic proximity rewards with better scaling
+        # 3a. Basic proximity rewards with minimal scaling
         if dist_left_hand_to_box < 1.0:  # Only reward when reasonably close
-            approach_reward += (1.0 - dist_left_hand_to_box) * 0.5  # Reduced from 5.0
+            approach_reward += (1.0 - dist_left_hand_to_box) * 0.1  # Much smaller guidance
         if dist_right_hand_to_box < 1.0:
-            approach_reward += (1.0 - dist_right_hand_to_box) * 0.5  # Reduced from 5.0
+            approach_reward += (1.0 - dist_right_hand_to_box) * 0.1
 
         # 3b. Bonus for both hands being close simultaneously
         if dist_left_hand_to_box < 0.5 and dist_right_hand_to_box < 0.5:
-            approach_reward += 1.0  # Reduced from 10.0
+            approach_reward += 0.2  # Small guidance bonus
 
-        # 3c. Progressive rewards for getting closer (scaled down)
+        # 3c. Progressive rewards for getting closer (minimal)
         avg_distance = (dist_left_hand_to_box + dist_right_hand_to_box) / 2.0
         if avg_distance < 0.8:
-            approach_reward += 0.5  # Reduced from 5.0
+            approach_reward += 0.1
         if avg_distance < 0.6:
-            approach_reward += 0.5  # Reduced from 5.0
+            approach_reward += 0.1
         if avg_distance < 0.4:
-            approach_reward += 1.0  # Reduced from 10.0
+            approach_reward += 0.2
         if avg_distance < 0.2:
-            approach_reward += 1.5  # Reduced from 15.0
+            approach_reward += 0.3
 
         reward += approach_reward
 
@@ -945,9 +974,10 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             dot_product = np.abs(np.dot(initial_box_quat, current_box_quat))
             orientation_similarity = dot_product
 
-        # **FINAL REWARD CLIPPING** - Much smaller range for single-step rewards
-        # Target: single-step rewards in [-5, 10], which gives reasonable episode totals
-        reward = np.clip(reward, -5.0, 10.0)  # Much smaller range than [-50, 600]
+        # **FINAL REWARD CLIPPING** - Allow for large success rewards
+        # Step rewards: typically [-1, 5] for guidance
+        # Success rewards: 100-300 for completion with efficiency bonus
+        reward = np.clip(reward, -10.0, 350.0)  # Allow for large success rewards
 
         # Check for episode termination (only on success, not on proximity)
         if not box_fallen:
@@ -975,17 +1005,21 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         info["right_distance_change_reward"] = right_distance_change_reward if 'right_distance_change_reward' in locals() else 0.0
 
         if self.debug:
-            # Enhanced debug output with new reward scale
-            success_reward = 8.0 if (lift_success and hands_close_success) else 0.0
+            # Enhanced debug output with efficiency-based reward scale
+            total_success_reward = info.get("total_success_reward", 0.0)
+            efficiency_bonus = info.get("efficiency_bonus", 0.0)
             
             print(f" ------------ use wrapper vr action ---------------")
-            print(f"z_lift: {z_lift:.3f}, orient_sim: {orientation_similarity:.3f}, avg_dist: {avg_distance:.3f}, total_reward: {reward:.3f}, terminated: {terminated}")
-            print(f"  Success reward: {success_reward:.1f}")
-            print(f"  Position constraints: {position_constraint_reward:.2f} (x_rew: {left_x_reward+right_x_reward:.2f}, y_sep: {y_separation:.2f})")
-            print(f"  Approach reward: {approach_reward:.2f}")
-            print(f"  Distance changes - Left: {left_distance_change_reward if 'left_distance_change_reward' in locals() else 0.0:.2f}, Right: {right_distance_change_reward if 'right_distance_change_reward' in locals() else 0.0:.2f}")
+            print(f"Step {self.episode_step_count}: z_lift: {z_lift:.3f}, orient_sim: {orientation_similarity:.3f}, avg_dist: {avg_distance:.3f}")
+            print(f"  Total reward: {reward:.3f}, terminated: {terminated}")
+            
+            if total_success_reward > 0:
+                print(f"  SUCCESS! Total success reward: {total_success_reward:.1f} (base: {info.get('base_success_reward', 0):.1f} + efficiency: {efficiency_bonus:.1f})")
+            else:
+                print(f"  Step penalty: -0.01, Guidance rewards: pos={position_constraint_reward:.3f}, approach={approach_reward:.3f}")
+            
             print(f"  Hand positions - Left: [{left_eef_pos[0]:.2f}, {left_eef_pos[1]:.2f}, {left_eef_pos[2]:.2f}], Right: [{right_eef_pos[0]:.2f}, {right_eef_pos[1]:.2f}, {right_eef_pos[2]:.2f}]")
-            print(f"  Reward clipped to range [-5, 10]")
+            print(f"  Reward range: [-10, 350] (guidance vs success)")
             print(f" ------------ use wrapper vr action ---------------")
             
         return reward, terminated, info
@@ -997,6 +1031,9 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         Args:
             action: The action to execute
         """
+        # Increment step counter for efficiency reward calculation
+        self.episode_step_count += 1
+        
         self._send_action(action)
         obs = self._get_observation()
         
@@ -1079,6 +1116,9 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         # Clear distance change history
         self.distance_change_history_left.clear()
         self.distance_change_history_right.clear()
+        
+        # Reset step counter for efficiency reward
+        self.episode_step_count = 0
 
         return obs_stable, {}
 

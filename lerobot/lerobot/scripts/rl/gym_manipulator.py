@@ -2619,6 +2619,7 @@ def main(cfg: EnvConfig):
 
     num_episode = 0
     successes = []
+    episode_outcomes = []  # Track the reason for episode termination
     episode_total_reward = 0.0  # Track cumulative reward for current episode
     
     while num_episode < cfg.num_episodes:
@@ -2638,8 +2639,33 @@ def main(cfg: EnvConfig):
         episode_total_reward += float(reward)
         
         if terminated or truncated:
-            # Record the cumulative reward for this episode
-            successes.append(episode_total_reward)
+            # Determine the episode outcome based on termination reason
+            episode_outcome = "unknown"
+            
+            # Check for box fallen (failure) - preserve exploration value but apply terminal penalty
+            if info.get("box_fallen", False):
+                episode_outcome = "box_fallen"
+                episode_reward = episode_total_reward  # Keep exploration value (already includes -50 penalty)
+            # Check for timeout (truncated without success) - preserve exploration value
+            elif truncated and not info.get("succeed", False):
+                episode_outcome = "timeout"
+                episode_reward = episode_total_reward  # Keep accumulated reward from exploration
+            # Check for success
+            elif info.get("succeed", False):
+                episode_outcome = "success"
+                episode_reward = episode_total_reward  # Keep the accumulated reward
+            # Other termination (fallback)
+            else:
+                episode_outcome = "other_termination"
+                episode_reward = episode_total_reward  # Keep the accumulated reward
+            
+            # Record the outcome-adjusted reward for this episode
+            successes.append(episode_reward)
+            episode_outcomes.append(episode_outcome)  # Track episode termination reason
+            
+            if cfg.num_episodes <= 20:  # Only print details for smaller test runs
+                print(f"Episode {num_episode + 1} ended: {episode_outcome} (reward: {episode_reward:.2f}, steps: {info.get('episode_steps', 'unknown')})")
+            
             obs, _ = env.reset()
             num_episode += 1
             episode_total_reward = 0.0  # Reset for next episode
@@ -2647,12 +2673,44 @@ def main(cfg: EnvConfig):
         dt_s = time.perf_counter() - start_loop_s
         busy_wait(1 / cfg.fps - dt_s)
 
-    print(f"Successes over {cfg.num_episodes} episodes: {successes}")
+    print(f"Episode results over {cfg.num_episodes} episodes: {successes}")
+    
     if len(successes) > 0:
-        success_rate = sum(successes) / len(successes)
-        print(f"Success rate: {success_rate:.4f}")
+        # Count different outcomes using episode_outcomes tracking
+        success_count = episode_outcomes.count("success")
+        box_fall_count = episode_outcomes.count("box_fallen")
+        timeout_count = episode_outcomes.count("timeout")
+        other_failure_count = episode_outcomes.count("other_termination")
+        
+        success_rate = success_count / len(successes)
+        
+        print(f"\n--- Episode Analysis (with Exploration Value Preserved) ---")
+        print(f"True successes: {success_count}/{cfg.num_episodes} ({success_rate:.1%})")
+        print(f"Box fallen failures: {box_fall_count}/{cfg.num_episodes} ({box_fall_count/cfg.num_episodes:.1%})")
+        print(f"Timeout failures: {timeout_count}/{cfg.num_episodes} ({timeout_count/cfg.num_episodes:.1%})")
+        print(f"Other outcomes: {other_failure_count}/{cfg.num_episodes} ({other_failure_count/cfg.num_episodes:.1%})")
+        
+        # Calculate rewards by outcome type
+        success_rewards = [successes[i] for i, outcome in enumerate(episode_outcomes) if outcome == "success"]
+        box_fall_rewards = [successes[i] for i, outcome in enumerate(episode_outcomes) if outcome == "box_fallen"]
+        timeout_rewards = [successes[i] for i, outcome in enumerate(episode_outcomes) if outcome == "timeout"]
+        
+        if success_count > 0:
+            avg_success_reward = sum(success_rewards) / len(success_rewards)
+            print(f"Average success reward: {avg_success_reward:.1f}")
+        
+        if box_fall_count > 0:
+            avg_box_fall_reward = sum(box_fall_rewards) / len(box_fall_rewards)
+            print(f"Average box fall reward: {avg_box_fall_reward:.1f} (includes exploration value - 50 penalty)")
+        
+        if timeout_count > 0:
+            avg_timeout_reward = sum(timeout_rewards) / len(timeout_rewards)
+            print(f"Average timeout reward: {avg_timeout_reward:.1f} (exploration value preserved)")
+        
+        overall_average = sum(successes) / len(successes)
+        print(f"Overall average reward: {overall_average:.4f}")
     else:
-        print("Success rate: 0.0")
+        print("No episodes completed.")
     
     # 生成奖励统计分析报告
     if successes:
