@@ -601,10 +601,12 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         """
         Apply constraints to the action to ensure safe and physically meaningful motions.
         
-        Constraints:
-        1. End-effector x positions must be positive (forward from base_link)
-        2. Left hand y position must be greater than right hand y position (no crossing)
-        3. Limit extreme movements for safety
+        New Constraints:
+        1. End-effector x positions must be in range [0, 0.7] (forward motion limited)
+        2. Left hand y position must be in range [0, 0.65] (positive y side)
+        3. Right hand y position must be in range [-0.65, 0] (negative y side)
+        4. Z positions must be in range [-0.20, 0.65] for safety
+        5. Disable robot linear z movement (action[2] = 0)
         
         Args:
             action: The original action array
@@ -614,8 +616,13 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         """
         constrained_action = action.copy()
         
-        # Extract end-effector actions
+        # Extract velocity and end-effector actions
         vel_dim = 6 if self.enable_roll_pitch_control else 4
+        
+        # Constraint 5: Disable robot linear z movement (up/down motion)
+        # action[0] - linear x, action[1] - linear y, action[2] - linear z, action[3] - angular yaw
+        constrained_action[2] = 0.0  # Disable linear z movement
+        
         ee_action = constrained_action[vel_dim:]
         
         if not self.wbc_observation_enabled and len(ee_action) >= 6:
@@ -623,25 +630,30 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             left_pos = ee_action[0:3]
             right_pos = ee_action[3:6]
             
-            # Constraint 1: Ensure x positions are always positive (forward from base_link)
-            # No backward motion allowed - x must be >= 0
-            left_pos[0] = max(left_pos[0], 0.0)  # Ensure x positions are always positive
-            right_pos[0] = max(right_pos[0], 0.0)
+            # Constraint 1: X positions must be in range [0, 0.7]
+            left_pos[0] = np.clip(left_pos[0], 0.0, 0.7)
+            right_pos[0] = np.clip(right_pos[0], 0.0, 0.7)
             
-            # Constraint 2: Prevent hand crossing - left hand should have higher y than right hand
-            # If they're about to cross, push them apart
-            if left_pos[1] <= right_pos[1] + 0.1:  # 0.1m minimum separation
-                center_y = (left_pos[1] + right_pos[1]) / 2.0
-                left_pos[1] = center_y + 0.05  # Push left hand to positive y
-                right_pos[1] = center_y - 0.05  # Push right hand to negative y
+            # Constraint 2: Left hand Y position must be in range [0, 0.65]
+            left_pos[1] = np.clip(left_pos[1], 0.0, 0.65)
             
-            # Constraint 3: Limit extreme z movements (safety)
-            left_pos[2] = np.clip(left_pos[2], -0.8, 0.8)
-            right_pos[2] = np.clip(right_pos[2], -0.8, 0.8)
+            # Constraint 3: Right hand Y position must be in range [-0.65, 0]
+            right_pos[1] = np.clip(right_pos[1], -0.65, 0.0)
+            
+            # Constraint 4: Z positions must be in range [-0.20, 0.65] for safety
+            left_pos[2] = np.clip(left_pos[2], -0.20, 0.65)
+            right_pos[2] = np.clip(right_pos[2], -0.20, 0.65)
             
             # Update the action array
             constrained_action[vel_dim:vel_dim+3] = left_pos
             constrained_action[vel_dim+3:vel_dim+6] = right_pos
+            
+            # Debug output for constraint verification
+            if self.debug:
+                print(f"[CONSTRAINT DEBUG] Applied position constraints:")
+                print(f"  Robot linear z (action[2]): {constrained_action[2]:.3f} (disabled)")
+                print(f"  Left hand: x={left_pos[0]:.3f} [0,0.7], y={left_pos[1]:.3f} [0,0.65], z={left_pos[2]:.3f} [-0.20,0.65]")
+                print(f"  Right hand: x={right_pos[0]:.3f} [0,0.7], y={right_pos[1]:.3f} [-0.65,0], z={right_pos[2]:.3f} [-0.20,0.65]")
         
         return constrained_action
 
