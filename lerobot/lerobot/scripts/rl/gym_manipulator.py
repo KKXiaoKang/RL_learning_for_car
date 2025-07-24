@@ -2408,6 +2408,7 @@ def record_dataset(env, policy, cfg):
     episode_index = 0
     recorded_action = None
     episode_rewards = []  # 记录每个回合的奖励
+    episode_success_count = 0  # 记录真正成功的回合数
     while episode_index < cfg.num_episodes:
         obs, _ = env.reset()
         start_episode_t = time.perf_counter()
@@ -2493,6 +2494,14 @@ def record_dataset(env, policy, cfg):
 
         dataset.save_episode()
         episode_rewards.append(episode_total_reward)  # 记录当前回合的总奖励
+        
+        # 判断该episode是否真正成功（基于合理的成功标准）
+        # 对于RLKuavo任务，成功通常意味着较高的奖励（比如>200）
+        if "RLKuavo" in cfg.task and episode_total_reward > 200:
+            episode_success_count += 1
+        elif reward == 1.0 or episode_total_reward > 50:  # 其他环境的成功标准
+            episode_success_count += 1
+            
         episode_index += 1
 
     # Finalize dataset
@@ -2503,15 +2512,18 @@ def record_dataset(env, policy, cfg):
     # 生成数据录制过程中的奖励统计分析报告
     if episode_rewards:
         print("\nGenerating recording process reward statistics analysis report...")
+        print(f"Recording completed: {episode_success_count}/{len(episode_rewards)} episodes were truly successful")
         
         # 打印文字统计摘要
-        print_rewards_summary(episode_rewards)
+        print_rewards_summary(episode_rewards, success_count=episode_success_count, total_episodes=len(episode_rewards))
         
         # 生成可视化图表
         plot_save_path = f"recording_rewards_analysis_{cfg.task}_{len(episode_rewards)}eps.png"
-        saved_plot_path = plot_episode_rewards(episode_rewards, save_path=plot_save_path, show_plot=False)
+        saved_plot_path = plot_episode_rewards(episode_rewards, save_path=plot_save_path, show_plot=False, 
+                                             success_count=episode_success_count, total_episodes=len(episode_rewards))
         print(f"\nRecording process reward analysis chart saved to: {saved_plot_path}")
         print("Recording process reward statistics analysis completed!")
+        print(f"CORRECT Recording Success Rate: {(episode_success_count/len(episode_rewards)*100):.1f}%")
     else:
         print("\nWARNING: No reward data collected during recording, skipping analysis")
 
@@ -2540,6 +2552,7 @@ def replay_episode(env, cfg):
     # 记录回放过程中的奖励
     replay_rewards = []
     episode_total_reward = 0.0
+    replay_success_count = 0
 
     for idx in range(dataset.num_frames):
         start_episode_t = time.perf_counter()
@@ -2553,6 +2566,13 @@ def replay_episode(env, cfg):
         # 如果回合结束，记录总奖励并重置
         if terminated or truncated:
             replay_rewards.append(episode_total_reward)
+            
+            # 判断是否成功（使用与录制相同的标准）
+            if "RLKuavo" in cfg.task and episode_total_reward > 200:
+                replay_success_count += 1
+            elif reward == 1.0 or episode_total_reward > 50:
+                replay_success_count += 1
+                
             episode_total_reward = 0.0
             env.reset()
 
@@ -2562,19 +2582,27 @@ def replay_episode(env, cfg):
     # 如果最后一个回合没有正常结束，也记录其奖励
     if episode_total_reward != 0.0:
         replay_rewards.append(episode_total_reward)
+        # 判断最后一个episode是否成功
+        if "RLKuavo" in cfg.task and episode_total_reward > 200:
+            replay_success_count += 1
+        elif episode_total_reward > 50:
+            replay_success_count += 1
     
     # 生成回放过程的奖励统计分析报告
     if replay_rewards:
         print("\nGenerating replay process reward statistics analysis report...")
+        print(f"Replay completed: {replay_success_count}/{len(replay_rewards)} episodes were truly successful")
         
         # 打印文字统计摘要
-        print_rewards_summary(replay_rewards)
+        print_rewards_summary(replay_rewards, success_count=replay_success_count, total_episodes=len(replay_rewards))
         
         # 生成可视化图表
         plot_save_path = f"replay_rewards_analysis_{cfg.task}_ep{cfg.episode}.png"
-        saved_plot_path = plot_episode_rewards(replay_rewards, save_path=plot_save_path, show_plot=False)
+        saved_plot_path = plot_episode_rewards(replay_rewards, save_path=plot_save_path, show_plot=False,
+                                             success_count=replay_success_count, total_episodes=len(replay_rewards))
         print(f"\nReplay process reward analysis chart saved to: {saved_plot_path}")
         print("Replay process reward statistics analysis completed!")
+        print(f"CORRECT Replay Success Rate: {(replay_success_count/len(replay_rewards)*100):.1f}%")
     else:
         print("\nWARNING: No reward data collected during replay, skipping analysis")
 
