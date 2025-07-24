@@ -722,9 +722,10 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
 
     def _compute_reward_and_done(self, obs: Dict[str, np.ndarray]) -> Tuple[float, bool, Dict[str, Any]]:
         """
-        分阶段奖励函数：
+        分阶段奖励函数（修复版）：
         - 阶段1 (dist_torso_to_box > 0.5): 靠近箱子阶段
         - 阶段2 (dist_torso_to_box <= 0.5): 抓取箱子阶段
+        - 修复了奖励尺度问题，使其适合SAC训练
         """
         info = {}
         
@@ -755,16 +756,16 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         dist_right_hand_to_box = np.linalg.norm(right_eef_pos - box_pos)
         dist_torso_to_box = np.linalg.norm(torso_pos - box_pos)
 
-        # Base step penalty to encourage efficiency
-        reward = -0.01
+        # Base step penalty to encourage efficiency (reduced)
+        reward = -0.005  # Reduced from -0.01
         
         # Check success conditions
         z_lift = box_pos[2] - self.initial_box_pose['position'][2]
         
-        # Box fallen penalty - terminal condition
+        # Box fallen penalty - terminal condition (reduced scale)
         box_fallen = z_lift < -0.5
         if box_fallen:
-            reward -= 50.0
+            reward -= 10.0  # Reduced from -50.0
             terminated = True
             info["box_fallen"] = True
         else:
@@ -806,10 +807,9 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         if is_approach_stage:
             # ========== STAGE 1: APPROACH STAGE ==========
             
-            # 1. Default joint reward (small weight)
-            # reward += default_joint_reward * 0.3  # Small weight as requested
-            reward += default_joint_reward * 1.0  # Small weight as requested
-
+            # 1. Default joint reward (FIXED: correct weight as requested)
+            reward += default_joint_reward * 0.3  # FIXED: was 1.0, now 0.3 as requested
+            
             # 2. Torso approaching box reward
             if self.last_dist_torso_to_box is not None:
                 torso_distance_change = self.last_dist_torso_to_box - dist_torso_to_box
@@ -827,6 +827,12 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             reward += torso_proximity_reward
             info["torso_proximity_reward"] = torso_proximity_reward
             
+            # 4. ADDED: Progressive approach reward to make success less sparse
+            if dist_torso_to_box < 1.0:
+                approach_progress_reward = (1.0 - dist_torso_to_box) * 1.0  # Max 1.0 when very close
+                reward += approach_progress_reward
+                info["approach_progress_reward"] = approach_progress_reward
+            
             # No hand-to-box distance rewards in approach stage
             info["stage_focus"] = "torso_approach"
             
@@ -836,19 +842,19 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             # 1. Default joint reward (maintain comfortable posture)
             reward += default_joint_reward * 0.2
             
-            # 2. Final success reward - maximum reward for successful box lifting
+            # 2. Final success reward - SIGNIFICANTLY REDUCED SCALE
             if lift_success and hands_close_success:
-                # Base success reward
-                base_success_reward = 100.0
+                # Base success reward (REDUCED from 100.0)
+                base_success_reward = 15.0  # Much more reasonable!
                 
-                # Efficiency bonus based on episode steps
-                optimal_steps = 50  # Target completion time for grasp stage
-                max_efficiency_bonus = 150.0
+                # Efficiency bonus based on episode steps (FIXED optimal steps)
+                optimal_steps = 120  # More realistic for 200-step episodes
+                max_efficiency_bonus = 10.0  # REDUCED from 150.0
                 
                 if self.episode_step_count <= optimal_steps:
                     efficiency_bonus = max_efficiency_bonus
                 else:
-                    step_penalty = (self.episode_step_count - optimal_steps) * 1.5
+                    step_penalty = (self.episode_step_count - optimal_steps) * 0.1  # Gentler penalty
                     efficiency_bonus = max(0.0, max_efficiency_bonus - step_penalty)
                 
                 total_success_reward = base_success_reward + efficiency_bonus
@@ -865,29 +871,31 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
                 
                 # Hand-to-box approach rewards (now active in grasp stage)
                 if dist_left_hand_to_box < 0.8:
-                    left_hand_reward = (0.8 - dist_left_hand_to_box) * 0.5
+                    left_hand_reward = (0.8 - dist_left_hand_to_box) * 1.0  # Increased from 0.5
                     reward += left_hand_reward
                     info["left_hand_approach_reward"] = left_hand_reward
                 
                 if dist_right_hand_to_box < 0.8:
-                    right_hand_reward = (0.8 - dist_right_hand_to_box) * 0.5
+                    right_hand_reward = (0.8 - dist_right_hand_to_box) * 1.0  # Increased from 0.5
                     reward += right_hand_reward
                     info["right_hand_approach_reward"] = right_hand_reward
                 
                 # Bonus for both hands being close
                 if dist_left_hand_to_box < 0.4 and dist_right_hand_to_box < 0.4:
-                    both_hands_close_bonus = 0.8
+                    both_hands_close_bonus = 1.5  # Increased from 0.8
                     reward += both_hands_close_bonus
                     info["both_hands_close_bonus"] = both_hands_close_bonus
                 
-                # Box lifting progress reward
-                if z_lift > 0.05:
+                # Box lifting progress reward (ENHANCED for less sparse rewards)
+                if z_lift > 0.02:  # Lower threshold
                     if z_lift > 0.15:
-                        box_lift_reward = 8.0  # Good lift
+                        box_lift_reward = 8.0  # Keep good lift reward
                     elif z_lift > 0.10:
-                        box_lift_reward = 3.0  # Partial lift
+                        box_lift_reward = 5.0  # Increased from 3.0
+                    elif z_lift > 0.05:
+                        box_lift_reward = 2.0  # New intermediate reward
                     else:
-                        box_lift_reward = z_lift * 15.0  # Progressive lift
+                        box_lift_reward = z_lift * 20.0  # Progressive lift (increased multiplier)
                     reward += box_lift_reward
                     info["box_lift_reward"] = box_lift_reward
                 
@@ -898,7 +906,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
                     left_yz = box_to_left[1:]  # y,z components
                     right_yz = box_to_right[1:]  # y,z components
                     symmetry_error = np.linalg.norm(left_yz + right_yz)
-                    symmetry_reward = np.exp(-3.0 * symmetry_error) * 0.3
+                    symmetry_reward = np.exp(-3.0 * symmetry_error) * 0.5  # Increased from 0.3
                     reward += symmetry_reward
                     info["symmetry_reward"] = symmetry_reward
             
@@ -938,10 +946,8 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         self.last_right_eef_pos = right_eef_pos.copy()
         self.last_dist_torso_to_box = dist_torso_to_box
         
-        # Final reward clipping to keep total rewards reasonable
-        # Approach stage: typically [-0.5, 5] per step
-        # Grasp stage: typically [-0.5, 10] per step, with large success bonus (100-250)
-        reward = np.clip(reward, -5.0, 300.0)
+        # Final reward clipping - MUCH MORE REASONABLE RANGE
+        reward = np.clip(reward, -15.0, 30.0)  # FIXED: was [-5.0, 300.0]
         
         # Termination check
         if not box_fallen:
