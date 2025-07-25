@@ -605,9 +605,9 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         Publish fixed arm poses for the approach stage.
         """
         # Fixed poses for approach stage
-        left_pos = np.array([0.3178026345146559, 0.1604180715613648, -0.019417275957965042])
+        left_pos = np.array([0.3178026345146559, 0.4004180715613648, -0.019417275957965042])
         left_quat = np.array([0.0, -0.70711, 0.0, 0.70711])
-        right_pos = np.array([0.323325548461215, -0.2467252581359532, -0.05270182751631599])
+        right_pos = np.array([0.3178026345146559, -0.4004180715613648, -0.019417275957965042])
         right_quat = np.array([0.0, -0.70711, 0.0, 0.70711])
         left_elbow_pos = np.zeros(3)
         right_elbow_pos = np.zeros(3)
