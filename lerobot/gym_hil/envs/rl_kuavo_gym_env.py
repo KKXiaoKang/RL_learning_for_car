@@ -589,7 +589,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         msg.use_custom_ik_param = False
         msg.joint_angles_as_q0 = False
         msg.ik_param = ikSolveParam()
-        msg.frame = 0  # keep current frame
+        msg.frame = 3  # keep current frame3 | 3 为vr系
         self.ee_pose_pub.publish(msg)
 
         # # 打印action_dim
