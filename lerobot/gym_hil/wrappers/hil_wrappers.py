@@ -727,47 +727,48 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
                 
                 # Set arm commands based on WBC observation mode
                 if not self.wbc_observation_enabled:
-                    # WBC mode: use end-effector pose commands
+                    # Non-WBC mode: use end-effector pose commands and convert to increments
                     if self.latest_ee_pose_cmd is not None:
                         # Extract left and right end-effector poses
                         left_pose = self.latest_ee_pose_cmd.hand_poses.left_pose
                         right_pose = self.latest_ee_pose_cmd.hand_poses.right_pose
                         
-                        # Combine position and orientation data
-                        # Left: pos(3) + quat(4) = 7, Right: pos(3) + quat(4) = 7, Total: 14
-                        left_pos = np.array(left_pose.pos_xyz)
-                        left_quat = np.array(left_pose.quat_xyzw)
-                        right_pos = np.array(right_pose.pos_xyz)
-                        right_quat = np.array(right_pose.quat_xyzw)
+                        # Get absolute positions from VR
+                        vr_left_pos = np.array(left_pose.pos_xyz)
+                        vr_right_pos = np.array(right_pose.pos_xyz)
                         
-                        # Combine into arm_action: [left_pos, left_quat, right_pos, right_quat]
-                        arm_action = np.concatenate([left_pos, left_quat, right_pos, right_quat])
-                        arm_position = np.concatenate([left_pos, right_pos])
-                        arm_orientation = np.concatenate([left_quat, right_quat])
-
-                        # Use the available space in the action array
-                        arm_end_idx = min(4 + len(arm_action), len(action)) # 18 和 10 之间取最小值
-                        # print(f" len arm_action: {len(arm_action)}") # 14
-                        # print(f" arm_end_idx: {arm_end_idx}") # 10
-                        # print(f" arm_position: {arm_position}") # eef position打印查看 
-                        
-                        # 添加详细的调试信息
-                        # print(f"left_pos: {left_pos}")
-                        # print(f"right_pos: {right_pos}")
-                        # print(f"arm_position: {arm_position}")
-                        
-                        # 如果arm_end_idx == 10，则使用arm_position，否则使用arm_action
-                        if arm_end_idx == 10:
-                            action[4:10] = arm_position
-                            # 打印action数组的映射
-                            # print(f"action[4] (left_x): {action[4]}")
-                            # print(f"action[5] (left_y): {action[5]}")
-                            # print(f"action[6] (left_z): {action[6]}")
-                            # print(f"action[7] (right_x): {action[7]}")
-                            # print(f"action[8] (right_y): {action[8]}")
-                            # print(f"action[9] (right_z): {action[9]}")
-                        else: # 使用左eef和右eef数据
-                            action[4:arm_end_idx] = arm_action
+                        # Convert to increments based on fixed reference positions
+                        if (hasattr(self.env, 'unwrapped') and 
+                            hasattr(self.env.unwrapped, 'FIXED_LEFT_POS') and 
+                            hasattr(self.env.unwrapped, 'FIXED_RIGHT_POS')):
+                            # Get fixed reference positions from environment
+                            fixed_left_pos = self.env.unwrapped.FIXED_LEFT_POS
+                            fixed_right_pos = self.env.unwrapped.FIXED_RIGHT_POS
+                            max_increment_range = getattr(self.env.unwrapped, 'MAX_INCREMENT_RANGE', 0.2)
+                            
+                            # Calculate increments from fixed reference positions
+                            left_increment = vr_left_pos - fixed_left_pos
+                            right_increment = vr_right_pos - fixed_right_pos
+                            
+                            # Limit increments to reasonable ranges
+                            left_increment = np.clip(left_increment, -max_increment_range, max_increment_range)
+                            right_increment = np.clip(right_increment, -max_increment_range, max_increment_range)
+                            
+                            # Set incremental action
+                            action[4:7] = left_increment   # Left hand increment
+                            action[7:10] = right_increment # Right hand increment
+                            
+                            if self.debug:
+                                print(f"[VR INCREMENTAL DEBUG] VR positions - Left: {vr_left_pos}, Right: {vr_right_pos}")
+                                print(f"[VR INCREMENTAL DEBUG] Fixed positions - Left: {fixed_left_pos}, Right: {fixed_right_pos}")
+                                print(f"[VR INCREMENTAL DEBUG] Calculated increments - Left: {left_increment}, Right: {right_increment}")
+                        else:
+                            # Fallback: treat VR positions as direct increments (for compatibility)
+                            # This might happen during initialization
+                            left_increment = np.clip(vr_left_pos, -0.1, 0.1)  # Small default range
+                            right_increment = np.clip(vr_right_pos, -0.1, 0.1)
+                            action[4:7] = left_increment
+                            action[7:10] = right_increment
                 
                 else:
                     # Non-WBC mode: use joint trajectory data
@@ -833,16 +834,6 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
             else:
                 # Already intervening, use VR-generated action from the environment
                 if hasattr(self.env, 'unwrapped') and hasattr(self.env.unwrapped, 'get_vr_action'):
-                    # env_vr_action = self.env.unwrapped.get_vr_action()
-                    # # Use VR action if it has non-zero values, otherwise fall back to wrapper VR action
-                    # if np.any(env_vr_action != 0):
-                    #     action = env_vr_action
-                    #     print(" ------------ use env vr action ---------------")
-                    # elif vr_action is not None:
-                    #     print(" ------------ use wrapper vr action ---------------")
-                    #     action = vr_action
-                    # else:
-                    #     action = self.zero_action
                     if vr_action is not None:
                         action = vr_action
                         print(" ------------ use wrapper vr action ---------------")

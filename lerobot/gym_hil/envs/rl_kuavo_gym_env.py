@@ -45,6 +45,16 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
 
     metadata = {"render_modes": ["human"], "render_fps": 30}
 
+    # 固定基准位置常量 - 基于这些位置进行增量控制
+    FIXED_LEFT_POS = np.array([0.3178026345146559, 0.4004180715613648, -0.019417275957965042])
+    FIXED_LEFT_QUAT = np.array([0.0, -0.70711, 0.0, 0.70711])
+    FIXED_RIGHT_POS = np.array([0.3178026345146559, -0.4004180715613648, -0.019417275957965042])
+    FIXED_RIGHT_QUAT = np.array([0.0, -0.70711, 0.0, 0.70711])
+    
+    # 增量控制的最大范围 (米)
+    MAX_INCREMENT_RANGE = 0.2  # ±20cm的增量范围
+    MAX_INCREMENT_PER_STEP = 0.02  # 每步最大2cm的增量变化
+
     def __init__(self, debug: bool = True, image_size=(224, 224), enable_roll_pitch_control: bool = False, 
                  vel_smoothing_factor: float = 0.3, arm_smoothing_factor: float = 0.4, 
                  wbc_observation_enabled: bool = True, action_dim: int = None):
@@ -76,6 +86,12 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         self.latest_vr_arm_traj = None
         self.vr_cmd_vel_lock = threading.Lock()
         self.vr_arm_traj_lock = threading.Lock()
+
+        # 添加当前增量状态跟踪
+        self.current_left_increment = np.zeros(3, dtype=np.float32)
+        self.current_right_increment = np.zeros(3, dtype=np.float32)
+        self.last_left_increment = np.zeros(3, dtype=np.float32)
+        self.last_right_increment = np.zeros(3, dtype=np.float32)
 
         # Call the base class constructor to set up the node and observation buffer
         super().__init__()
@@ -273,13 +289,14 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
     def get_vr_action(self) -> np.ndarray:
         """
         Convert VR-generated ROS messages to environment action format.
+        Now supports incremental position control.
         
         Returns:
-            Action array matching the environment's action space
+            Action array matching the environment's action space (with increments)
 
             获取vr的如下信息。
             获取/cmd_vel
-            获取/mm_kuavo_arm_traj
+            获取/mm_kuavo_arm_traj - 现在转换为增量控制
             在RLKuavoMetaVRWrapper的step当中, 将获取到的值映射到action数组中,该数据用于最终的action_intervention record和buffer都会使用这个key里面的action
         """
         
@@ -310,19 +327,40 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
                 # Set velocity portion of action
                 action[:4] = vel_action
             
-            # Process arm trajectory data if available  
+            # Process arm trajectory data if available - Convert to increments
             if self._latest_vr_arm_traj is not None and len(self._latest_vr_arm_traj.position) >= self.arm_dim:
-                # JointState message has position array directly
-                arm_positions_deg = np.array(self._latest_vr_arm_traj.position[:self.arm_dim], dtype=np.float32)
-                
-                # Convert degrees to radians if needed
-                arm_positions_rad = np.deg2rad(arm_positions_deg)
-                
-                # Normalize to [-1, 1] using joint centers and scales
-                arm_action = (arm_positions_rad - self.arm_joint_centers) / self.arm_joint_scales
-                arm_action = np.clip(arm_action, -1.0, 1.0)
-                
-                action[4:4+self.arm_dim] = arm_action
+                if self.wbc_observation_enabled:
+                    # WBC mode: convert joint angles to increments
+                    arm_positions_deg = np.array(self._latest_vr_arm_traj.position[:self.arm_dim], dtype=np.float32)
+                    arm_positions_rad = np.deg2rad(arm_positions_deg)
+                    arm_action = (arm_positions_rad - self.arm_joint_centers) / self.arm_joint_scales
+                    arm_action = np.clip(arm_action, -1.0, 1.0)
+                    action[4:4+self.arm_dim] = arm_action
+                else:
+                    # Position mode: convert to increments based on fixed reference
+                    # Note: This requires VR to send position data, not joint angles
+                    # For now, use a simple conversion - this may need adjustment based on VR data format
+                    # Convert VR data to position increments
+                    left_increment = np.zeros(3, dtype=np.float32)
+                    right_increment = np.zeros(3, dtype=np.float32)
+                    
+                    # This is a placeholder - actual implementation depends on VR data format
+                    # You may need to adjust this based on how VR sends position data
+                    if len(self._latest_vr_arm_traj.position) >= 6:
+                        # Assume VR sends [left_x, left_y, left_z, right_x, right_y, right_z]
+                        vr_left_pos = np.array(self._latest_vr_arm_traj.position[0:3], dtype=np.float32)
+                        vr_right_pos = np.array(self._latest_vr_arm_traj.position[3:6], dtype=np.float32)
+                        
+                        # Calculate increments from fixed reference positions
+                        left_increment = vr_left_pos - self.FIXED_LEFT_POS
+                        right_increment = vr_right_pos - self.FIXED_RIGHT_POS
+                        
+                        # Limit increments to reasonable ranges
+                        left_increment = np.clip(left_increment, -self.MAX_INCREMENT_RANGE, self.MAX_INCREMENT_RANGE)
+                        right_increment = np.clip(right_increment, -self.MAX_INCREMENT_RANGE, self.MAX_INCREMENT_RANGE)
+                    
+                    action[4:7] = left_increment
+                    action[7:10] = right_increment
             
             return action
 
@@ -631,34 +669,40 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
     def _publish_action_based_arm_poses(self, ee_action: np.ndarray):
         """
         Publish arm poses based on the action input (original logic for grasp stage).
+        Now uses incremental position control based on fixed reference positions.
         
         Args:
-            ee_action: The arm portion of the action array
+            ee_action: The arm portion of the action array (increments)
         """
-        # ee_action: [L_pos(3), L_quat(4), R_pos(3), R_quat(4)] or [L_pos(3), R_pos(3)]
-        if self.wbc_observation_enabled: # 7 + 7 6dof数据
+        # ee_action现在是增量: [L_delta_pos(3), R_delta_pos(3)]
+        if self.wbc_observation_enabled: # 7 + 7 6dof数据 - 但现在我们只处理位置增量
             if len(ee_action) >= 14:
-                """
-                    使用action得到的姿态 - 末端eef position
-                """
-                left_pos = ee_action[0:3]
-                left_quat = ee_action[3:7]
-                right_pos = ee_action[7:10]
+                # 提取增量
+                left_increment = ee_action[0:3]
+                left_quat = ee_action[3:7]  # 如果有quaternion数据，保持原样
+                right_increment = ee_action[7:10]
                 right_quat = ee_action[10:14]
             else:
-                # Handle reduced action space
-                left_pos = ee_action[0:3] if len(ee_action) >= 3 else np.zeros(3)
-                left_quat = np.array([0.0, -0.70711, 0.0, 0.70711])
-                right_pos = ee_action[3:6] if len(ee_action) >= 6 else np.zeros(3)
-                right_quat = np.array([0.0, -0.70711, 0.0, 0.70711])
-        else: # 3 + 3 position数据
+                # Handle reduced action space - 只有位置增量
+                left_increment = ee_action[0:3] if len(ee_action) >= 3 else np.zeros(3)
+                left_quat = self.FIXED_LEFT_QUAT.copy()
+                right_increment = ee_action[3:6] if len(ee_action) >= 6 else np.zeros(3)
+                right_quat = self.FIXED_RIGHT_QUAT.copy()
+        else: # 3 + 3 position增量数据
             """
-                固定姿态 - 末端eef position
+                基于固定姿态的增量控制 - 末端eef position increments
             """
-            left_pos = ee_action[0:3] if len(ee_action) >= 3 else np.zeros(3)
-            left_quat = np.array([0.0, -0.70711, 0.0, 0.70711])
-            right_pos = ee_action[3:6] if len(ee_action) >= 6 else np.zeros(3)
-            right_quat = np.array([0.0, -0.70711, 0.0, 0.70711])
+            left_increment = ee_action[0:3] if len(ee_action) >= 3 else np.zeros(3)
+            left_quat = self.FIXED_LEFT_QUAT.copy()
+            right_increment = ee_action[3:6] if len(ee_action) >= 6 else np.zeros(3)
+            right_quat = self.FIXED_RIGHT_QUAT.copy()
+
+        # 应用增量约束和平滑处理
+        left_increment, right_increment = self._process_incremental_action(left_increment, right_increment)
+        
+        # 计算最终的绝对位置 = 固定基准位置 + 当前累积增量
+        left_pos = self.FIXED_LEFT_POS + self.current_left_increment
+        right_pos = self.FIXED_RIGHT_POS + self.current_right_increment
 
         left_elbow_pos = np.zeros(3)
         right_elbow_pos = np.zeros(3)
@@ -678,20 +722,119 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         msg.ik_param = ikSolveParam()
         msg.frame = 3  # keep current frame3 | 3 为vr系
         self.ee_pose_pub.publish(msg)
+        
+        if self.debug:
+            print(f"[INCREMENTAL DEBUG] Left increment: {left_increment}, Right increment: {right_increment}")
+            print(f"[INCREMENTAL DEBUG] Left absolute pos: {left_pos}, Right absolute pos: {right_pos}")
+            print(f"[INCREMENTAL DEBUG] Current cumulative - Left: {self.current_left_increment}, Right: {self.current_right_increment}")
+
+    def _process_incremental_action(self, left_increment: np.ndarray, right_increment: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """
+        处理增量动作，应用约束和平滑处理。
+        
+        Args:
+            left_increment: 左手的增量位置
+            right_increment: 右手的增量位置
+            
+        Returns:
+            tuple: 处理后的 (left_increment, right_increment)
+        """
+        # 1. 限制单步增量的最大变化量（确保速度平滑性）
+        left_increment = np.clip(left_increment, -self.MAX_INCREMENT_PER_STEP, self.MAX_INCREMENT_PER_STEP)
+        right_increment = np.clip(right_increment, -self.MAX_INCREMENT_PER_STEP, self.MAX_INCREMENT_PER_STEP)
+        
+        # 2. 应用平滑处理（如果不是第一次动作）
+        if not self.is_first_action:
+            # 使用指数移动平均进行平滑
+            left_increment = (
+                self.last_left_increment * (1 - self.arm_smoothing_factor) + 
+                left_increment * self.arm_smoothing_factor
+            )
+            right_increment = (
+                self.last_right_increment * (1 - self.arm_smoothing_factor) + 
+                right_increment * self.arm_smoothing_factor
+            )
+        
+        # 3. 更新当前累积增量
+        new_left_increment = self.current_left_increment + left_increment
+        new_right_increment = self.current_right_increment + right_increment
+        
+        # 4. 限制累积增量的总范围（确保位置在合理范围内）
+        new_left_increment = np.clip(new_left_increment, -self.MAX_INCREMENT_RANGE, self.MAX_INCREMENT_RANGE)
+        new_right_increment = np.clip(new_right_increment, -self.MAX_INCREMENT_RANGE, self.MAX_INCREMENT_RANGE)
+        
+        # 5. 应用任务特定的约束
+        new_left_increment, new_right_increment = self._apply_task_specific_constraints(
+            new_left_increment, new_right_increment
+        )
+        
+        # 6. 更新状态
+        self.last_left_increment = left_increment.copy()
+        self.last_right_increment = right_increment.copy()
+        self.current_left_increment = new_left_increment.copy()
+        self.current_right_increment = new_right_increment.copy()
+        
+        return left_increment, right_increment
+
+    def _apply_task_specific_constraints(self, left_increment: np.ndarray, right_increment: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """
+        应用任务特定的约束条件。
+        
+        Args:
+            left_increment: 左手累积增量
+            right_increment: 右手累积增量
+            
+        Returns:
+            tuple: 约束后的增量
+        """
+        # 计算绝对位置用于约束检查
+        left_abs_pos = self.FIXED_LEFT_POS + left_increment
+        right_abs_pos = self.FIXED_RIGHT_POS + right_increment
+        
+        # 约束1: X位置必须在前方 [0, 0.7]
+        if left_abs_pos[0] < 0.0:
+            left_increment[0] = -self.FIXED_LEFT_POS[0]  # 限制到最小值
+        elif left_abs_pos[0] > 0.7:
+            left_increment[0] = 0.7 - self.FIXED_LEFT_POS[0]  # 限制到最大值
+            
+        if right_abs_pos[0] < 0.0:
+            right_increment[0] = -self.FIXED_RIGHT_POS[0]
+        elif right_abs_pos[0] > 0.7:
+            right_increment[0] = 0.7 - self.FIXED_RIGHT_POS[0]
+        
+        # 约束2: 左手Y位置必须在 [0, 0.65]
+        if left_abs_pos[1] < 0.0:
+            left_increment[1] = -self.FIXED_LEFT_POS[1]
+        elif left_abs_pos[1] > 0.65:
+            left_increment[1] = 0.65 - self.FIXED_LEFT_POS[1]
+            
+        # 约束3: 右手Y位置必须在 [-0.65, 0]
+        if right_abs_pos[1] > 0.0:
+            right_increment[1] = -self.FIXED_RIGHT_POS[1]
+        elif right_abs_pos[1] < -0.65:
+            right_increment[1] = -0.65 - self.FIXED_RIGHT_POS[1]
+        
+        # 约束4: Z位置必须在 [-0.20, 0.65]
+        for hand_increment, fixed_pos in [(left_increment, self.FIXED_LEFT_POS), (right_increment, self.FIXED_RIGHT_POS)]:
+            abs_z = fixed_pos[2] + hand_increment[2]
+            if abs_z < -0.20:
+                hand_increment[2] = -0.20 - fixed_pos[2]
+            elif abs_z > 0.65:
+                hand_increment[2] = 0.65 - fixed_pos[2]
+        
+        return left_increment, right_increment
 
     def _apply_action_constraints(self, action: np.ndarray) -> np.ndarray:
         """
         Apply constraints to the action to ensure safe and physically meaningful motions.
         
-        New Constraints:
-        1. End-effector x positions must be in range [0, 0.7] (forward motion limited)
-        2. Left hand y position must be in range [0, 0.65] (positive y side)
-        3. Right hand y position must be in range [-0.65, 0] (negative y side)
-        4. Z positions must be in range [-0.20, 0.65] for safety
-        5. Disable robot linear z movement (action[2] = 0)
+        Updated for incremental control:
+        1. Disable robot linear z movement (action[2] = 0)
+        2. Limit incremental values to reasonable ranges
+        3. Specific constraints are now handled in _apply_task_specific_constraints
         
         Args:
-            action: The original action array
+            action: The original action array (now with increments)
             
         Returns:
             The constrained action array
@@ -701,41 +844,31 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         # Extract velocity and end-effector actions
         vel_dim = 6 if self.enable_roll_pitch_control else 4
         
-        # Constraint 5: Disable robot linear z movement (up/down motion)
+        # Constraint: Disable robot linear z movement (up/down motion)
         # action[0] - linear x, action[1] - linear y, action[2] - linear z, action[3] - angular yaw
         constrained_action[2] = 0.0  # Disable linear z movement
         
         ee_action = constrained_action[vel_dim:]
         
-        if not self.wbc_observation_enabled and len(ee_action) >= 6:
-            # For position-only control: [left_pos(3), right_pos(3)]
-            left_pos = ee_action[0:3]
-            right_pos = ee_action[3:6]
+        # For incremental control: [left_increment(3), right_increment(3)]
+        if len(ee_action) >= 6:
+            left_increment = ee_action[0:3]
+            right_increment = ee_action[3:6]
             
-            # Constraint 1: X positions must be in range [0, 0.7]
-            left_pos[0] = np.clip(left_pos[0], 0.0, 0.7)
-            right_pos[0] = np.clip(right_pos[0], 0.0, 0.7)
-            
-            # Constraint 2: Left hand Y position must be in range [0, 0.65]
-            left_pos[1] = np.clip(left_pos[1], 0.0, 0.65)
-            
-            # Constraint 3: Right hand Y position must be in range [-0.65, 0]
-            right_pos[1] = np.clip(right_pos[1], -0.65, 0.0)
-            
-            # Constraint 4: Z positions must be in range [-0.20, 0.65] for safety
-            left_pos[2] = np.clip(left_pos[2], -0.20, 0.65)
-            right_pos[2] = np.clip(right_pos[2], -0.20, 0.65)
+            # 限制单步增量的范围（基础约束）
+            left_increment = np.clip(left_increment, -self.MAX_INCREMENT_PER_STEP * 2, self.MAX_INCREMENT_PER_STEP * 2)
+            right_increment = np.clip(right_increment, -self.MAX_INCREMENT_PER_STEP * 2, self.MAX_INCREMENT_PER_STEP * 2)
             
             # Update the action array
-            constrained_action[vel_dim:vel_dim+3] = left_pos
-            constrained_action[vel_dim+3:vel_dim+6] = right_pos
+            constrained_action[vel_dim:vel_dim+3] = left_increment
+            constrained_action[vel_dim+3:vel_dim+6] = right_increment
             
             # Debug output for constraint verification
             if self.debug:
-                print(f"[CONSTRAINT DEBUG] Applied position constraints:")
+                print(f"[CONSTRAINT DEBUG] Applied incremental constraints:")
                 print(f"  Robot linear z (action[2]): {constrained_action[2]:.3f} (disabled)")
-                print(f"  Left hand: x={left_pos[0]:.3f} [0,0.7], y={left_pos[1]:.3f} [0,0.65], z={left_pos[2]:.3f} [-0.20,0.65]")
-                print(f"  Right hand: x={right_pos[0]:.3f} [0,0.7], y={right_pos[1]:.3f} [-0.65,0], z={right_pos[2]:.3f} [-0.20,0.65]")
+                print(f"  Left hand increment: x={left_increment[0]:.3f}, y={left_increment[1]:.3f}, z={left_increment[2]:.3f}")
+                print(f"  Right hand increment: x={right_increment[0]:.3f}, y={right_increment[1]:.3f}, z={right_increment[2]:.3f}")
         
         return constrained_action
 
@@ -1257,6 +1390,15 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             self.both_hands_close_achieved = False
         if hasattr(self, 'good_symmetry_achieved'):
             self.good_symmetry_achieved = False
+
+        # Reset incremental control state
+        self.current_left_increment.fill(0.0)
+        self.current_right_increment.fill(0.0)
+        self.last_left_increment.fill(0.0)
+        self.last_right_increment.fill(0.0)
+        
+        if self.debug:
+            rospy.loginfo("reset - Incremental control state reset to zero")
 
         return obs_stable, {}
 
