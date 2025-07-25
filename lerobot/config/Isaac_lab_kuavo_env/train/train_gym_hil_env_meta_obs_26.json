@@ -15,7 +15,7 @@
         "disable_artifact": true
     },
     "dataset": {
-        "repo_id": "KANGKKANG/rl_kuavo_724_1015",
+        "repo_id": "KANGKKANG/rl_kuavo_724_1615",
         "use_imagenet_stats": false
     },
     "policy": {
@@ -147,7 +147,7 @@
         "fps": 10,
         "use_viewer": true,
         "use_gamepad": true,
-        "repo_id": "KANGKKANG/rl_kuavo_724_1015",
+        "repo_id": "KANGKKANG/rl_kuavo_724_1615",
         "dataset_root": null,
         "num_episodes": 50,
         "episode": 0,

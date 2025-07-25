@@ -722,10 +722,10 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
 
     def _compute_reward_and_done(self, obs: Dict[str, np.ndarray]) -> Tuple[float, bool, Dict[str, Any]]:
         """
-        分阶段奖励函数（修复版）：
+        分阶段奖励函数（修复累积奖励问题版）：
         - 阶段1 (dist_torso_to_box > 0.5): 靠近箱子阶段
         - 阶段2 (dist_torso_to_box <= 0.5): 抓取箱子阶段
-        - 修复了奖励尺度问题，使其适合SAC训练
+        - 修复了奖励累积和终端条件问题
         """
         info = {}
         
@@ -756,18 +756,19 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         dist_right_hand_to_box = np.linalg.norm(right_eef_pos - box_pos)
         dist_torso_to_box = np.linalg.norm(torso_pos - box_pos)
 
-        # Base step penalty to encourage efficiency (reduced)
-        reward = -0.005  # Reduced from -0.01
+        # Base step penalty to encourage efficiency
+        reward = -0.01  # Increased from -0.005 to discourage time-wasting
         
         # Check success conditions
         z_lift = box_pos[2] - self.initial_box_pose['position'][2]
         
-        # Box fallen penalty - terminal condition (reduced scale)
-        box_fallen = z_lift < -0.5
+        # FIXED: Much stricter box fallen detection and severe penalty
+        box_fallen = z_lift < -0.2  # STRICTER: from -0.5 to -0.2
         if box_fallen:
-            reward -= 10.0  # Reduced from -50.0
+            reward -= 100.0  # SEVERE PENALTY: from -10.0 to -100.0
             terminated = True
             info["box_fallen"] = True
+            info["failure_reason"] = "box_dropped"
         else:
             terminated = False
             info["box_fallen"] = False
@@ -775,6 +776,27 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         # Success conditions
         lift_success = z_lift > 0.15  # Must lift box at least 15cm
         hands_close_success = (dist_left_hand_to_box < 0.3) and (dist_right_hand_to_box < 0.3)
+        
+        # FIXED: Reasonable timeout penalty - per-step penalty, not cumulative
+        timeout_penalty = 0.0
+        extreme_delay_penalty = 0.0
+        
+        if self.episode_step_count >= 150:  # Start gentle penalty
+            timeout_penalty = 0.05  # Small fixed penalty per step after 150
+            reward -= timeout_penalty
+            info["approaching_timeout"] = True
+            info["timeout_penalty"] = timeout_penalty
+        else:
+            info["approaching_timeout"] = False
+            info["timeout_penalty"] = 0.0
+            
+        # More aggressive penalty for extreme delays
+        if self.episode_step_count >= 180:
+            extreme_delay_penalty = 0.2  # Higher but still reasonable penalty per step
+            reward -= extreme_delay_penalty
+            info["extreme_delay_penalty"] = extreme_delay_penalty
+        else:
+            info["extreme_delay_penalty"] = 0.0
         
         # ============= STAGE-BASED REWARD SYSTEM =============
         
@@ -802,13 +824,13 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         mean_joint_deviation_deg = np.rad2deg(mean_joint_deviation_rad)
         # Reward for being close to default positions (higher reward for smaller deviation)
         # Use degree-based deviation for more intuitive scaling
-        default_joint_reward = np.exp(-0.05 * mean_joint_deviation_deg) * 0.5  # Max 0.5 reward
+        default_joint_reward = np.exp(-0.05 * mean_joint_deviation_deg) * 0.5
         
         if is_approach_stage:
             # ========== STAGE 1: APPROACH STAGE ==========
             
-            # 1. Default joint reward (FIXED: correct weight as requested)
-            reward += default_joint_reward * 0.3  # FIXED: was 1.0, now 0.3 as requested
+            # 1. Default joint reward (correct weight as requested)
+            reward += default_joint_reward * 0.3
             
             # 2. Torso approaching box reward
             if self.last_dist_torso_to_box is not None:
@@ -827,7 +849,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             reward += torso_proximity_reward
             info["torso_proximity_reward"] = torso_proximity_reward
             
-            # 4. ADDED: Progressive approach reward to make success less sparse
+            # 4. Progressive approach reward to make success less sparse
             if dist_torso_to_box < 1.0:
                 approach_progress_reward = (1.0 - dist_torso_to_box) * 1.0  # Max 1.0 when very close
                 reward += approach_progress_reward
@@ -842,19 +864,19 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             # 1. Default joint reward (maintain comfortable posture)
             reward += default_joint_reward * 0.2
             
-            # 2. Final success reward - SIGNIFICANTLY REDUCED SCALE
+            # 2. Final success reward - INCREASED to make success more attractive than time-wasting
             if lift_success and hands_close_success:
-                # Base success reward (REDUCED from 100.0)
-                base_success_reward = 15.0  # Much more reasonable!
+                # Base success reward (INCREASED to dominate over process rewards)
+                base_success_reward = 50.0  # INCREASED from 15.0
                 
-                # Efficiency bonus based on episode steps (FIXED optimal steps)
+                # Efficiency bonus based on episode steps
                 optimal_steps = 120  # More realistic for 200-step episodes
-                max_efficiency_bonus = 10.0  # REDUCED from 150.0
+                max_efficiency_bonus = 50.0  # INCREASED from 10.0
                 
                 if self.episode_step_count <= optimal_steps:
                     efficiency_bonus = max_efficiency_bonus
                 else:
-                    step_penalty = (self.episode_step_count - optimal_steps) * 0.1  # Gentler penalty
+                    step_penalty = (self.episode_step_count - optimal_steps) * 0.5  # MORE aggressive penalty
                     efficiency_bonus = max(0.0, max_efficiency_bonus - step_penalty)
                 
                 total_success_reward = base_success_reward + efficiency_bonus
@@ -867,48 +889,106 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
                 info["episode_steps"] = self.episode_step_count
             
             else:
-                # Guidance rewards for grasping behavior
+                # Guidance rewards for grasping behavior - FIXED: All rewards now based on IMPROVEMENT
                 
-                # Hand-to-box approach rewards (now active in grasp stage)
-                if dist_left_hand_to_box < 0.8:
-                    left_hand_reward = (0.8 - dist_left_hand_to_box) * 1.0  # Increased from 0.5
-                    reward += left_hand_reward
-                    info["left_hand_approach_reward"] = left_hand_reward
+                # FIXED: Hand-to-box approach rewards - Only reward IMPROVEMENT, not maintaining position
+                if self.last_dist_left_hand_to_box is not None:
+                    left_distance_change = self.last_dist_left_hand_to_box - dist_left_hand_to_box
+                    if left_distance_change > 0.01:  # Only significant improvement
+                        left_hand_reward = left_distance_change * 10.0  # Reward improvement
+                        reward += left_hand_reward
+                        info["left_hand_approach_reward"] = left_hand_reward
+                else:
+                    info["left_hand_approach_reward"] = 0.0
                 
-                if dist_right_hand_to_box < 0.8:
-                    right_hand_reward = (0.8 - dist_right_hand_to_box) * 1.0  # Increased from 0.5
-                    reward += right_hand_reward
-                    info["right_hand_approach_reward"] = right_hand_reward
+                if self.last_dist_right_hand_to_box is not None:
+                    right_distance_change = self.last_dist_right_hand_to_box - dist_right_hand_to_box
+                    if right_distance_change > 0.01:  # Only significant improvement
+                        right_hand_reward = right_distance_change * 10.0  # Reward improvement
+                        reward += right_hand_reward
+                        info["right_hand_approach_reward"] = right_hand_reward
+                else:
+                    info["right_hand_approach_reward"] = 0.0
                 
-                # Bonus for both hands being close
-                if dist_left_hand_to_box < 0.4 and dist_right_hand_to_box < 0.4:
-                    both_hands_close_bonus = 1.5  # Increased from 0.8
+                # FIXED: Bonus for both hands being close - ONLY once when first achieved
+                if not hasattr(self, 'both_hands_close_achieved'):
+                    self.both_hands_close_achieved = False
+                
+                if (dist_left_hand_to_box < 0.4 and dist_right_hand_to_box < 0.4 and 
+                    not self.both_hands_close_achieved):
+                    both_hands_close_bonus = 5.0  # One-time bonus
                     reward += both_hands_close_bonus
+                    self.both_hands_close_achieved = True
                     info["both_hands_close_bonus"] = both_hands_close_bonus
+                    info["first_time_both_hands_close"] = True
+                else:
+                    info["both_hands_close_bonus"] = 0.0
+                    info["first_time_both_hands_close"] = False
                 
-                # Box lifting progress reward (ENHANCED for less sparse rewards)
-                if z_lift > 0.02:  # Lower threshold
-                    if z_lift > 0.15:
-                        box_lift_reward = 8.0  # Keep good lift reward
-                    elif z_lift > 0.10:
-                        box_lift_reward = 5.0  # Increased from 3.0
-                    elif z_lift > 0.05:
-                        box_lift_reward = 2.0  # New intermediate reward
+                # Reset the flag if hands move away
+                if (dist_left_hand_to_box > 0.5 or dist_right_hand_to_box > 0.5):
+                    self.both_hands_close_achieved = False
+                
+                # FIXED: Box lifting progress reward with ANTI-EXPLOITATION measures
+                if z_lift > 0.02:
+                    # FIXED: Prevent exploitation by limiting lift reward accumulation
+                    # Only reward meaningful lift progress, not just maintaining position
+                    if not hasattr(self, 'max_z_lift_achieved'):
+                        self.max_z_lift_achieved = 0.0
+                    
+                    # Only give lift reward for NEW progress, not maintaining old progress
+                    if z_lift > self.max_z_lift_achieved:
+                        lift_progress = z_lift - self.max_z_lift_achieved
+                        self.max_z_lift_achieved = z_lift
+                        
+                        if z_lift > 0.15:
+                            box_lift_reward = 15.0  # One-time reward for achieving success height
+                        elif z_lift > 0.10:
+                            box_lift_reward = lift_progress * 50.0  # Reward for significant progress
+                        elif z_lift > 0.05:
+                            box_lift_reward = lift_progress * 30.0  # Reward for moderate progress
+                        else:
+                            box_lift_reward = lift_progress * 20.0  # Reward for small progress
+                        
+                        reward += box_lift_reward
+                        info["box_lift_reward"] = box_lift_reward
+                        info["lift_progress"] = lift_progress
                     else:
-                        box_lift_reward = z_lift * 20.0  # Progressive lift (increased multiplier)
-                    reward += box_lift_reward
-                    info["box_lift_reward"] = box_lift_reward
+                        # NO reward for just maintaining position - prevents time-wasting
+                        info["box_lift_reward"] = 0.0
+                        info["maintaining_position"] = True
+                else:
+                    # Reset max achievement if box falls below threshold
+                    self.max_z_lift_achieved = 0.0
                 
-                # Hand symmetry reward (for stable grasping)
-                if dist_left_hand_to_box < 0.5 and dist_right_hand_to_box < 0.5:
+                # FIXED: Hand symmetry reward - ONLY once when first achieved
+                if not hasattr(self, 'good_symmetry_achieved'):
+                    self.good_symmetry_achieved = False
+                
+                if (dist_left_hand_to_box < 0.5 and dist_right_hand_to_box < 0.5 and 
+                    not self.good_symmetry_achieved):
                     box_to_left = left_eef_pos - box_pos
                     box_to_right = right_eef_pos - box_pos
                     left_yz = box_to_left[1:]  # y,z components
                     right_yz = box_to_right[1:]  # y,z components
                     symmetry_error = np.linalg.norm(left_yz + right_yz)
-                    symmetry_reward = np.exp(-3.0 * symmetry_error) * 0.5  # Increased from 0.3
-                    reward += symmetry_reward
-                    info["symmetry_reward"] = symmetry_reward
+                    
+                    if symmetry_error < 0.2:  # Good symmetry threshold
+                        symmetry_reward = 3.0  # One-time bonus for achieving good symmetry
+                        reward += symmetry_reward
+                        self.good_symmetry_achieved = True
+                        info["symmetry_reward"] = symmetry_reward
+                        info["first_time_good_symmetry"] = True
+                    else:
+                        info["symmetry_reward"] = 0.0
+                        info["first_time_good_symmetry"] = False
+                else:
+                    info["symmetry_reward"] = 0.0
+                    info["first_time_good_symmetry"] = False
+                
+                # Reset symmetry flag if hands move away
+                if (dist_left_hand_to_box > 0.6 or dist_right_hand_to_box > 0.6):
+                    self.good_symmetry_achieved = False
             
             info["stage_focus"] = "grasp_manipulation"
         
@@ -946,8 +1026,12 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         self.last_right_eef_pos = right_eef_pos.copy()
         self.last_dist_torso_to_box = dist_torso_to_box
         
-        # Final reward clipping - MUCH MORE REASONABLE RANGE
-        reward = np.clip(reward, -15.0, 30.0)  # FIXED: was [-5.0, 300.0]
+        # FIXED: Update hand distance tracking for improvement-based rewards
+        self.last_dist_left_hand_to_box = dist_left_hand_to_box
+        self.last_dist_right_hand_to_box = dist_right_hand_to_box
+        
+        # Final reward clipping - ADJUSTED for new improvement-based reward scale
+        reward = np.clip(reward, -150.0, 120.0)  # ADJUSTED: accommodate success rewards and timeout penalties
         
         # Termination check
         if not box_fallen:
@@ -976,6 +1060,13 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             else:
                 print(f"  Focus: Hand manipulation and grasping")
                 print(f"  Hand distances - L: {dist_left_hand_to_box:.3f}, R: {dist_right_hand_to_box:.3f}")
+                if hasattr(self, 'max_z_lift_achieved'):
+                    print(f"  Max lift achieved: {self.max_z_lift_achieved:.3f}")
+                    
+                # Print achievement flags for debugging
+                hands_close_flag = getattr(self, 'both_hands_close_achieved', False)
+                symmetry_flag = getattr(self, 'good_symmetry_achieved', False)
+                print(f"  Achievement flags - Hands close: {hands_close_flag}, Good symmetry: {symmetry_flag}")
         
         return reward, terminated, info
 
@@ -1074,6 +1165,16 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         
         # Reset step counter for efficiency reward
         self.episode_step_count = 0
+        
+        # FIXED: Reset lift progress tracking to prevent cross-episode exploitation
+        if hasattr(self, 'max_z_lift_achieved'):
+            self.max_z_lift_achieved = 0.0
+            
+        # FIXED: Reset achievement flags to prevent cross-episode exploitation
+        if hasattr(self, 'both_hands_close_achieved'):
+            self.both_hands_close_achieved = False
+        if hasattr(self, 'good_symmetry_achieved'):
+            self.good_symmetry_achieved = False
 
         return obs_stable, {}
 
