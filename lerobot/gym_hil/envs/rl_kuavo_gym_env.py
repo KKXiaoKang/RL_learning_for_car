@@ -545,10 +545,97 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
 
         self.cmd_vel_pub.publish(twist_cmd)
 
-        # Publish end-effector pose command (replace joint-level command)
-        # ee_action: [L_pos(3), L_quat(4), R_pos(3), R_quat(4)] or [L_pos(3), R_pos(3)]
+        # Determine current stage based on torso-to-box distance
+        current_stage = self._get_current_stage()
+        
+        # Publish arm commands based on stage
         self.change_mobile_ctrl_mode(IncrementalMpcCtrlMode.ArmOnly.value)
 
+        if current_stage == "approach":
+            # STAGE 1: APPROACH STAGE - Use fixed arm poses
+            self._publish_fixed_arm_poses()
+            if self.debug:
+                print(f"[STAGE 1] Publishing fixed arm poses during approach stage")
+        else:
+            # STAGE 2: GRASP STAGE - Use action-based arm control
+            self._publish_action_based_arm_poses(ee_action)
+            if self.debug:
+                print(f"[STAGE 2] Publishing action-based arm poses during grasp stage")
+
+    def _get_current_stage(self) -> str:
+        """
+        Determine the current stage based on the latest observation.
+        
+        Returns:
+            "approach" if in stage 1 (approaching box), "grasp" if in stage 2 (grasping box)
+        """
+        if not hasattr(self, 'latest_obs') or self.latest_obs is None:
+            return "approach"  # Default to approach stage if no observation available
+        
+        try:
+            agent_state = self.latest_obs['agent_pos']
+            env_state = self.latest_obs['environment_state']
+            
+            # Extract positions based on observation mode
+            if self.wbc_observation_enabled:
+                # WBC enabled: agent_state has 46 dimensions
+                torso_pos = agent_state[40:43]
+                box_pos = env_state[0:3]
+            else:
+                # WBC disabled: agent_state has 23 dimensions
+                torso_pos = agent_state[20:23]
+                box_pos = env_state[0:3]
+            
+            # Calculate distance
+            dist_torso_to_box = np.linalg.norm(torso_pos - box_pos)
+            
+            # Stage determination (same logic as in reward function)
+            if dist_torso_to_box > 0.5:
+                return "approach"
+            else:
+                return "grasp"
+                
+        except (KeyError, IndexError, TypeError) as e:
+            if self.debug:
+                rospy.logwarn(f"Error determining stage: {e}, defaulting to approach stage")
+            return "approach"
+
+    def _publish_fixed_arm_poses(self):
+        """
+        Publish fixed arm poses for the approach stage.
+        """
+        # Fixed poses for approach stage
+        left_pos = np.array([0.3178026345146559, 0.1604180715613648, -0.019417275957965042])
+        left_quat = np.array([0.0, -0.70711, 0.0, 0.70711])
+        right_pos = np.array([0.323325548461215, -0.2467252581359532, -0.05270182751631599])
+        right_quat = np.array([0.0, -0.70711, 0.0, 0.70711])
+        left_elbow_pos = np.zeros(3)
+        right_elbow_pos = np.zeros(3)
+
+        msg = twoArmHandPoseCmd()
+        msg.hand_poses.left_pose.pos_xyz = left_pos.tolist()
+        msg.hand_poses.left_pose.quat_xyzw = left_quat.tolist()
+        msg.hand_poses.left_pose.elbow_pos_xyz = left_elbow_pos.tolist()
+
+        msg.hand_poses.right_pose.pos_xyz = right_pos.tolist()
+        msg.hand_poses.right_pose.quat_xyzw = right_quat.tolist()
+        msg.hand_poses.right_pose.elbow_pos_xyz = right_elbow_pos.tolist()
+        
+        # Set default IK params
+        msg.use_custom_ik_param = False
+        msg.joint_angles_as_q0 = False
+        msg.ik_param = ikSolveParam()
+        msg.frame = 3  # VR Frame
+        self.ee_pose_pub.publish(msg)
+
+    def _publish_action_based_arm_poses(self, ee_action: np.ndarray):
+        """
+        Publish arm poses based on the action input (original logic for grasp stage).
+        
+        Args:
+            ee_action: The arm portion of the action array
+        """
+        # ee_action: [L_pos(3), L_quat(4), R_pos(3), R_quat(4)] or [L_pos(3), R_pos(3)]
         if self.wbc_observation_enabled: # 7 + 7 6dof数据
             if len(ee_action) >= 14:
                 """
@@ -592,11 +679,6 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         msg.frame = 3  # keep current frame3 | 3 为vr系
         self.ee_pose_pub.publish(msg)
 
-        # # 打印action_dim
-        # rospy.loginfo(f"self.action_dim : {self.action_dim}")
-        # rospy.loginfo(f"self.arm_dim : {self.arm_dim}")
-        # rospy.loginfo(f"self.vel_dim : {self.vel_dim}")
-        
     def _apply_action_constraints(self, action: np.ndarray) -> np.ndarray:
         """
         Apply constraints to the action to ensure safe and physically meaningful motions.
