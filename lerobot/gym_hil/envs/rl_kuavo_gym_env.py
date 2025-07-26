@@ -22,7 +22,7 @@ from enum import Enum
 from gym_hil.isaacLab_gym_env import IsaacLabGymEnv
 from collections import deque
 
-
+TEST_DEMO_ONLY_DEFAULT_JOINT_REWARD = True
 class IncrementalMpcCtrlMode(Enum):
     """表示Kuavo机器人 Manipulation MPC 控制模式的枚举类"""
     NoControl = 0
@@ -623,22 +623,31 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
 
         self.cmd_vel_pub.publish(twist_cmd)
 
-        # Determine current stage based on torso-to-box distance
-        current_stage = self._get_current_stage()
-        
-        # Publish arm commands based on stage
+        # Publish arm commands based on mode
         self.change_mobile_ctrl_mode(IncrementalMpcCtrlMode.ArmOnly.value)
-
-        if current_stage == "approach":
-            # STAGE 1: APPROACH STAGE - Use fixed arm poses
-            self._publish_fixed_arm_poses()
-            if self.debug:
-                print(f"[STAGE 1] Publishing fixed arm poses during approach stage")
-        else:
-            # STAGE 2: GRASP STAGE - Use action-based arm control
+        
+        global TEST_DEMO_ONLY_DEFAULT_JOINT_REWARD
+        if TEST_DEMO_ONLY_DEFAULT_JOINT_REWARD:
+            # ========== DEMO MODE: DIRECT ARM CONTROL ==========
+            # Always use action-based arm control for joint space learning
             self._publish_action_based_arm_poses(ee_action)
             if self.debug:
-                print(f"[STAGE 2] Publishing action-based arm poses during grasp stage")
+                print(f"[DEMO MODE] Publishing action-based arm poses for joint space learning")
+        else:
+            # ========== NORMAL MODE: STAGE-BASED ARM CONTROL ==========
+            # Determine current stage based on torso-to-box distance
+            current_stage = self._get_current_stage()
+
+            if current_stage == "approach":
+                # STAGE 1: APPROACH STAGE - Use fixed arm poses
+                self._publish_fixed_arm_poses()
+                if self.debug:
+                    print(f"[STAGE 1] Publishing fixed arm poses during approach stage")
+            else:
+                # STAGE 2: GRASP STAGE - Use action-based arm control
+                self._publish_action_based_arm_poses(ee_action)
+                if self.debug:
+                    print(f"[STAGE 2] Publishing action-based arm poses during grasp stage")
 
     def _get_current_stage(self) -> str:
         """
@@ -813,8 +822,16 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         new_right_increment = self.current_right_increment + right_increment
         
         # 4. 限制累积增量的总范围（确保位置在合理范围内）
-        new_left_increment = np.clip(new_left_increment, -self.MAX_INCREMENT_RANGE, self.MAX_INCREMENT_RANGE)
-        new_right_increment = np.clip(new_right_increment, -self.MAX_INCREMENT_RANGE, self.MAX_INCREMENT_RANGE)
+        global TEST_DEMO_ONLY_DEFAULT_JOINT_REWARD
+        if TEST_DEMO_ONLY_DEFAULT_JOINT_REWARD:
+            # DEMO 模式：使用更大的增量范围以允许更大的探索空间
+            max_range_demo = self.MAX_INCREMENT_RANGE * 2.5  # 2.5倍的正常范围
+            new_left_increment = np.clip(new_left_increment, -max_range_demo, max_range_demo)
+            new_right_increment = np.clip(new_right_increment, -max_range_demo, max_range_demo)
+        else:
+            # 正常模式：使用标准增量范围
+            new_left_increment = np.clip(new_left_increment, -self.MAX_INCREMENT_RANGE, self.MAX_INCREMENT_RANGE)
+            new_right_increment = np.clip(new_right_increment, -self.MAX_INCREMENT_RANGE, self.MAX_INCREMENT_RANGE)
         
         # 5. 应用任务特定的约束
         new_left_increment, new_right_increment = self._apply_task_specific_constraints(
@@ -840,40 +857,98 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         Returns:
             tuple: 约束后的增量
         """
-        # 计算绝对位置用于约束检查
-        left_abs_pos = self.FIXED_LEFT_POS + left_increment
-        right_abs_pos = self.FIXED_RIGHT_POS + right_increment
+        global TEST_DEMO_ONLY_DEFAULT_JOINT_REWARD
         
-        # 约束1: X位置必须在前方 [0, 0.7]
-        if left_abs_pos[0] < 0.0:
-            left_increment[0] = -self.FIXED_LEFT_POS[0]  # 限制到最小值
-        elif left_abs_pos[0] > 0.7:
-            left_increment[0] = 0.7 - self.FIXED_LEFT_POS[0]  # 限制到最大值
+        if TEST_DEMO_ONLY_DEFAULT_JOINT_REWARD:
+            # ========== DEMO MODE: BYPASS TASK-SPECIFIC CONSTRAINTS ==========
+            # Allow maximum freedom for joint space learning
+            # Only apply very basic safety constraints to prevent dangerous positions
             
-        if right_abs_pos[0] < 0.0:
-            right_increment[0] = -self.FIXED_RIGHT_POS[0]
-        elif right_abs_pos[0] > 0.7:
-            right_increment[0] = 0.7 - self.FIXED_RIGHT_POS[0]
-        
-        # 约束2: 左手Y位置必须在 [0, 0.65]
-        if left_abs_pos[1] < 0.0:
-            left_increment[1] = -self.FIXED_LEFT_POS[1]
-        elif left_abs_pos[1] > 0.65:
-            left_increment[1] = 0.65 - self.FIXED_LEFT_POS[1]
+            # 计算绝对位置用于基本安全检查
+            left_abs_pos = self.FIXED_LEFT_POS + left_increment
+            right_abs_pos = self.FIXED_RIGHT_POS + right_increment
             
-        # 约束3: 右手Y位置必须在 [-0.65, 0]
-        if right_abs_pos[1] > 0.0:
-            right_increment[1] = -self.FIXED_RIGHT_POS[1]
-        elif right_abs_pos[1] < -0.65:
-            right_increment[1] = -0.65 - self.FIXED_RIGHT_POS[1]
-        
-        # 约束4: Z位置必须在 [-0.20, 0.65]
-        for hand_increment, fixed_pos in [(left_increment, self.FIXED_LEFT_POS), (right_increment, self.FIXED_RIGHT_POS)]:
-            abs_z = fixed_pos[2] + hand_increment[2]
-            if abs_z < -0.20:
-                hand_increment[2] = -0.20 - fixed_pos[2]
-            elif abs_z > 0.65:
-                hand_increment[2] = 0.65 - fixed_pos[2]
+            # 只应用最基本的安全约束，防止手部到达危险位置
+            # 极大的安全范围，允许更大的探索空间
+            SAFETY_X_MIN = -0.5   # 更宽松的X范围
+            SAFETY_X_MAX = 1.0
+            SAFETY_Y_LEFT_MIN = -0.2    # 左手可以稍微跨越中线
+            SAFETY_Y_LEFT_MAX = 1.0     # 更大的Y范围
+            SAFETY_Y_RIGHT_MIN = -1.0   # 右手可以稍微跨越中线
+            SAFETY_Y_RIGHT_MAX = 0.2
+            SAFETY_Z_MIN = -0.5   # 更大的Z范围
+            SAFETY_Z_MAX = 1.0
+            
+            # 安全约束 - X轴
+            if left_abs_pos[0] < SAFETY_X_MIN:
+                left_increment[0] = SAFETY_X_MIN - self.FIXED_LEFT_POS[0]
+            elif left_abs_pos[0] > SAFETY_X_MAX:
+                left_increment[0] = SAFETY_X_MAX - self.FIXED_LEFT_POS[0]
+                
+            if right_abs_pos[0] < SAFETY_X_MIN:
+                right_increment[0] = SAFETY_X_MIN - self.FIXED_RIGHT_POS[0]
+            elif right_abs_pos[0] > SAFETY_X_MAX:
+                right_increment[0] = SAFETY_X_MAX - self.FIXED_RIGHT_POS[0]
+            
+            # 安全约束 - Y轴 (更宽松)
+            if left_abs_pos[1] < SAFETY_Y_LEFT_MIN:
+                left_increment[1] = SAFETY_Y_LEFT_MIN - self.FIXED_LEFT_POS[1]
+            elif left_abs_pos[1] > SAFETY_Y_LEFT_MAX:
+                left_increment[1] = SAFETY_Y_LEFT_MAX - self.FIXED_LEFT_POS[1]
+                
+            if right_abs_pos[1] < SAFETY_Y_RIGHT_MIN:
+                right_increment[1] = SAFETY_Y_RIGHT_MIN - self.FIXED_RIGHT_POS[1]
+            elif right_abs_pos[1] > SAFETY_Y_RIGHT_MAX:
+                right_increment[1] = SAFETY_Y_RIGHT_MAX - self.FIXED_RIGHT_POS[1]
+            
+            # 安全约束 - Z轴 (更宽松)
+            for hand_increment, fixed_pos in [(left_increment, self.FIXED_LEFT_POS), (right_increment, self.FIXED_RIGHT_POS)]:
+                abs_z = fixed_pos[2] + hand_increment[2]
+                if abs_z < SAFETY_Z_MIN:
+                    hand_increment[2] = SAFETY_Z_MIN - fixed_pos[2]
+                elif abs_z > SAFETY_Z_MAX:
+                    hand_increment[2] = SAFETY_Z_MAX - fixed_pos[2]
+            
+            if self.debug:
+                print(f"[DEMO CONSTRAINTS] Applied relaxed safety constraints:")
+                print(f"  Left pos: [{left_abs_pos[0]:.3f}, {left_abs_pos[1]:.3f}, {left_abs_pos[2]:.3f}]")
+                print(f"  Right pos: [{right_abs_pos[0]:.3f}, {right_abs_pos[1]:.3f}, {right_abs_pos[2]:.3f}]")
+        else:
+            # ========== NORMAL MODE: STRICT TASK-SPECIFIC CONSTRAINTS ==========
+            # 计算绝对位置用于约束检查
+            left_abs_pos = self.FIXED_LEFT_POS + left_increment
+            right_abs_pos = self.FIXED_RIGHT_POS + right_increment
+            
+            # 约束1: X位置必须在前方 [0, 0.7]
+            if left_abs_pos[0] < 0.0:
+                left_increment[0] = -self.FIXED_LEFT_POS[0]  # 限制到最小值
+            elif left_abs_pos[0] > 0.7:
+                left_increment[0] = 0.7 - self.FIXED_LEFT_POS[0]  # 限制到最大值
+                
+            if right_abs_pos[0] < 0.0:
+                right_increment[0] = -self.FIXED_RIGHT_POS[0]
+            elif right_abs_pos[0] > 0.7:
+                right_increment[0] = 0.7 - self.FIXED_RIGHT_POS[0]
+            
+            # 约束2: 左手Y位置必须在 [0, 0.65]
+            if left_abs_pos[1] < 0.0:
+                left_increment[1] = -self.FIXED_LEFT_POS[1]
+            elif left_abs_pos[1] > 0.65:
+                left_increment[1] = 0.65 - self.FIXED_LEFT_POS[1]
+                
+            # 约束3: 右手Y位置必须在 [-0.65, 0]
+            if right_abs_pos[1] > 0.0:
+                right_increment[1] = -self.FIXED_RIGHT_POS[1]
+            elif right_abs_pos[1] < -0.65:
+                right_increment[1] = -0.65 - self.FIXED_RIGHT_POS[1]
+            
+            # 约束4: Z位置必须在 [-0.20, 0.65]
+            for hand_increment, fixed_pos in [(left_increment, self.FIXED_LEFT_POS), (right_increment, self.FIXED_RIGHT_POS)]:
+                abs_z = fixed_pos[2] + hand_increment[2]
+                if abs_z < -0.20:
+                    hand_increment[2] = -0.20 - fixed_pos[2]
+                elif abs_z > 0.65:
+                    hand_increment[2] = 0.65 - fixed_pos[2]
         
         return left_increment, right_increment
 
@@ -887,64 +962,103 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         3. Limit incremental values to reasonable ranges
         4. Specific constraints are now handled in _apply_task_specific_constraints
         
+        NOTE: When TEST_DEMO_ONLY_DEFAULT_JOINT_REWARD is True, stage-based constraints are bypassed
+        to allow direct hand control for joint space learning.
+        
         Args:
             action: The original action array (now with increments)
             
         Returns:
             The constrained action array
         """
+        global TEST_DEMO_ONLY_DEFAULT_JOINT_REWARD
         constrained_action = action.copy()
         
         # Extract velocity and end-effector actions
         vel_dim = 6 if self.enable_roll_pitch_control else 4
         
-        # Get current stage to determine constraints
-        current_stage = self._get_current_stage()
-        
-        # Stage-based torso movement constraints
-        if current_stage == "grasp":
-            # STAGE 2: GRASP STAGE - Disable ALL torso movements
-            # action[0] - linear x, action[1] - linear y, action[2] - linear z, action[3] - angular yaw
+        if TEST_DEMO_ONLY_DEFAULT_JOINT_REWARD:
+            # ========== DEMO MODE: BYPASS STAGE CONSTRAINTS ==========
+            # Allow direct control for joint space learning
+            # Only apply basic safety constraints, no stage-based restrictions
+            
+            # Still disable linear z movement for safety
             constrained_action[0] = 0.0  # Disable linear x movement
             constrained_action[1] = 0.0  # Disable linear y movement
             constrained_action[2] = 0.0  # Disable linear z movement
             constrained_action[3] = 0.0  # Disable angular yaw movement
             
-            if self.debug:
-                print(f"[STAGE 2 CONSTRAINT] All torso movements disabled during grasp stage")
+            # Allow hand movements with more relaxed constraints
+            ee_action = constrained_action[vel_dim:]
+            
+            if len(ee_action) >= 6:
+                left_increment = ee_action[0:3]
+                right_increment = ee_action[3:6]
+                
+                # More relaxed increment limits for demo mode
+                max_increment_demo = self.MAX_INCREMENT_PER_STEP * 3  # Triple the normal limit
+                left_increment = np.clip(left_increment, -max_increment_demo, max_increment_demo)
+                right_increment = np.clip(right_increment, -max_increment_demo, max_increment_demo)
+                
+                # Update the action array
+                constrained_action[vel_dim:vel_dim+3] = left_increment
+                constrained_action[vel_dim+3:vel_dim+6] = right_increment
+                
+                if self.debug:
+                    print(f"[DEMO CONSTRAINT] Relaxed constraints - only linear z disabled:")
+                    print(f"    action[2] (linear z): {constrained_action[2]:.3f}")
+                    print(f"  Left hand increment: x={left_increment[0]:.3f}, y={left_increment[1]:.3f}, z={left_increment[2]:.3f}")
+                    print(f"  Right hand increment: x={right_increment[0]:.3f}, y={right_increment[1]:.3f}, z={right_increment[2]:.3f}")
+                    print(f"  Max increment limit: ±{max_increment_demo:.3f}")
         else:
-            # STAGE 1: APPROACH STAGE - Only disable linear z movement
-            constrained_action[2] = 0.0  # Disable linear z movement
-        
-        ee_action = constrained_action[vel_dim:]
-        
-        # For incremental control: [left_increment(3), right_increment(3)]
-        if len(ee_action) >= 6:
-            left_increment = ee_action[0:3]
-            right_increment = ee_action[3:6]
+            # ========== NORMAL MODE: STAGE-BASED CONSTRAINTS ==========
+            # Get current stage to determine constraints
+            current_stage = self._get_current_stage()
             
-            # 限制单步增量的范围（基础约束）
-            left_increment = np.clip(left_increment, -self.MAX_INCREMENT_PER_STEP * 2, self.MAX_INCREMENT_PER_STEP * 2)
-            right_increment = np.clip(right_increment, -self.MAX_INCREMENT_PER_STEP * 2, self.MAX_INCREMENT_PER_STEP * 2)
+            # Stage-based torso movement constraints
+            if current_stage == "grasp":
+                # STAGE 2: GRASP STAGE - Disable ALL torso movements
+                # action[0] - linear x, action[1] - linear y, action[2] - linear z, action[3] - angular yaw
+                constrained_action[0] = 0.0  # Disable linear x movement
+                constrained_action[1] = 0.0  # Disable linear y movement
+                constrained_action[2] = 0.0  # Disable linear z movement
+                constrained_action[3] = 0.0  # Disable angular yaw movement
+                
+                if self.debug:
+                    print(f"[STAGE 2 CONSTRAINT] All torso movements disabled during grasp stage")
+            else:
+                # STAGE 1: APPROACH STAGE - Only disable linear z movement
+                constrained_action[2] = 0.0  # Disable linear z movement
             
-            # Update the action array
-            constrained_action[vel_dim:vel_dim+3] = left_increment
-            constrained_action[vel_dim+3:vel_dim+6] = right_increment
+            ee_action = constrained_action[vel_dim:]
             
-            # Debug output for constraint verification
-            if self.debug:
-                print(f"[CONSTRAINT DEBUG] Applied incremental constraints:")
-                if current_stage == "grasp":
-                    print(f"  Stage 2 - All torso movements disabled:")
-                    print(f"    action[0] (linear x): {constrained_action[0]:.3f}")
-                    print(f"    action[1] (linear y): {constrained_action[1]:.3f}")
-                    print(f"    action[2] (linear z): {constrained_action[2]:.3f}")
-                    print(f"    action[3] (angular yaw): {constrained_action[3]:.3f}")
-                else:
-                    print(f"  Stage 1 - Only linear z disabled:")
-                    print(f"    action[2] (linear z): {constrained_action[2]:.3f}")
-                print(f"  Left hand increment: x={left_increment[0]:.3f}, y={left_increment[1]:.3f}, z={left_increment[2]:.3f}")
-                print(f"  Right hand increment: x={right_increment[0]:.3f}, y={right_increment[1]:.3f}, z={right_increment[2]:.3f}")
+            # For incremental control: [left_increment(3), right_increment(3)]
+            if len(ee_action) >= 6:
+                left_increment = ee_action[0:3]
+                right_increment = ee_action[3:6]
+                
+                # 限制单步增量的范围（基础约束）
+                left_increment = np.clip(left_increment, -self.MAX_INCREMENT_PER_STEP * 2, self.MAX_INCREMENT_PER_STEP * 2)
+                right_increment = np.clip(right_increment, -self.MAX_INCREMENT_PER_STEP * 2, self.MAX_INCREMENT_PER_STEP * 2)
+                
+                # Update the action array
+                constrained_action[vel_dim:vel_dim+3] = left_increment
+                constrained_action[vel_dim+3:vel_dim+6] = right_increment
+                
+                # Debug output for constraint verification
+                if self.debug:
+                    print(f"[CONSTRAINT DEBUG] Applied incremental constraints:")
+                    if current_stage == "grasp":
+                        print(f"  Stage 2 - All torso movements disabled:")
+                        print(f"    action[0] (linear x): {constrained_action[0]:.3f}")
+                        print(f"    action[1] (linear y): {constrained_action[1]:.3f}")
+                        print(f"    action[2] (linear z): {constrained_action[2]:.3f}")
+                        print(f"    action[3] (angular yaw): {constrained_action[3]:.3f}")
+                    else:
+                        print(f"  Stage 1 - Only linear z disabled:")
+                        print(f"    action[2] (linear z): {constrained_action[2]:.3f}")
+                    print(f"  Left hand increment: x={left_increment[0]:.3f}, y={left_increment[1]:.3f}, z={left_increment[2]:.3f}")
+                    print(f"  Right hand increment: x={right_increment[0]:.3f}, y={right_increment[1]:.3f}, z={right_increment[2]:.3f}")
         
         return constrained_action
 
@@ -1018,351 +1132,465 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         - 阶段2 (dist_torso_to_box <= 0.5): 抓取箱子阶段
         - 修复了奖励累积和终端条件问题
         """
-        info = {}
-        
-        # Extract data from observation
-        agent_state = obs['agent_pos']
-        env_state = obs['environment_state']
-        
-        # Extract positions based on observation mode
-        if self.wbc_observation_enabled:
-            # WBC enabled: agent_state has 46 dimensions
-            left_eef_pos = agent_state[0:3]
-            right_eef_pos = agent_state[7:10]
-            arm_joints = agent_state[14:28]  # 14 joint angles
-            torso_pos = agent_state[40:43]
-            box_pos = env_state[0:3]
-            box_orn = env_state[3:7]
-        else:
-            # WBC disabled: agent_state has 29 dimensions (increased from 23)
-            left_eef_pos = agent_state[0:3]           # world frame left eef pos
-            right_eef_pos = agent_state[3:6]          # world frame right eef pos
-            arm_joints = agent_state[6:20]            # 14 joint angles
-            torso_pos = agent_state[20:23]            # robot position
-            # Additional base_link end-effector positions (new data)
-            base_link_left_eef_pos = agent_state[23:26]   # base_link frame left eef pos
-            base_link_right_eef_pos = agent_state[26:29]  # base_link frame right eef pos
-            box_pos = env_state[0:3]
-            box_orn = None  # No orientation data when WBC is disabled
+        global TEST_DEMO_ONLY_DEFAULT_JOINT_REWARD
 
-        # Calculate distances
-        dist_left_hand_to_box = np.linalg.norm(left_eef_pos - box_pos)
-        dist_right_hand_to_box = np.linalg.norm(right_eef_pos - box_pos)
-        dist_torso_to_box = np.linalg.norm(torso_pos - box_pos)
-
-        # Base step penalty to encourage efficiency
-        reward = -0.01  # Increased from -0.005 to discourage time-wasting
-        
-        # Check success conditions
-        z_lift = box_pos[2] - self.initial_box_pose['position'][2]
-        
-        # FIXED: Much stricter box fallen detection and severe penalty
-        box_fallen = z_lift < -0.2  # STRICTER: from -0.5 to -0.2
-        if box_fallen:
-            reward -= 100.0  # SEVERE PENALTY: from -10.0 to -100.0
-            terminated = True
-            info["box_fallen"] = True
-            info["failure_reason"] = "box_dropped"
-        else:
-            terminated = False
-            info["box_fallen"] = False
-
-        # Success conditions
-        lift_success = z_lift > 0.15  # Must lift box at least 15cm
-        hands_close_success = (dist_left_hand_to_box < 0.3) and (dist_right_hand_to_box < 0.3)
-        
-        # FIXED: Reasonable timeout penalty - per-step penalty, not cumulative
-        timeout_penalty = 0.0
-        extreme_delay_penalty = 0.0
-        
-        if self.episode_step_count >= 150:  # Start gentle penalty
-            timeout_penalty = 0.05  # Small fixed penalty per step after 150
-            reward -= timeout_penalty
-            info["approaching_timeout"] = True
-            info["timeout_penalty"] = timeout_penalty
-        else:
-            info["approaching_timeout"] = False
-            info["timeout_penalty"] = 0.0
+        if not TEST_DEMO_ONLY_DEFAULT_JOINT_REWARD:
+            info = {}
             
-        # More aggressive penalty for extreme delays
-        if self.episode_step_count >= 180:
-            extreme_delay_penalty = 0.2  # Higher but still reasonable penalty per step
-            reward -= extreme_delay_penalty
-            info["extreme_delay_penalty"] = extreme_delay_penalty
-        else:
-            info["extreme_delay_penalty"] = 0.0
-        
-        # ============= STAGE-BASED REWARD SYSTEM =============
-        
-        # Determine current stage
-        is_approach_stage = dist_torso_to_box > 0.5
-        is_grasp_stage = dist_torso_to_box <= 0.5
-        
-        info["current_stage"] = "approach" if is_approach_stage else "grasp"
-        info["dist_torso_to_box"] = dist_torso_to_box
-        
-        # Default joint reward (used in both stages)
-        # Use specific default joint angles: Left(20,0,0,-50,0,0,0), Right(20,0,0,-50,0,0,0) degrees
-        default_joint_angles_deg = np.array([
-            20, 0, 0, -50, 0, 0, 0,  # Left arm
-            20, 0, 0, -50, 0, 0, 0   # Right arm
-        ])
-        # Convert to radians
-        default_joint_angles_rad = np.deg2rad(default_joint_angles_deg)
-        
-        # Calculate deviation from default joint positions
-        joint_deviation = np.abs(arm_joints - default_joint_angles_rad)
-        # Mean deviation across all joints (in radians)
-        mean_joint_deviation_rad = np.mean(joint_deviation)
-        # Convert to degrees for better interpretability
-        mean_joint_deviation_deg = np.rad2deg(mean_joint_deviation_rad)
-        # Reward for being close to default positions (higher reward for smaller deviation)
-        # Use degree-based deviation for more intuitive scaling
-        default_joint_reward = np.exp(-0.05 * mean_joint_deviation_deg) * 0.5
-        
-        if is_approach_stage:
-            # ========== STAGE 1: APPROACH STAGE ==========
+            # Extract data from observation
+            agent_state = obs['agent_pos']
+            env_state = obs['environment_state']
             
-            # 1. Default joint reward (correct weight as requested)
-            reward += default_joint_reward * 0.3
-            
-            # 2. Torso approaching box reward
-            if self.last_dist_torso_to_box is not None:
-                torso_distance_change = self.last_dist_torso_to_box - dist_torso_to_box
-                if torso_distance_change > 0:  # Getting closer
-                    torso_approach_reward = torso_distance_change * 2.0
-                    reward += torso_approach_reward
-                    info["torso_approach_reward"] = torso_approach_reward
-                elif torso_distance_change < -0.02:  # Moving away penalty
-                    torso_retreat_penalty = max(torso_distance_change * 1.5, -1.0)  # Capped penalty
-                    reward += torso_retreat_penalty
-                    info["torso_retreat_penalty"] = torso_retreat_penalty
-            
-            # 3. Basic guidance reward for getting torso close
-            torso_proximity_reward = max(0, (2.0 - dist_torso_to_box) * 0.2)  # Reward within 2m
-            reward += torso_proximity_reward
-            info["torso_proximity_reward"] = torso_proximity_reward
-            
-            # 4. Progressive approach reward to make success less sparse
-            if dist_torso_to_box < 1.0:
-                approach_progress_reward = (1.0 - dist_torso_to_box) * 1.0  # Max 1.0 when very close
-                reward += approach_progress_reward
-                info["approach_progress_reward"] = approach_progress_reward
-            
-            # No hand-to-box distance rewards in approach stage
-            info["stage_focus"] = "torso_approach"
-            
-        else:
-            # ========== STAGE 2: GRASP STAGE ==========
-            
-            # 1. Default joint reward (maintain comfortable posture)
-            reward += default_joint_reward * 0.2
-            
-            # 2. Final success reward - INCREASED to make success more attractive than time-wasting
-            if lift_success and hands_close_success:
-                # Base success reward (INCREASED to dominate over process rewards)
-                base_success_reward = 50.0  # INCREASED from 15.0
-                
-                # Efficiency bonus based on episode steps
-                optimal_steps = 120  # More realistic for 200-step episodes
-                max_efficiency_bonus = 50.0  # INCREASED from 10.0
-                
-                if self.episode_step_count <= optimal_steps:
-                    efficiency_bonus = max_efficiency_bonus
-                else:
-                    step_penalty = (self.episode_step_count - optimal_steps) * 0.5  # MORE aggressive penalty
-                    efficiency_bonus = max(0.0, max_efficiency_bonus - step_penalty)
-                
-                total_success_reward = base_success_reward + efficiency_bonus
-                reward += total_success_reward
-                terminated = True
-                
-                info["base_success_reward"] = base_success_reward
-                info["efficiency_bonus"] = efficiency_bonus
-                info["total_success_reward"] = total_success_reward
-                info["episode_steps"] = self.episode_step_count
-            
+            # Extract positions based on observation mode
+            if self.wbc_observation_enabled:
+                # WBC enabled: agent_state has 46 dimensions
+                left_eef_pos = agent_state[0:3]
+                right_eef_pos = agent_state[7:10]
+                arm_joints = agent_state[14:28]  # 14 joint angles
+                torso_pos = agent_state[40:43]
+                box_pos = env_state[0:3]
+                box_orn = env_state[3:7]
             else:
-                # Guidance rewards for grasping behavior - FIXED: All rewards now based on IMPROVEMENT
+                # WBC disabled: agent_state has 29 dimensions (increased from 23)
+                left_eef_pos = agent_state[0:3]           # world frame left eef pos
+                right_eef_pos = agent_state[3:6]          # world frame right eef pos
+                arm_joints = agent_state[6:20]            # 14 joint angles
+                torso_pos = agent_state[20:23]            # robot position
+                # Additional base_link end-effector positions (new data)
+                base_link_left_eef_pos = agent_state[23:26]   # base_link frame left eef pos
+                base_link_right_eef_pos = agent_state[26:29]  # base_link frame right eef pos
+                box_pos = env_state[0:3]
+                box_orn = None  # No orientation data when WBC is disabled
+
+            # Calculate distances
+            dist_left_hand_to_box = np.linalg.norm(left_eef_pos - box_pos)
+            dist_right_hand_to_box = np.linalg.norm(right_eef_pos - box_pos)
+            dist_torso_to_box = np.linalg.norm(torso_pos - box_pos)
+
+            # Base step penalty to encourage efficiency
+            reward = -0.01  # Increased from -0.005 to discourage time-wasting
+            
+            # Check success conditions
+            z_lift = box_pos[2] - self.initial_box_pose['position'][2]
+            
+            # FIXED: Much stricter box fallen detection and severe penalty
+            box_fallen = z_lift < -0.2  # STRICTER: from -0.5 to -0.2
+            if box_fallen:
+                reward -= 100.0  # SEVERE PENALTY: from -10.0 to -100.0
+                terminated = True
+                info["box_fallen"] = True
+                info["failure_reason"] = "box_dropped"
+            else:
+                terminated = False
+                info["box_fallen"] = False
+
+            # Success conditions
+            lift_success = z_lift > 0.15  # Must lift box at least 15cm
+            hands_close_success = (dist_left_hand_to_box < 0.3) and (dist_right_hand_to_box < 0.3)
+            
+            # FIXED: Reasonable timeout penalty - per-step penalty, not cumulative
+            timeout_penalty = 0.0
+            extreme_delay_penalty = 0.0
+            
+            if self.episode_step_count >= 150:  # Start gentle penalty
+                timeout_penalty = 0.05  # Small fixed penalty per step after 150
+                reward -= timeout_penalty
+                info["approaching_timeout"] = True
+                info["timeout_penalty"] = timeout_penalty
+            else:
+                info["approaching_timeout"] = False
+                info["timeout_penalty"] = 0.0
                 
-                # FIXED: Hand-to-box approach rewards - Only reward IMPROVEMENT, not maintaining position
-                if self.last_dist_left_hand_to_box is not None:
-                    left_distance_change = self.last_dist_left_hand_to_box - dist_left_hand_to_box
-                    if left_distance_change > 0.01:  # Only significant improvement
-                        left_hand_reward = left_distance_change * 10.0  # Reward improvement
-                        reward += left_hand_reward
-                        info["left_hand_approach_reward"] = left_hand_reward
+            # More aggressive penalty for extreme delays
+            if self.episode_step_count >= 180:
+                extreme_delay_penalty = 0.2  # Higher but still reasonable penalty per step
+                reward -= extreme_delay_penalty
+                info["extreme_delay_penalty"] = extreme_delay_penalty
+            else:
+                info["extreme_delay_penalty"] = 0.0
+            
+            # ============= STAGE-BASED REWARD SYSTEM =============
+            
+            # Determine current stage
+            is_approach_stage = dist_torso_to_box > 0.5
+            is_grasp_stage = dist_torso_to_box <= 0.5
+            
+            info["current_stage"] = "approach" if is_approach_stage else "grasp"
+            info["dist_torso_to_box"] = dist_torso_to_box
+            
+            # Default joint reward (used in both stages)
+            # Use specific default joint angles: Left(20,0,0,-50,0,0,0), Right(20,0,0,-50,0,0,0) degrees
+            default_joint_angles_deg = np.array([
+                20, 0, 0, -50, 0, 0, 0,  # Left arm
+                20, 0, 0, -50, 0, 0, 0   # Right arm
+            ])
+            # Convert to radians
+            default_joint_angles_rad = np.deg2rad(default_joint_angles_deg)
+            
+            # Calculate deviation from default joint positions
+            joint_deviation = np.abs(arm_joints - default_joint_angles_rad)
+            # Mean deviation across all joints (in radians)
+            mean_joint_deviation_rad = np.mean(joint_deviation)
+            # Convert to degrees for better interpretability
+            mean_joint_deviation_deg = np.rad2deg(mean_joint_deviation_rad)
+            # Reward for being close to default positions (higher reward for smaller deviation)
+            # Use degree-based deviation for more intuitive scaling
+            default_joint_reward = np.exp(-0.05 * mean_joint_deviation_deg) * 0.5
+            
+            if is_approach_stage:
+                # ========== STAGE 1: APPROACH STAGE ==========
+                
+                # 1. Default joint reward (correct weight as requested)
+                reward += default_joint_reward * 0.3
+                
+                # 2. Torso approaching box reward
+                if self.last_dist_torso_to_box is not None:
+                    torso_distance_change = self.last_dist_torso_to_box - dist_torso_to_box
+                    if torso_distance_change > 0:  # Getting closer
+                        torso_approach_reward = torso_distance_change * 2.0
+                        reward += torso_approach_reward
+                        info["torso_approach_reward"] = torso_approach_reward
+                    elif torso_distance_change < -0.02:  # Moving away penalty
+                        torso_retreat_penalty = max(torso_distance_change * 1.5, -1.0)  # Capped penalty
+                        reward += torso_retreat_penalty
+                        info["torso_retreat_penalty"] = torso_retreat_penalty
+                
+                # 3. Basic guidance reward for getting torso close
+                torso_proximity_reward = max(0, (2.0 - dist_torso_to_box) * 0.2)  # Reward within 2m
+                reward += torso_proximity_reward
+                info["torso_proximity_reward"] = torso_proximity_reward
+                
+                # 4. Progressive approach reward to make success less sparse
+                if dist_torso_to_box < 1.0:
+                    approach_progress_reward = (1.0 - dist_torso_to_box) * 1.0  # Max 1.0 when very close
+                    reward += approach_progress_reward
+                    info["approach_progress_reward"] = approach_progress_reward
+                
+                # No hand-to-box distance rewards in approach stage
+                info["stage_focus"] = "torso_approach"
+                
+            else:
+                # ========== STAGE 2: GRASP STAGE ==========
+                
+                # 1. Default joint reward (maintain comfortable posture)
+                reward += default_joint_reward * 0.2
+                
+                # 2. Final success reward - INCREASED to make success more attractive than time-wasting
+                if lift_success and hands_close_success:
+                    # Base success reward (INCREASED to dominate over process rewards)
+                    base_success_reward = 50.0  # INCREASED from 15.0
+                    
+                    # Efficiency bonus based on episode steps
+                    optimal_steps = 120  # More realistic for 200-step episodes
+                    max_efficiency_bonus = 50.0  # INCREASED from 10.0
+                    
+                    if self.episode_step_count <= optimal_steps:
+                        efficiency_bonus = max_efficiency_bonus
+                    else:
+                        step_penalty = (self.episode_step_count - optimal_steps) * 0.5  # MORE aggressive penalty
+                        efficiency_bonus = max(0.0, max_efficiency_bonus - step_penalty)
+                    
+                    total_success_reward = base_success_reward + efficiency_bonus
+                    reward += total_success_reward
+                    terminated = True
+                    
+                    info["base_success_reward"] = base_success_reward
+                    info["efficiency_bonus"] = efficiency_bonus
+                    info["total_success_reward"] = total_success_reward
+                    info["episode_steps"] = self.episode_step_count
+                
                 else:
-                    info["left_hand_approach_reward"] = 0.0
-                
-                if self.last_dist_right_hand_to_box is not None:
-                    right_distance_change = self.last_dist_right_hand_to_box - dist_right_hand_to_box
-                    if right_distance_change > 0.01:  # Only significant improvement
-                        right_hand_reward = right_distance_change * 10.0  # Reward improvement
-                        reward += right_hand_reward
-                        info["right_hand_approach_reward"] = right_hand_reward
-                else:
-                    info["right_hand_approach_reward"] = 0.0
-                
-                # FIXED: Bonus for both hands being close - ONLY once when first achieved
-                if not hasattr(self, 'both_hands_close_achieved'):
-                    self.both_hands_close_achieved = False
-                
-                if (dist_left_hand_to_box < 0.4 and dist_right_hand_to_box < 0.4 and 
-                    not self.both_hands_close_achieved):
-                    both_hands_close_bonus = 5.0  # One-time bonus
-                    reward += both_hands_close_bonus
-                    self.both_hands_close_achieved = True
-                    info["both_hands_close_bonus"] = both_hands_close_bonus
-                    info["first_time_both_hands_close"] = True
-                else:
-                    info["both_hands_close_bonus"] = 0.0
-                    info["first_time_both_hands_close"] = False
-                
-                # Reset the flag if hands move away
-                if (dist_left_hand_to_box > 0.5 or dist_right_hand_to_box > 0.5):
-                    self.both_hands_close_achieved = False
-                
-                # FIXED: Box lifting progress reward with ANTI-EXPLOITATION measures
-                if z_lift > 0.02:
-                    # FIXED: Prevent exploitation by limiting lift reward accumulation
-                    # Only reward meaningful lift progress, not just maintaining position
-                    if not hasattr(self, 'max_z_lift_achieved'):
+                    # Guidance rewards for grasping behavior - FIXED: All rewards now based on IMPROVEMENT
+                    
+                    # FIXED: Hand-to-box approach rewards - Only reward IMPROVEMENT, not maintaining position
+                    if self.last_dist_left_hand_to_box is not None:
+                        left_distance_change = self.last_dist_left_hand_to_box - dist_left_hand_to_box
+                        if left_distance_change > 0.01:  # Only significant improvement
+                            left_hand_reward = left_distance_change * 10.0  # Reward improvement
+                            reward += left_hand_reward
+                            info["left_hand_approach_reward"] = left_hand_reward
+                    else:
+                        info["left_hand_approach_reward"] = 0.0
+                    
+                    if self.last_dist_right_hand_to_box is not None:
+                        right_distance_change = self.last_dist_right_hand_to_box - dist_right_hand_to_box
+                        if right_distance_change > 0.01:  # Only significant improvement
+                            right_hand_reward = right_distance_change * 10.0  # Reward improvement
+                            reward += right_hand_reward
+                            info["right_hand_approach_reward"] = right_hand_reward
+                    else:
+                        info["right_hand_approach_reward"] = 0.0
+                    
+                    # FIXED: Bonus for both hands being close - ONLY once when first achieved
+                    if not hasattr(self, 'both_hands_close_achieved'):
+                        self.both_hands_close_achieved = False
+                    
+                    if (dist_left_hand_to_box < 0.4 and dist_right_hand_to_box < 0.4 and 
+                        not self.both_hands_close_achieved):
+                        both_hands_close_bonus = 5.0  # One-time bonus
+                        reward += both_hands_close_bonus
+                        self.both_hands_close_achieved = True
+                        info["both_hands_close_bonus"] = both_hands_close_bonus
+                        info["first_time_both_hands_close"] = True
+                    else:
+                        info["both_hands_close_bonus"] = 0.0
+                        info["first_time_both_hands_close"] = False
+                    
+                    # Reset the flag if hands move away
+                    if (dist_left_hand_to_box > 0.5 or dist_right_hand_to_box > 0.5):
+                        self.both_hands_close_achieved = False
+                    
+                    # FIXED: Box lifting progress reward with ANTI-EXPLOITATION measures
+                    if z_lift > 0.02:
+                        # FIXED: Prevent exploitation by limiting lift reward accumulation
+                        # Only reward meaningful lift progress, not just maintaining position
+                        if not hasattr(self, 'max_z_lift_achieved'):
+                            self.max_z_lift_achieved = 0.0
+                        
+                        # Only give lift reward for NEW progress, not maintaining old progress
+                        if z_lift > self.max_z_lift_achieved:
+                            lift_progress = z_lift - self.max_z_lift_achieved
+                            self.max_z_lift_achieved = z_lift
+                            
+                            if z_lift > 0.15:
+                                box_lift_reward = 15.0  # One-time reward for achieving success height
+                            elif z_lift > 0.10:
+                                box_lift_reward = lift_progress * 50.0  # Reward for significant progress
+                            elif z_lift > 0.05:
+                                box_lift_reward = lift_progress * 30.0  # Reward for moderate progress
+                            else:
+                                box_lift_reward = lift_progress * 20.0  # Reward for small progress
+                            
+                            reward += box_lift_reward
+                            info["box_lift_reward"] = box_lift_reward
+                            info["lift_progress"] = lift_progress
+                        else:
+                            # NO reward for just maintaining position - prevents time-wasting
+                            info["box_lift_reward"] = 0.0
+                            info["maintaining_position"] = True
+                    else:
+                        # Reset max achievement if box falls below threshold
                         self.max_z_lift_achieved = 0.0
                     
-                    # Only give lift reward for NEW progress, not maintaining old progress
-                    if z_lift > self.max_z_lift_achieved:
-                        lift_progress = z_lift - self.max_z_lift_achieved
-                        self.max_z_lift_achieved = z_lift
-                        
-                        if z_lift > 0.15:
-                            box_lift_reward = 15.0  # One-time reward for achieving success height
-                        elif z_lift > 0.10:
-                            box_lift_reward = lift_progress * 50.0  # Reward for significant progress
-                        elif z_lift > 0.05:
-                            box_lift_reward = lift_progress * 30.0  # Reward for moderate progress
-                        else:
-                            box_lift_reward = lift_progress * 20.0  # Reward for small progress
-                        
-                        reward += box_lift_reward
-                        info["box_lift_reward"] = box_lift_reward
-                        info["lift_progress"] = lift_progress
-                    else:
-                        # NO reward for just maintaining position - prevents time-wasting
-                        info["box_lift_reward"] = 0.0
-                        info["maintaining_position"] = True
-                else:
-                    # Reset max achievement if box falls below threshold
-                    self.max_z_lift_achieved = 0.0
-                
-                # FIXED: Hand symmetry reward - ONLY once when first achieved
-                if not hasattr(self, 'good_symmetry_achieved'):
-                    self.good_symmetry_achieved = False
-                
-                if (dist_left_hand_to_box < 0.5 and dist_right_hand_to_box < 0.5 and 
-                    not self.good_symmetry_achieved):
-                    box_to_left = left_eef_pos - box_pos
-                    box_to_right = right_eef_pos - box_pos
-                    left_yz = box_to_left[1:]  # y,z components
-                    right_yz = box_to_right[1:]  # y,z components
-                    symmetry_error = np.linalg.norm(left_yz + right_yz)
+                    # FIXED: Hand symmetry reward - ONLY once when first achieved
+                    if not hasattr(self, 'good_symmetry_achieved'):
+                        self.good_symmetry_achieved = False
                     
-                    if symmetry_error < 0.2:  # Good symmetry threshold
-                        symmetry_reward = 3.0  # One-time bonus for achieving good symmetry
-                        reward += symmetry_reward
-                        self.good_symmetry_achieved = True
-                        info["symmetry_reward"] = symmetry_reward
-                        info["first_time_good_symmetry"] = True
+                    if (dist_left_hand_to_box < 0.5 and dist_right_hand_to_box < 0.5 and 
+                        not self.good_symmetry_achieved):
+                        box_to_left = left_eef_pos - box_pos
+                        box_to_right = right_eef_pos - box_pos
+                        left_yz = box_to_left[1:]  # y,z components
+                        right_yz = box_to_right[1:]  # y,z components
+                        symmetry_error = np.linalg.norm(left_yz + right_yz)
+                        
+                        if symmetry_error < 0.2:  # Good symmetry threshold
+                            symmetry_reward = 3.0  # One-time bonus for achieving good symmetry
+                            reward += symmetry_reward
+                            self.good_symmetry_achieved = True
+                            info["symmetry_reward"] = symmetry_reward
+                            info["first_time_good_symmetry"] = True
+                        else:
+                            info["symmetry_reward"] = 0.0
+                            info["first_time_good_symmetry"] = False
                     else:
                         info["symmetry_reward"] = 0.0
                         info["first_time_good_symmetry"] = False
-                else:
-                    info["symmetry_reward"] = 0.0
-                    info["first_time_good_symmetry"] = False
-                
-                # Reset symmetry flag if hands move away
-                if (dist_left_hand_to_box > 0.6 or dist_right_hand_to_box > 0.6):
-                    self.good_symmetry_achieved = False
-            
-            info["stage_focus"] = "grasp_manipulation"
-        
-        # ============= COMMON CONSTRAINTS AND PENALTIES =============
-        
-        # Position constraints (light penalties)
-        position_penalty = 0.0
-        
-        # Keep hands in positive X (forward) region  
-        if left_eef_pos[0] < 0:
-            position_penalty += abs(left_eef_pos[0]) * 0.1
-        if right_eef_pos[0] < 0:
-            position_penalty += abs(right_eef_pos[0]) * 0.1
-            
-        # Prevent hand crossing
-        y_separation = left_eef_pos[1] - right_eef_pos[1]
-        if y_separation <= 0:  # Hands crossed
-            position_penalty += abs(y_separation) * 0.2
-            
-        reward -= position_penalty
-        info["position_penalty"] = position_penalty
-        
-        # Velocity smoothness penalty (encourage smooth motion)
-        velocity_penalty = 0.0
-        if self.last_left_eef_pos is not None and self.last_right_eef_pos is not None:
-            left_eef_velocity = np.linalg.norm(left_eef_pos - self.last_left_eef_pos)
-            right_eef_velocity = np.linalg.norm(right_eef_pos - self.last_right_eef_pos)
-            velocity_penalty = (left_eef_velocity + right_eef_velocity) * 0.02
-            velocity_penalty = min(velocity_penalty, 0.3)  # Cap penalty
-            reward -= velocity_penalty
-            info["velocity_penalty"] = velocity_penalty
-        
-        # Update position history
-        self.last_left_eef_pos = left_eef_pos.copy()
-        self.last_right_eef_pos = right_eef_pos.copy()
-        self.last_dist_torso_to_box = dist_torso_to_box
-        
-        # FIXED: Update hand distance tracking for improvement-based rewards
-        self.last_dist_left_hand_to_box = dist_left_hand_to_box
-        self.last_dist_right_hand_to_box = dist_right_hand_to_box
-        
-        # Final reward clipping - ADJUSTED for new improvement-based reward scale
-        reward = np.clip(reward, -150.0, 120.0)  # ADJUSTED: accommodate success rewards and timeout penalties
-        
-        # Termination check
-        if not box_fallen:
-            terminated = lift_success and hands_close_success
-        
-        # ============= INFO DICTIONARY =============
-        info["succeed"] = lift_success and hands_close_success
-        info["z_lift"] = z_lift
-        info["dist_left_hand_to_box"] = dist_left_hand_to_box
-        info["dist_right_hand_to_box"] = dist_right_hand_to_box
-        info["default_joint_reward"] = default_joint_reward
-        info["mean_joint_deviation"] = mean_joint_deviation_deg
-        info["reward_total"] = reward
-        info["is_approach_stage"] = is_approach_stage
-        info["is_grasp_stage"] = is_grasp_stage
-        
-        # Stage-specific debug info
-        if self.debug:
-            stage_name = "APPROACH" if is_approach_stage else "GRASP"
-            print(f"Step {self.episode_step_count} [{stage_name}]: dist_torso={dist_torso_to_box:.3f}, z_lift={z_lift:.3f}")
-            print(f"  Total reward: {reward:.3f}, default_joint: {default_joint_reward:.3f}")
-            print(f"  Joint deviation: {mean_joint_deviation_deg:.3f}, terminated: {terminated}")
-            
-            if is_approach_stage:
-                print(f"  Focus: Torso approach to box")
-            else:
-                print(f"  Focus: Hand manipulation and grasping")
-                print(f"  Hand distances - L: {dist_left_hand_to_box:.3f}, R: {dist_right_hand_to_box:.3f}")
-                if hasattr(self, 'max_z_lift_achieved'):
-                    print(f"  Max lift achieved: {self.max_z_lift_achieved:.3f}")
                     
-                # Print achievement flags for debugging
-                hands_close_flag = getattr(self, 'both_hands_close_achieved', False)
-                symmetry_flag = getattr(self, 'good_symmetry_achieved', False)
-                print(f"  Achievement flags - Hands close: {hands_close_flag}, Good symmetry: {symmetry_flag}")
+                    # Reset symmetry flag if hands move away
+                    if (dist_left_hand_to_box > 0.6 or dist_right_hand_to_box > 0.6):
+                        self.good_symmetry_achieved = False
+                
+                info["stage_focus"] = "grasp_manipulation"
+            
+            # ============= COMMON CONSTRAINTS AND PENALTIES =============
+            
+            # Position constraints (light penalties)
+            position_penalty = 0.0
+            
+            # Keep hands in positive X (forward) region  
+            if left_eef_pos[0] < 0:
+                position_penalty += abs(left_eef_pos[0]) * 0.1
+            if right_eef_pos[0] < 0:
+                position_penalty += abs(right_eef_pos[0]) * 0.1
+                
+            # Prevent hand crossing
+            y_separation = left_eef_pos[1] - right_eef_pos[1]
+            if y_separation <= 0:  # Hands crossed
+                position_penalty += abs(y_separation) * 0.2
+                
+            reward -= position_penalty
+            info["position_penalty"] = position_penalty
+            
+            # Velocity smoothness penalty (encourage smooth motion)
+            velocity_penalty = 0.0
+            if self.last_left_eef_pos is not None and self.last_right_eef_pos is not None:
+                left_eef_velocity = np.linalg.norm(left_eef_pos - self.last_left_eef_pos)
+                right_eef_velocity = np.linalg.norm(right_eef_pos - self.last_right_eef_pos)
+                velocity_penalty = (left_eef_velocity + right_eef_velocity) * 0.02
+                velocity_penalty = min(velocity_penalty, 0.3)  # Cap penalty
+                reward -= velocity_penalty
+                info["velocity_penalty"] = velocity_penalty
+            
+            # Update position history
+            self.last_left_eef_pos = left_eef_pos.copy()
+            self.last_right_eef_pos = right_eef_pos.copy()
+            self.last_dist_torso_to_box = dist_torso_to_box
+            
+            # FIXED: Update hand distance tracking for improvement-based rewards
+            self.last_dist_left_hand_to_box = dist_left_hand_to_box
+            self.last_dist_right_hand_to_box = dist_right_hand_to_box
+            
+            # Final reward clipping - ADJUSTED for new improvement-based reward scale
+            reward = np.clip(reward, -150.0, 120.0)  # ADJUSTED: accommodate success rewards and timeout penalties
+            
+            # Termination check
+            if not box_fallen:
+                terminated = lift_success and hands_close_success
+            
+            # ============= INFO DICTIONARY =============
+            info["succeed"] = lift_success and hands_close_success
+            info["z_lift"] = z_lift
+            info["dist_left_hand_to_box"] = dist_left_hand_to_box
+            info["dist_right_hand_to_box"] = dist_right_hand_to_box
+            info["default_joint_reward"] = default_joint_reward
+            info["mean_joint_deviation"] = mean_joint_deviation_deg
+            info["reward_total"] = reward
+            info["is_approach_stage"] = is_approach_stage
+            info["is_grasp_stage"] = is_grasp_stage
+            
+            # Stage-specific debug info
+            if self.debug:
+                stage_name = "APPROACH" if is_approach_stage else "GRASP"
+                print(f"Step {self.episode_step_count} [{stage_name}]: dist_torso={dist_torso_to_box:.3f}, z_lift={z_lift:.3f}")
+                print(f"  Total reward: {reward:.3f}, default_joint: {default_joint_reward:.3f}")
+                print(f"  Joint deviation: {mean_joint_deviation_deg:.3f}, terminated: {terminated}")
+                
+                if is_approach_stage:
+                    print(f"  Focus: Torso approach to box")
+                else:
+                    print(f"  Focus: Hand manipulation and grasping")
+                    print(f"  Hand distances - L: {dist_left_hand_to_box:.3f}, R: {dist_right_hand_to_box:.3f}")
+                    if hasattr(self, 'max_z_lift_achieved'):
+                        print(f"  Max lift achieved: {self.max_z_lift_achieved:.3f}")
+                        
+                    # Print achievement flags for debugging
+                    hands_close_flag = getattr(self, 'both_hands_close_achieved', False)
+                    symmetry_flag = getattr(self, 'good_symmetry_achieved', False)
+                    print(f"  Achievement flags - Hands close: {hands_close_flag}, Good symmetry: {symmetry_flag}")
+        else:
+            # ========== DEMO MODE: ONLY DEFAULT JOINT SPACE DENSE REWARD ==========
+            info = {}
+            
+            # Extract data from observation
+            agent_state = obs['agent_pos']
+            env_state = obs['environment_state']
+            
+            # Extract arm joints based on observation mode
+            if self.wbc_observation_enabled:
+                # WBC enabled: agent_state has 46 dimensions
+                arm_joints = agent_state[14:28]  # 14 joint angles
+            else:
+                # WBC disabled: agent_state has 29 dimensions
+                arm_joints = agent_state[6:20]   # 14 joint angles
+            
+            # Default joint angles: Left(20,0,0,-50,0,0,0), Right(20,0,0,-50,0,0,0) degrees
+            default_joint_angles_deg = np.array([
+                20, 0, 0, -50, 0, 0, 0,  # Left arm
+                20, 0, 0, -50, 0, 0, 0   # Right arm
+            ])
+            # Convert to radians
+            default_joint_angles_rad = np.deg2rad(default_joint_angles_deg)
+            
+            # Calculate deviation from default joint positions
+            joint_deviation = np.abs(arm_joints - default_joint_angles_rad)
+            # Mean deviation across all joints (in radians)
+            mean_joint_deviation_rad = np.mean(joint_deviation)
+            # Convert to degrees for better interpretability
+            mean_joint_deviation_deg = np.rad2deg(mean_joint_deviation_rad)
+            
+            # Dense reward for being close to default positions
+            # Use exponential decay with stronger scaling for more dense feedback
+            default_joint_reward = np.exp(-0.02 * mean_joint_deviation_deg) * 2.0  # Increased scale
+            
+            # Additional dense reward component based on individual joint accuracy
+            individual_joint_rewards = np.exp(-0.03 * np.rad2deg(joint_deviation)) * 0.1
+            dense_joint_reward = np.sum(individual_joint_rewards)
+            
+            # Combine rewards
+            reward = default_joint_reward + dense_joint_reward
+            
+            # Small step penalty to encourage efficiency
+            reward -= 0.001
+            
+            # Success condition: when all joints are close enough to default positions
+            success_threshold_deg = 5.0  # Within 5 degrees is considered success
+            all_joints_close = np.all(np.rad2deg(joint_deviation) < success_threshold_deg)
+            
+            # Termination conditions
+            if all_joints_close:
+                # Success reward and terminate
+                reward += 10.0  # Success bonus
+                terminated = True
+                info["success"] = True
+                info["success_reason"] = "all_joints_at_default"
+            elif self.episode_step_count >= 200:
+                # Timeout - terminate but no success
+                terminated = True
+                info["success"] = False
+                info["success_reason"] = "timeout"
+            else:
+                terminated = False
+                info["success"] = False
+            
+            # Progress tracking reward - reward improvement over time
+            if not hasattr(self, 'best_joint_deviation'):
+                self.best_joint_deviation = float('inf')
+            
+            if mean_joint_deviation_deg < self.best_joint_deviation:
+                improvement = self.best_joint_deviation - mean_joint_deviation_deg
+                improvement_reward = improvement * 0.5  # Reward improvement
+                reward += improvement_reward
+                self.best_joint_deviation = mean_joint_deviation_deg
+                info["improvement_reward"] = improvement_reward
+                info["new_best_achieved"] = True
+            else:
+                info["improvement_reward"] = 0.0
+                info["new_best_achieved"] = False
+            
+            # Clip reward to reasonable range
+            reward = np.clip(reward, -5.0, 15.0)
+            
+            # Info dictionary for debugging and monitoring
+            info["mean_joint_deviation_deg"] = mean_joint_deviation_deg
+            info["default_joint_reward"] = default_joint_reward
+            info["dense_joint_reward"] = dense_joint_reward
+            info["best_deviation_so_far"] = self.best_joint_deviation
+            info["all_joints_close"] = all_joints_close
+            info["success_threshold_deg"] = success_threshold_deg
+            info["reward_total"] = reward
+            info["episode_steps"] = self.episode_step_count
+            info["mode"] = "demo_default_joint_only"
+            
+            # Individual joint deviations for detailed monitoring
+            joint_names = ['L1', 'L2', 'L3', 'L4', 'L5', 'L6', 'L7', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7']
+            for i, (name, dev_rad) in enumerate(zip(joint_names, joint_deviation)):
+                info[f"joint_{name}_deviation_deg"] = np.rad2deg(dev_rad)
+            
+            # Debug output
+            if self.debug:
+                print(f"[DEMO MODE] Step {self.episode_step_count}: Mean deviation: {mean_joint_deviation_deg:.2f}°")
+                print(f"  Default joint reward: {default_joint_reward:.3f}, Dense reward: {dense_joint_reward:.3f}")
+                print(f"  Total reward: {reward:.3f}, Best so far: {self.best_joint_deviation:.2f}°")
+                print(f"  All joints close: {all_joints_close}, Terminated: {terminated}")
+                
+                # Show worst deviating joints
+                worst_joint_idx = np.argmax(joint_deviation)
+                worst_deviation_deg = np.rad2deg(joint_deviation[worst_joint_idx])
+                print(f"  Worst joint: {joint_names[worst_joint_idx]} ({worst_deviation_deg:.2f}°)")
         
         return reward, terminated, info
+
 
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
         """
@@ -1476,8 +1704,14 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         self.last_left_increment.fill(0.0)
         self.last_right_increment.fill(0.0)
         
+        # Reset demo mode progress tracking
+        if hasattr(self, 'best_joint_deviation'):
+            self.best_joint_deviation = float('inf')
+        
         if self.debug:
             rospy.loginfo("reset - Incremental control state reset to zero")
+            if TEST_DEMO_ONLY_DEFAULT_JOINT_REWARD:
+                rospy.loginfo("reset - Demo mode: default joint space reward only")
 
         return obs_stable, {}
 
