@@ -64,10 +64,16 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         self.latest_lin_accel = None
         self.latest_wbc = None
         self.latest_robot_pose = None  # New: for robot pose when WBC is disabled
+        # Add new variables for base_link end-effector poses
+        self.latest_base_link_eef_left = None
+        self.latest_base_link_eef_right = None
         self.ang_vel_lock = threading.Lock()
         self.lin_accel_lock = threading.Lock()
         self.wbc_lock = threading.Lock()
         self.robot_pose_lock = threading.Lock()  # New: lock for robot pose
+        # Add new locks for base_link end-effector poses
+        self.base_link_eef_left_lock = threading.Lock()
+        self.base_link_eef_right_lock = threading.Lock()
         
         self.enable_roll_pitch_control = enable_roll_pitch_control
         self.wbc_observation_enabled = wbc_observation_enabled  # New: WBC observation flag
@@ -105,9 +111,9 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             agent_dim = 46
             env_state_dim = 7
         else:
-            # agent_pos: 3 (left_eef_pos) + 3 (right_eef_pos) + 14 (arm_joints) + 3 (robot_pos) = 23
+            # agent_pos: 3 (left_eef_pos) + 3 (right_eef_pos) + 14 (arm_joints) + 3 (robot_pos) + 3 (base_link_left_eef) + 3 (base_link_right_eef) = 29
             # environment_state: 3 (box_pos) = 3
-            agent_dim = 23
+            agent_dim = 29
             env_state_dim = 3
 
         if self.enable_roll_pitch_control:
@@ -251,6 +257,16 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         with self.robot_pose_lock:
             self.latest_robot_pose = msg
 
+    def _base_link_eef_left_callback(self, msg):
+        """Callback for base_link left end-effector pose messages."""
+        with self.base_link_eef_left_lock:
+            self.latest_base_link_eef_left = msg
+
+    def _base_link_eef_right_callback(self, msg):
+        """Callback for base_link right end-effector pose messages."""
+        with self.base_link_eef_right_lock:
+            self.latest_base_link_eef_right = msg
+
     def _vr_cmd_vel_callback(self, msg):
         """Callback for VR-generated cmd_vel messages."""
         # Only process VR messages when in VR intervention mode
@@ -390,8 +406,11 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
                 rospy.loginfo("WBC observation enabled - subscribing to /humanoid_wbc_observation")
         else:
             rospy.Subscriber('/robot_pose', PoseStamped, self._robot_pose_callback)
+            # Subscribe to base_link end-effector poses when WBC is disabled
+            rospy.Subscriber('/fk/base_link_eef_left', PoseStamped, self._base_link_eef_left_callback)
+            rospy.Subscriber('/fk/base_link_eef_right', PoseStamped, self._base_link_eef_right_callback)
             if self.debug:
-                rospy.loginfo("WBC observation disabled - subscribing to /robot_pose")
+                rospy.loginfo("WBC observation disabled - subscribing to /robot_pose, /fk/base_link_eef_left, /fk/base_link_eef_right")
 
         # Subscribers for VR intervention commands - listen to VR-generated control commands
         rospy.Subscriber('/cmd_vel', Twist, self._vr_cmd_vel_callback)
@@ -425,9 +444,16 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             with self.wbc_lock:
                 wbc = self.latest_wbc
             robot_pose = None
+            base_link_eef_left = None
+            base_link_eef_right = None
         else:
             with self.robot_pose_lock:
                 robot_pose = self.latest_robot_pose
+            # Get base_link end-effector poses when WBC is disabled
+            with self.base_link_eef_left_lock:
+                base_link_eef_left = self.latest_base_link_eef_left
+            with self.base_link_eef_right_lock:
+                base_link_eef_right = self.latest_base_link_eef_right
             wbc = None
 
         # Wait until all data sources are available
@@ -440,9 +466,9 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             if self.debug:
                 rospy.logwarn_throttle(1.0, "WBC data not yet available for observation callback.")
             return
-        elif not self.wbc_observation_enabled and robot_pose is None:
+        elif not self.wbc_observation_enabled and (robot_pose is None or base_link_eef_left is None or base_link_eef_right is None):
             if self.debug:
-                rospy.logwarn_throttle(1.0, "Robot pose data not yet available for observation callback.")
+                rospy.logwarn_throttle(1.0, "Robot pose or base_link end-effector data not yet available for observation callback.")
             return
 
         with self.obs_lock:
@@ -480,6 +506,18 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
                                         robot_pose.pose.orientation.z, robot_pose.pose.orientation.w])
                     # Pad with zeros to match WBC data dimension (7)
                     wbc_data = np.concatenate([robot_pos, robot_orn])  # 3 + 4 = 7
+                    
+                    # Extract base_link end-effector positions
+                    base_link_left_eef_pos = np.array([
+                        base_link_eef_left.pose.position.x,
+                        base_link_eef_left.pose.position.y,
+                        base_link_eef_left.pose.position.z
+                    ])
+                    base_link_right_eef_pos = np.array([
+                        base_link_eef_right.pose.position.x,
+                        base_link_eef_right.pose.position.y,
+                        base_link_eef_right.pose.position.z
+                    ])
                 
                 box_pos_data = np.array([
                     box_real.pose.position.x, box_real.pose.position.y, box_real.pose.position.z
@@ -506,15 +544,17 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
                     ]).astype(np.float32)
                 else:
                     """
-                        23 维度 - agent_pos
-                        3 + 3
-                        14 
-                        3
+                        29 维度 - agent_pos (increased from 23)
+                        3 + 3 (world frame eef positions)
+                        14 (arm joints)
+                        3 (robot position)
+                        3 + 3 (base_link frame eef positions)
                     """
                     agent_pos_obs = np.concatenate([
                         left_eef_position, right_eef_position, 
                         arm_data, 
-                        robot_pos
+                        robot_pos,
+                        base_link_left_eef_pos, base_link_right_eef_pos
                     ]).astype(np.float32)
 
                 if self.wbc_observation_enabled:
@@ -617,16 +657,29 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             # Extract positions based on observation mode
             if self.wbc_observation_enabled:
                 # WBC enabled: agent_state has 46 dimensions
+                left_eef_pos = agent_state[0:3]
+                right_eef_pos = agent_state[7:10]
+                arm_joints = agent_state[14:28]  # 14 joint angles
                 torso_pos = agent_state[40:43]
                 box_pos = env_state[0:3]
+                box_orn = env_state[3:7]
             else:
-                # WBC disabled: agent_state has 23 dimensions
-                torso_pos = agent_state[20:23]
+                # WBC disabled: agent_state has 29 dimensions (increased from 23)
+                left_eef_pos = agent_state[0:3]           # world frame left eef pos
+                right_eef_pos = agent_state[3:6]          # world frame right eef pos
+                arm_joints = agent_state[6:20]            # 14 joint angles
+                torso_pos = agent_state[20:23]            # robot position
+                # Additional base_link end-effector positions (new data)
+                base_link_left_eef_pos = agent_state[23:26]   # base_link frame left eef pos
+                base_link_right_eef_pos = agent_state[26:29]  # base_link frame right eef pos
                 box_pos = env_state[0:3]
-            
-            # Calculate distance
+                box_orn = None  # No orientation data when WBC is disabled
+
+            # Calculate distances
+            dist_left_hand_to_box = np.linalg.norm(left_eef_pos - box_pos)
+            dist_right_hand_to_box = np.linalg.norm(right_eef_pos - box_pos)
             dist_torso_to_box = np.linalg.norm(torso_pos - box_pos)
-            
+
             # Stage determination (same logic as in reward function)
             if dist_torso_to_box > 0.5:
                 return "approach"
@@ -958,11 +1011,14 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             box_pos = env_state[0:3]
             box_orn = env_state[3:7]
         else:
-            # WBC disabled: agent_state has 23 dimensions
-            left_eef_pos = agent_state[0:3]
-            right_eef_pos = agent_state[3:6]
-            arm_joints = agent_state[6:20]  # 14 joint angles
-            torso_pos = agent_state[20:23]
+            # WBC disabled: agent_state has 29 dimensions (increased from 23)
+            left_eef_pos = agent_state[0:3]           # world frame left eef pos
+            right_eef_pos = agent_state[3:6]          # world frame right eef pos
+            arm_joints = agent_state[6:20]            # 14 joint angles
+            torso_pos = agent_state[20:23]            # robot position
+            # Additional base_link end-effector positions (new data)
+            base_link_left_eef_pos = agent_state[23:26]   # base_link frame left eef pos
+            base_link_right_eef_pos = agent_state[26:29]  # base_link frame right eef pos
             box_pos = env_state[0:3]
             box_orn = None  # No orientation data when WBC is disabled
 

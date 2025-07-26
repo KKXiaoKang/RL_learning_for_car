@@ -30,13 +30,13 @@
         "wbc_observation_enabled": false
     },
     "name": "rl_kuavo_MetaVR_env",
-    "mode": "record", 
-    "repo_id": "KANGKKANG/rl_kuavo_724_1615",
+    "mode": "eval", 
+    "repo_id": "KANGKKANG/rl_kuavo_726_1015_increase_obs_32",
     "dataset_root": null,
     "task": "RLKuavoMetaVR-v0",
-    "num_episodes": 2,
+    "num_episodes": 10,
     "episode": 0,
-    "pretrained_policy_name_or_path": null,
+    "pretrained_policy_name_or_path": "/home/lab/RL/lerobot/outputs/train/2025-07-24/10-13-37_rl_kuavo_MetaVR_hil_1_2025_0724_1015/checkpoints/0006000/pretrained_model",
     "device": "cuda",
     "push_to_hub": true,
     "fps": 10,
@@ -54,7 +54,7 @@
         "observation.state": {
             "type": "STATE",
             "shape": [
-                26
+                32
             ]
         },
         "action": {

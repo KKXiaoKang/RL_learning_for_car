@@ -30,11 +30,11 @@
         "wbc_observation_enabled": false
     },
     "name": "rl_kuavo_MetaVR_env",
-    "mode": "record", 
-    "repo_id": "KANGKKANG/rl_kuavo_724_1615",
+    "mode": null, 
+    "repo_id": "KANGKKANG/rl_kuavo_726_1015_increase_obs_32",
     "dataset_root": null,
     "task": "RLKuavoMetaVR-v0",
-    "num_episodes": 2,
+    "num_episodes": 10,
     "episode": 0,
     "pretrained_policy_name_or_path": null,
     "device": "cuda",
@@ -54,7 +54,7 @@
         "observation.state": {
             "type": "STATE",
             "shape": [
-                26
+                32
             ]
         },
         "action": {

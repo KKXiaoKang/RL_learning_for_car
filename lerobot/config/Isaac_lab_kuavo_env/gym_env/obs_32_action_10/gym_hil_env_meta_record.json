@@ -31,7 +31,7 @@
     },
     "name": "rl_kuavo_MetaVR_env",
     "mode": "record", 
-    "repo_id": "KANGKKANG/rl_kuavo_724_1615",
+    "repo_id": "KANGKKANG/rl_kuavo_726_1015_increase_obs_32",
     "dataset_root": null,
     "task": "RLKuavoMetaVR-v0",
     "num_episodes": 2,
@@ -54,7 +54,7 @@
         "observation.state": {
             "type": "STATE",
             "shape": [
-                26
+                32
             ]
         },
         "action": {
