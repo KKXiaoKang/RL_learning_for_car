@@ -681,7 +681,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             dist_torso_to_box = np.linalg.norm(torso_pos - box_pos)
 
             # Stage determination (same logic as in reward function)
-            if dist_torso_to_box > 0.5:
+            if dist_torso_to_box > 0.3:
                 return "approach"
             else:
                 return "grasp"
@@ -883,8 +883,9 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         
         Updated for incremental control:
         1. Disable robot linear z movement (action[2] = 0)
-        2. Limit incremental values to reasonable ranges
-        3. Specific constraints are now handled in _apply_task_specific_constraints
+        2. In Stage 2 (grasp stage): Disable all torso movements (action[0], action[1], action[3] = 0)
+        3. Limit incremental values to reasonable ranges
+        4. Specific constraints are now handled in _apply_task_specific_constraints
         
         Args:
             action: The original action array (now with increments)
@@ -897,9 +898,23 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         # Extract velocity and end-effector actions
         vel_dim = 6 if self.enable_roll_pitch_control else 4
         
-        # Constraint: Disable robot linear z movement (up/down motion)
-        # action[0] - linear x, action[1] - linear y, action[2] - linear z, action[3] - angular yaw
-        constrained_action[2] = 0.0  # Disable linear z movement
+        # Get current stage to determine constraints
+        current_stage = self._get_current_stage()
+        
+        # Stage-based torso movement constraints
+        if current_stage == "grasp":
+            # STAGE 2: GRASP STAGE - Disable ALL torso movements
+            # action[0] - linear x, action[1] - linear y, action[2] - linear z, action[3] - angular yaw
+            constrained_action[0] = 0.0  # Disable linear x movement
+            constrained_action[1] = 0.0  # Disable linear y movement
+            constrained_action[2] = 0.0  # Disable linear z movement
+            constrained_action[3] = 0.0  # Disable angular yaw movement
+            
+            if self.debug:
+                print(f"[STAGE 2 CONSTRAINT] All torso movements disabled during grasp stage")
+        else:
+            # STAGE 1: APPROACH STAGE - Only disable linear z movement
+            constrained_action[2] = 0.0  # Disable linear z movement
         
         ee_action = constrained_action[vel_dim:]
         
@@ -919,7 +934,15 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             # Debug output for constraint verification
             if self.debug:
                 print(f"[CONSTRAINT DEBUG] Applied incremental constraints:")
-                print(f"  Robot linear z (action[2]): {constrained_action[2]:.3f} (disabled)")
+                if current_stage == "grasp":
+                    print(f"  Stage 2 - All torso movements disabled:")
+                    print(f"    action[0] (linear x): {constrained_action[0]:.3f}")
+                    print(f"    action[1] (linear y): {constrained_action[1]:.3f}")
+                    print(f"    action[2] (linear z): {constrained_action[2]:.3f}")
+                    print(f"    action[3] (angular yaw): {constrained_action[3]:.3f}")
+                else:
+                    print(f"  Stage 1 - Only linear z disabled:")
+                    print(f"    action[2] (linear z): {constrained_action[2]:.3f}")
                 print(f"  Left hand increment: x={left_increment[0]:.3f}, y={left_increment[1]:.3f}, z={left_increment[2]:.3f}")
                 print(f"  Right hand increment: x={right_increment[0]:.3f}, y={right_increment[1]:.3f}, z={right_increment[2]:.3f}")
         
