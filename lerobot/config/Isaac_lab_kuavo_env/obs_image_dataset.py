@@ -217,7 +217,7 @@ def format_stats_for_config(stats_dict):
 
 if __name__ == "__main__":
     # 使用示例
-    repo_id = "KANGKKANG/rl_kuavo_726_1015_increase_obs_32"
+    repo_id = "KANGKKANG/rl_kuavo_726_1215_increase_obs_32"
     
     # 方法1：使用预计算的统计信息
     print("方法1：使用预计算的统计信息")
