@@ -139,3 +139,18 @@ SELECT
     MAX("observation.state"[21]) AS max_dim_21
 FROM train
 ```
+
+### Kuavo_env RLPD
+```bash
+~/kuavo-ros-control
+git:KangKK/fix/merge_kmpc_for_rlpd 
+实物nmpc全身和kmpc运动学：
+
+roslaunch humanoid_controllers load_kuavo_isaac_lab.launch joystick_type:=bt2pro with_mm_ik:=false only_half_up_body:=true
+
+roslaunch motion_capture_ik kinematic_mpc_vr_incremental.launch ip_address:=10.10.20.198 visualize:=1 enable_head_control:=false if_use_vr_meta_for_hil_data:=false
+
+python3 lerobot/scripts/rl/actor.py --config_path config/Isaac_lab_kuavo_env/train/only_on_line_learning/train_gym_hil_env_meta_obs_32_no_vision.json
+
+python3 lerobot/scripts/rl/learner.py --config_path config/Isaac_lab_kuavo_env/train/only_on_line_learning/train_gym_hil_env_meta_obs_32_no_vision.json
+```
