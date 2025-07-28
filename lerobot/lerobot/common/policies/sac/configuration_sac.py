@@ -127,6 +127,8 @@ class SACConfig(PreTrainedConfig):
     vision_encoder_name: str | None = None
     # Whether to freeze the vision encoder during training
     freeze_vision_encoder: bool = True
+    # Whether to disable vision features entirely (useful for debugging or ablation studies)
+    disable_vision_features: bool = False
     # Hidden dimension size for the image encoder
     image_encoder_hidden_dim: int = 32
     # Whether to use a shared encoder for actor and critic
@@ -221,11 +223,21 @@ class SACConfig(PreTrainedConfig):
         has_image = any(is_image_feature(key) for key in self.input_features)
         """ 检查config当中是否有observation.state特征键 | 如果没有则报错 """
         has_state = OBS_STATE in self.input_features
-
-        if not (has_state or has_image):
-            raise ValueError(
-                "You must provide either 'observation.state' or an image observation (key starting with 'observation.image') in the input features"
-            )
+        
+        # If vision features are explicitly disabled, we only require state features
+        if getattr(self, 'disable_vision_features', False):
+            if not has_state:
+                raise ValueError(
+                    "When vision features are disabled (disable_vision_features=True), "
+                    "you must provide 'observation.state' in the input features"
+                )
+        else:
+            # Normal validation: require either state or image
+            if not (has_state or has_image):
+                raise ValueError(
+                    "You must provide either 'observation.state' or an image observation "
+                    "(key starting with 'observation.image') in the input features"
+                )
 
         """ 检查config当中是否有action特征键 | 如果没有则报错 """
         if "action" not in self.output_features:

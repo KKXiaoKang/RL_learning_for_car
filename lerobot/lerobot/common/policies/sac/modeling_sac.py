@@ -680,6 +680,15 @@ class SACObservationEncoder(nn.Module):
             rospy.logwarn(f"Error in feature visualization: {e}")
 
     def _init_image_layers(self) -> None:
+        # If the config explicitly disables vision features, skip image processing entirely
+        if getattr(self.config, 'disable_vision_features', False):
+            self.has_images = False
+            self.image_keys = []
+            self.image_encoder = None
+            self.spatial_embeddings = nn.ModuleDict()
+            self.post_encoders = nn.ModuleDict()
+            return
+
         # If the config clearly indicates no vision, just exit.
         # This is a stronger check that relies on explicit config values.
         if self.config.vision_encoder_name is None and self.config.image_encoder_hidden_dim == 0:
@@ -804,12 +813,16 @@ class SACObservationEncoder(nn.Module):
         Args:
             obs: Dictionary of observation tensors containing image keys
             normalize: Whether to normalize observations before encoding
-                      Set to True when calling directly from outside the encoder's forward method
-                      Set to False when calling from within forward() where inputs are already normalized
+                  Set to True when calling directly from outside the encoder's forward method
+                  Set to False when calling from within forward() where inputs are already normalized
 
         Returns:
             Dictionary mapping image keys to their corresponding encoded features
         """
+        # Early return if vision features are disabled
+        if not self.has_images or len(self.image_keys) == 0 or self.image_encoder is None:
+            return {}
+        
         if normalize:
             obs = self.input_normalization(obs) # 归一化图像
         batched = torch.cat([obs[k] for k in self.image_keys], dim=0) # 🔥 关键步骤：只提取图像键对应的数据, 同时拼接在一起
