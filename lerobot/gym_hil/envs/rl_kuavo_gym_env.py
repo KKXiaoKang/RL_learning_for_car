@@ -1219,13 +1219,13 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             info["dist_torso_to_box"] = dist_torso_to_box
             
             # Default joint reward (used in both stages)
-            # Use specific default joint angles: Left(20,0,0,-50,0,0,0), Right(20,0,0,-50,0,0,0) degrees
-            default_joint_angles_deg = np.array([
-                20, 0, 0, -50, 0, 0, 0,  # Left arm
-                20, 0, 0, -50, 0, 0, 0   # Right arm
+            # Use specific default joint angles in radians
+            default_joint_angles_rad = np.array([
+                # Left arm (7 joints)
+                -0.16152124106884003, 0.015288513153791428, -0.21087729930877686, -1.3677302598953247, -0.009610041975975037, 0.16676270961761475, -0.14105713367462158, 
+                # Right arm (7 joints)
+                -0.16032356023788452, -0.015272354707121849, 0.21103379130363464, -1.3697106838226318, 0.010835006833076477, -0.16762582957744598, -0.1407204419374466, 
             ])
-            # Convert to radians
-            default_joint_angles_rad = np.deg2rad(default_joint_angles_deg)
             
             # Calculate deviation from default joint positions
             joint_deviation = np.abs(arm_joints - default_joint_angles_rad)
@@ -1495,12 +1495,12 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
                 arm_joints = agent_state[6:20]   # 14 joint angles
             
             # Default joint angles: Left(20,0,0,-50,0,0,0), Right(20,0,0,-50,0,0,0) degrees
-            default_joint_angles_deg = np.array([
-                20, 0, 0, -50, 0, 0, 0,  # Left arm
-                20, 0, 0, -50, 0, 0, 0   # Right arm
+            default_joint_angles_rad = np.array([
+                # Left arm (7 joints)
+                -0.16152124106884003, 0.015288513153791428, -0.21087729930877686, -1.3677302598953247, -0.009610041975975037, 0.16676270961761475, -0.14105713367462158, 
+                # Right arm (7 joints)
+                -0.16032356023788452, -0.015272354707121849, 0.21103379130363464, -1.3697106838226318, 0.010835006833076477, -0.16762582957744598, -0.1407204419374466, 
             ])
-            # Convert to radians
-            default_joint_angles_rad = np.deg2rad(default_joint_angles_deg)
             
             # Calculate deviation from default joint positions
             joint_deviation = np.abs(arm_joints - default_joint_angles_rad)
