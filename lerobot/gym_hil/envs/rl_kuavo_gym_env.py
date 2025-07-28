@@ -24,6 +24,10 @@ from collections import deque
 
 TEST_DEMO_ONLY_DEFAULT_JOINT_REWARD = True
 
+# 增加DEMO模式的动作尺度常量
+DEMO_MAX_INCREMENT_PER_STEP = 0.08  # DEMO模式下每步最大8cm增量
+DEMO_MAX_INCREMENT_RANGE = 0.8     # DEMO模式下最大累积增量范围80cm
+
 # Demo mode target end-effector positions
 DEMO_TARGET_LEFT_POS = np.array([0.4678026345146559, 0.2004180715613648, 0.15417275957965042])
 DEMO_TARGET_LEFT_QUAT = np.array([0.0, -0.70711, 0.0, 0.70711])
@@ -818,8 +822,14 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             tuple: 处理后的 (left_increment, right_increment)
         """
         # 1. 限制单步增量的最大变化量（确保速度平滑性）
-        left_increment = np.clip(left_increment, -self.MAX_INCREMENT_PER_STEP, self.MAX_INCREMENT_PER_STEP)
-        right_increment = np.clip(right_increment, -self.MAX_INCREMENT_PER_STEP, self.MAX_INCREMENT_PER_STEP)
+        global TEST_DEMO_ONLY_DEFAULT_JOINT_REWARD
+        if TEST_DEMO_ONLY_DEFAULT_JOINT_REWARD:
+            max_step_increment = DEMO_MAX_INCREMENT_PER_STEP
+        else:
+            max_step_increment = self.MAX_INCREMENT_PER_STEP
+        
+        left_increment = np.clip(left_increment, -max_step_increment, max_step_increment)
+        right_increment = np.clip(right_increment, -max_step_increment, max_step_increment)
         
         # 2. 应用平滑处理（如果不是第一次动作）
         if not self.is_first_action:
@@ -838,12 +848,10 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         new_right_increment = self.current_right_increment + right_increment
         
         # 4. 限制累积增量的总范围（确保位置在合理范围内）
-        global TEST_DEMO_ONLY_DEFAULT_JOINT_REWARD
         if TEST_DEMO_ONLY_DEFAULT_JOINT_REWARD:
-            # DEMO 模式：使用更大的增量范围以允许更大的探索空间
-            max_range_demo = self.MAX_INCREMENT_RANGE * 4.0  # 4倍的正常范围，适应更远的目标位置
-            new_left_increment = np.clip(new_left_increment, -max_range_demo, max_range_demo)
-            new_right_increment = np.clip(new_right_increment, -max_range_demo, max_range_demo)
+            # DEMO 模式：使用专门的大增量范围
+            new_left_increment = np.clip(new_left_increment, -DEMO_MAX_INCREMENT_RANGE, DEMO_MAX_INCREMENT_RANGE)
+            new_right_increment = np.clip(new_right_increment, -DEMO_MAX_INCREMENT_RANGE, DEMO_MAX_INCREMENT_RANGE)
         else:
             # 正常模式：使用标准增量范围
             new_left_increment = np.clip(new_left_increment, -self.MAX_INCREMENT_RANGE, self.MAX_INCREMENT_RANGE)
@@ -886,27 +894,20 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             
             # 设置合理的安全范围，围绕目标位置
             # 允许充分的探索空间以学习位置控制
-            DEMO_WORKSPACE_RADIUS = 0.4  # 以目标位置为中心的工作空间半径
+            DEMO_WORKSPACE_RADIUS = 0.6  # 扩大工作空间半径到60cm
             
-            # 计算相对于目标位置的偏移
-            left_offset_from_target = left_abs_pos - DEMO_TARGET_LEFT_POS
-            right_offset_from_target = right_abs_pos - DEMO_TARGET_RIGHT_POS
+            # 计算相对于目标位置的距离（left_increment本身就是相对于目标的偏移）
+            left_distance_from_target = np.linalg.norm(left_increment)
+            right_distance_from_target = np.linalg.norm(right_increment)
             
-            # 限制相对于目标位置的最大偏移
-            left_distance_from_target = np.linalg.norm(left_offset_from_target)
-            right_distance_from_target = np.linalg.norm(right_offset_from_target)
-            
+            # 如果距离目标太远，按比例缩放增量
             if left_distance_from_target > DEMO_WORKSPACE_RADIUS:
-                # 缩放到允许的范围内
                 scale_factor = DEMO_WORKSPACE_RADIUS / left_distance_from_target
-                left_offset_from_target *= scale_factor
-                left_increment = left_offset_from_target  # 更新增量
+                left_increment = left_increment * scale_factor
                 
             if right_distance_from_target > DEMO_WORKSPACE_RADIUS:
-                # 缩放到允许的范围内
                 scale_factor = DEMO_WORKSPACE_RADIUS / right_distance_from_target
-                right_offset_from_target *= scale_factor
-                right_increment = right_offset_from_target  # 更新增量
+                right_increment = right_increment * scale_factor
             
             # 额外的基本安全约束
             # 重新计算绝对位置
@@ -1019,10 +1020,9 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
                 left_increment = ee_action[0:3]
                 right_increment = ee_action[3:6]
                 
-                # More relaxed increment limits for demo mode
-                max_increment_demo = self.MAX_INCREMENT_PER_STEP * 3  # Triple the normal limit
-                left_increment = np.clip(left_increment, -max_increment_demo, max_increment_demo)
-                right_increment = np.clip(right_increment, -max_increment_demo, max_increment_demo)
+                # Use dedicated DEMO mode increment limits (much larger)
+                left_increment = np.clip(left_increment, -DEMO_MAX_INCREMENT_PER_STEP, DEMO_MAX_INCREMENT_PER_STEP)
+                right_increment = np.clip(right_increment, -DEMO_MAX_INCREMENT_PER_STEP, DEMO_MAX_INCREMENT_PER_STEP)
                 
                 # Update the action array
                 constrained_action[vel_dim:vel_dim+3] = left_increment
@@ -1033,7 +1033,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
                     print(f"    action[2] (linear z): {constrained_action[2]:.3f}")
                     print(f"  Left hand increment: x={left_increment[0]:.3f}, y={left_increment[1]:.3f}, z={left_increment[2]:.3f}")
                     print(f"  Right hand increment: x={right_increment[0]:.3f}, y={right_increment[1]:.3f}, z={right_increment[2]:.3f}")
-                    print(f"  Max increment limit: ±{max_increment_demo:.3f}")
+                    print(f"  Max increment limit: ±{DEMO_MAX_INCREMENT_PER_STEP:.3f}")
         else:
             # ========== NORMAL MODE: STAGE-BASED CONSTRAINTS ==========
             # Get current stage to determine constraints
@@ -1527,20 +1527,31 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             right_distance = np.linalg.norm(right_eef_pos - DEMO_TARGET_RIGHT_POS)
             mean_distance = (left_distance + right_distance) / 2.0
             
-            # Dense reward for being close to target positions
-            # Use exponential decay with distance in meters
-            left_position_reward = np.exp(-5.0 * left_distance) * 2.0   # More sensitive to distance
-            right_position_reward = np.exp(-5.0 * right_distance) * 2.0
+            # 改进的奖励函数设计：对大距离也提供有意义的学习信号
+            # 使用混合奖励：线性奖励 + 指数奖励
+            
+            # 1. 线性距离奖励：对远距离提供基础学习信号
+            max_distance = 1.0  # 假设最大可能距离为1m
+            left_linear_reward = max(0, (max_distance - left_distance) / max_distance) * 1.0
+            right_linear_reward = max(0, (max_distance - right_distance) / max_distance) * 1.0
+            
+            # 2. 指数距离奖励：对近距离提供强化信号
+            left_exp_reward = np.exp(-3.0 * left_distance) * 2.0   # 降低敏感性从5.0到3.0
+            right_exp_reward = np.exp(-3.0 * right_distance) * 2.0
+            
+            # 3. 组合两种奖励
+            left_position_reward = left_linear_reward + left_exp_reward
+            right_position_reward = right_linear_reward + right_exp_reward
             total_position_reward = left_position_reward + right_position_reward
             
-            # Additional dense reward component based on individual axis accuracy
+            # 4. 轴向精度奖励：鼓励各轴精确对齐
             left_axis_deviations = np.abs(left_eef_pos - DEMO_TARGET_LEFT_POS)
             right_axis_deviations = np.abs(right_eef_pos - DEMO_TARGET_RIGHT_POS)
-            left_axis_rewards = np.exp(-10.0 * left_axis_deviations) * 0.2  # Per-axis reward
-            right_axis_rewards = np.exp(-10.0 * right_axis_deviations) * 0.2
+            left_axis_rewards = np.exp(-8.0 * left_axis_deviations) * 0.3  # 降低敏感性并增加权重
+            right_axis_rewards = np.exp(-8.0 * right_axis_deviations) * 0.3
             dense_axis_reward = np.sum(left_axis_rewards) + np.sum(right_axis_rewards)
             
-            # Combine rewards
+            # 5. 组合所有奖励
             reward = total_position_reward + dense_axis_reward
             
             # Small step penalty to encourage efficiency
@@ -1630,6 +1641,14 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             info["episode_steps"] = self.episode_step_count
             info["mode"] = "demo_eef_position_control"
             
+            # 添加详细的奖励组件信息用于调试
+            info["left_linear_reward"] = left_linear_reward
+            info["right_linear_reward"] = right_linear_reward
+            info["left_exp_reward"] = left_exp_reward
+            info["right_exp_reward"] = right_exp_reward
+            info["current_increment_left"] = np.linalg.norm(self.current_left_increment)
+            info["current_increment_right"] = np.linalg.norm(self.current_right_increment)
+            
             # # Current positions for detailed monitoring (as numpy arrays, not lists)
             # info["current_left_pos"] = left_eef_pos.copy()
             # info["current_right_pos"] = right_eef_pos.copy()
@@ -1646,8 +1665,11 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             if self.debug:
                 print(f"[DEMO MODE] Step {self.episode_step_count}: Mean distance: {mean_distance:.4f}m")
                 print(f"  Left distance: {left_distance:.4f}m, Right distance: {right_distance:.4f}m")
-                print(f"  Position rewards - Left: {left_position_reward:.3f}, Right: {right_position_reward:.3f}")
-                print(f"  Total reward: {reward:.3f}, Best distance so far: {self.best_mean_distance:.4f}m")
+                print(f"  Reward breakdown - Linear: L={left_linear_reward:.3f}, R={right_linear_reward:.3f}")
+                print(f"                    Exp: L={left_exp_reward:.3f}, R={right_exp_reward:.3f}")
+                print(f"                    Axis: {dense_axis_reward:.3f}, Total: {reward:.3f}")
+                print(f"  Best distance so far: {self.best_mean_distance:.4f}m")
+                print(f"  Current increments - Left: {np.linalg.norm(self.current_left_increment):.4f}m, Right: {np.linalg.norm(self.current_right_increment):.4f}m")
                 print(f"  Hands close - Left: {left_close}, Right: {right_close}, Both: {both_hands_close}")
                 print(f"  Terminated: {terminated}")
                 
@@ -1660,6 +1682,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
                 # Show worst deviating axis
                 all_deviations = np.concatenate([left_axis_deviations, right_axis_deviations])
                 worst_axis_idx = np.argmax(all_deviations)
+                axis_names = ['x', 'y', 'z']
                 if worst_axis_idx < 3:
                     worst_hand = "Left"
                     worst_axis = axis_names[worst_axis_idx]
@@ -1805,6 +1828,28 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
                 rospy.loginfo("reset - Demo mode: end-effector position control")
                 rospy.loginfo(f"  Target left position: {DEMO_TARGET_LEFT_POS}")
                 rospy.loginfo(f"  Target right position: {DEMO_TARGET_RIGHT_POS}")
+                
+                # 显示初始机器人位置用于诊断坐标系问题
+                if hasattr(self, 'latest_obs') and self.latest_obs is not None:
+                    agent_state = obs_stable['agent_pos']
+                    if self.wbc_observation_enabled:
+                        initial_left_pos = agent_state[0:3]
+                        initial_right_pos = agent_state[7:10]
+                    else:
+                        initial_left_pos = agent_state[23:26]
+                        initial_right_pos = agent_state[26:29]
+                    
+                    rospy.loginfo(f"  Initial left pos:  [{initial_left_pos[0]:.4f}, {initial_left_pos[1]:.4f}, {initial_left_pos[2]:.4f}]")
+                    rospy.loginfo(f"  Initial right pos: [{initial_right_pos[0]:.4f}, {initial_right_pos[1]:.4f}, {initial_right_pos[2]:.4f}]")
+                    
+                    # 计算初始偏差
+                    left_initial_error = np.linalg.norm(initial_left_pos - DEMO_TARGET_LEFT_POS)
+                    right_initial_error = np.linalg.norm(initial_right_pos - DEMO_TARGET_RIGHT_POS)
+                    rospy.loginfo(f"  Initial errors - Left: {left_initial_error:.4f}m, Right: {right_initial_error:.4f}m")
+                    
+                    if left_initial_error > 0.1 or right_initial_error > 0.1:
+                        rospy.logwarn("  WARNING: Large initial position error detected!")
+                        rospy.logwarn("  This suggests potential coordinate system mismatch or robot initialization issues.")
 
         return obs_stable, {}
 
