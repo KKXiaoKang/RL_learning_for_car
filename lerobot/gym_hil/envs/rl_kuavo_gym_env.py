@@ -25,8 +25,8 @@ from collections import deque
 TEST_DEMO_ONLY_DEFAULT_JOINT_REWARD = True
 
 # 增加DEMO模式的动作尺度常量
-DEMO_MAX_INCREMENT_PER_STEP = 0.08  # DEMO模式下每步最大8cm增量
-DEMO_MAX_INCREMENT_RANGE = 0.8     # DEMO模式下最大累积增量范围80cm
+DEMO_MAX_INCREMENT_PER_STEP = 0.02  # DEMO模式下每步最大2cm增量（精细控制）
+DEMO_MAX_INCREMENT_RANGE = 0.4     # DEMO模式下最大累积增量范围40cm
 
 # Demo mode target end-effector positions
 DEMO_TARGET_LEFT_POS = np.array([0.4678026345146559, 0.2004180715613648, 0.15417275957965042])
@@ -364,27 +364,42 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
                     arm_action = np.clip(arm_action, -1.0, 1.0)
                     action[4:4+self.arm_dim] = arm_action
                 else:
-                    # Position mode: convert to increments based on fixed reference
-                    # Note: This requires VR to send position data, not joint angles
-                    # For now, use a simple conversion - this may need adjustment based on VR data format
-                    # Convert VR data to position increments
+                    # Position mode: convert to increments based on appropriate reference positions
                     left_increment = np.zeros(3, dtype=np.float32)
                     right_increment = np.zeros(3, dtype=np.float32)
                     
-                    # This is a placeholder - actual implementation depends on VR data format
-                    # You may need to adjust this based on how VR sends position data
                     if len(self._latest_vr_arm_traj.position) >= 6:
                         # Assume VR sends [left_x, left_y, left_z, right_x, right_y, right_z]
                         vr_left_pos = np.array(self._latest_vr_arm_traj.position[0:3], dtype=np.float32)
                         vr_right_pos = np.array(self._latest_vr_arm_traj.position[3:6], dtype=np.float32)
                         
-                        # Calculate increments from fixed reference positions
-                        left_increment = vr_left_pos - self.FIXED_LEFT_POS
-                        right_increment = vr_right_pos - self.FIXED_RIGHT_POS
+                        # Choose appropriate reference positions and increment limits based on mode
+                        global TEST_DEMO_ONLY_DEFAULT_JOINT_REWARD
+                        if TEST_DEMO_ONLY_DEFAULT_JOINT_REWARD:
+                            # DEMO mode: use demo target positions and limits
+                            left_increment = vr_left_pos - DEMO_TARGET_LEFT_POS
+                            right_increment = vr_right_pos - DEMO_TARGET_RIGHT_POS
+                            # Limit increments to demo ranges
+                            left_increment = np.clip(left_increment, -DEMO_MAX_INCREMENT_RANGE, DEMO_MAX_INCREMENT_RANGE)
+                            right_increment = np.clip(right_increment, -DEMO_MAX_INCREMENT_RANGE, DEMO_MAX_INCREMENT_RANGE)
+                        else:
+                            # Normal mode: use fixed positions and normal limits
+                            left_increment = vr_left_pos - self.FIXED_LEFT_POS
+                            right_increment = vr_right_pos - self.FIXED_RIGHT_POS
+                            # Limit increments to normal ranges
+                            left_increment = np.clip(left_increment, -self.MAX_INCREMENT_RANGE, self.MAX_INCREMENT_RANGE)
+                            right_increment = np.clip(right_increment, -self.MAX_INCREMENT_RANGE, self.MAX_INCREMENT_RANGE)
                         
-                        # Limit increments to reasonable ranges
-                        left_increment = np.clip(left_increment, -self.MAX_INCREMENT_RANGE, self.MAX_INCREMENT_RANGE)
-                        right_increment = np.clip(right_increment, -self.MAX_INCREMENT_RANGE, self.MAX_INCREMENT_RANGE)
+                        # Debug output for VR increment calculation
+                        if self.debug:
+                            print(f"[VR INCREMENTAL DEBUG] VR positions - Left: {vr_left_pos}, Right: {vr_right_pos}")
+                            if TEST_DEMO_ONLY_DEFAULT_JOINT_REWARD:
+                                print(f"[VR INCREMENTAL DEBUG] Demo target positions - Left: {DEMO_TARGET_LEFT_POS}, Right: {DEMO_TARGET_RIGHT_POS}")
+                                print(f"[VR INCREMENTAL DEBUG] Demo mode increment limits: ±{DEMO_MAX_INCREMENT_RANGE}")
+                            else:
+                                print(f"[VR INCREMENTAL DEBUG] Fixed positions - Left: {self.FIXED_LEFT_POS}, Right: {self.FIXED_RIGHT_POS}")
+                                print(f"[VR INCREMENTAL DEBUG] Normal mode increment limits: ±{self.MAX_INCREMENT_RANGE}")
+                            print(f"[VR INCREMENTAL DEBUG] Calculated increments - Left: {left_increment}, Right: {right_increment}")
                     
                     action[4:7] = left_increment
                     action[7:10] = right_increment
@@ -894,7 +909,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             
             # 设置合理的安全范围，围绕目标位置
             # 允许充分的探索空间以学习位置控制
-            DEMO_WORKSPACE_RADIUS = 0.6  # 扩大工作空间半径到60cm
+            DEMO_WORKSPACE_RADIUS = 1.0  # 工作空间半径50cm（与精细控制模式匹配）
             
             # 计算相对于目标位置的距离（left_increment本身就是相对于目标的偏移）
             left_distance_from_target = np.linalg.norm(left_increment)
