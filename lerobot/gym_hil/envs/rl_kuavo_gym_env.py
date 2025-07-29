@@ -21,6 +21,7 @@ from kuavo_msgs.srv import changeTorsoCtrlMode, changeTorsoCtrlModeRequest, chan
 from enum import Enum
 from gym_hil.isaacLab_gym_env import IsaacLabGymEnv
 from collections import deque
+import time
 
 TEST_DEMO_ONLY_DEFAULT_JOINT_REWARD = True
 TEST_DEMO_USE_JOINT_CONTROL = True
@@ -81,7 +82,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
     MAX_INCREMENT_RANGE = 0.2  # ±20cm的增量范围
     MAX_INCREMENT_PER_STEP = 0.02  # 每步最大2cm的增量变化
 
-    def __init__(self, debug: bool = True, image_size=(224, 224), enable_roll_pitch_control: bool = False, 
+    def __init__(self, debug: bool = False, image_size=(224, 224), enable_roll_pitch_control: bool = False, 
                  vel_smoothing_factor: float = 0.3, arm_smoothing_factor: float = 0.4, 
                  wbc_observation_enabled: bool = True, action_dim: int = None):
         # Separate storage for headerless topics that will be initialized in callbacks.
@@ -1313,12 +1314,16 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         Implement this method to call the reset service for the Kuavo simulation.
         """
         try:
+            # call 服务
             rospy.wait_for_service('/isaac_lab_reset_scene', timeout=5.0)
             resp = self.reset_client(0) # 0 for random seed in sim | 在这里等待服务端处理完成并且返回结果
             if not resp.success:
                 raise RuntimeError(f"Failed to reset simulation: {resp.message}")
             if self.debug:
                 rospy.loginfo("Simulation reset successfully via ROS service.")
+
+            # 等待3秒 让手臂自然归位
+            time.sleep(3)
         except (rospy.ServiceException, rospy.ROSException) as e:
             raise RuntimeError(f"Service call to reset simulation failed: {str(e)}")
 
