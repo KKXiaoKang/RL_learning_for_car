@@ -667,6 +667,7 @@ def interactions_stream(
 
 
 def update_policy_parameters(policy: SACPolicy, parameters_queue: Queue, device):
+    print( " ============================== update_policy_parameters ======================================  ")
     bytes_state_dict = get_last_item_from_queue(parameters_queue, block=False)
     if bytes_state_dict is not None:
         logging.info("[ACTOR] Load new parameters from Learner.")

@@ -576,8 +576,11 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
 
         with self.obs_lock:
             try:
-                # Process image data
-                cv_image = self.bridge.imgmsg_to_cv2(image, "bgr8")
+                # # Process image data
+                # cv_image = self.bridge.imgmsg_to_cv2(image, "bgr8")
+                # 创建224x224x3的零填充图像（BGR格式）
+                cv_image = np.zeros((224, 224, 3), dtype=np.uint8)
+
                 # TODO: Resize image if necessary, for now assuming it's the correct size
                 # cv_image = cv2.resize(cv_image, self.image_size)
                 rgb_image = cv_image[:, :, ::-1].copy() # BGR to RGB
