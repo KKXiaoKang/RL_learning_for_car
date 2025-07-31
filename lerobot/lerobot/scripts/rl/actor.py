@@ -97,6 +97,7 @@ ACTOR_SHUTDOWN_TIMEOUT = 30
 # Main entry point #
 #################################################
 
+DEBUG_PRINT_FLAG = True
 
 @parser.wrap()
 def actor_cli(cfg: TrainRLServerPipelineConfig):
@@ -243,6 +244,7 @@ def act_with_policy(
     set_seed(cfg.seed) # 设置随机种子
     device = get_safe_torch_device(cfg.policy.device, log=True) # 获取设备
 
+
     """
         benchmark 会让 PyTorch 在第一次运行卷积操作时，自动测试所有可用的算法，选择最快的那个，然后缓存下来，测试结果会被缓存，后续使用相同输入尺寸时直接使用最优算法
         allow_tf32 允许在CUDA上使用TF32混合精度计算, 提高性能
@@ -345,6 +347,18 @@ def act_with_policy(
             # update_policy_parameters(policy=policy, parameters_queue=parameters_queue, device=device)
             update_policy_parameters(policy=policy.actor, parameters_queue=parameters_queue, device=device)
             
+            # 打印参数
+            if DEBUG_PRINT_FLAG:
+                print(f" ============================== actor update_policy_parameters ======================================  ")
+                print(f" policy: {policy.actor} ")
+                print(f" parameters_queue: {parameters_queue} ")
+                print(f" device: {device} ")
+                print(f" ================================================ ")
+            if DEBUG_PRINT_FLAG:
+                print(f" ============================== actor list_transition_to_send_to_learner ======================================  ")
+                print(list_transition_to_send_to_learner)
+                print(f" ================================================ ")
+                
             # NOTE:如果list_transition_to_send_to_learner列表不为空，则将列表中的转换数据推送到传输队列中
             if len(list_transition_to_send_to_learner) > 0:
                 push_transitions_to_transport_queue(
@@ -362,6 +376,14 @@ def act_with_policy(
                 intervention_rate = episode_intervention_steps / episode_total_steps # 干预率 = 干预步数 / 总步数
 
             # NOTE:Send episodic reward to the learner - 发送该回合的统计信息
+            if DEBUG_PRINT_FLAG:
+                print(f" ============================== actor interactions_queue.put ======================================  ")
+                print(f" sum_reward_episode: {sum_reward_episode} ")
+                print(f" interaction_step: {interaction_step} ")
+                print(f" episode_intervention: {episode_intervention} ")
+                print(f" intervention_rate: {intervention_rate} ")
+                print(f" stats: {stats} ")
+                print(f" ================================================ ")
             interactions_queue.put(
                 python_object_to_bytes(
                     {
@@ -405,6 +427,21 @@ def establish_learner_connection(
         attempts (int): The number of attempts to establish the connection.
     Returns:
         bool: True if the connection is established, False otherwise.
+    """
+    """
+        1. 连接建立
+        尝试与 Learner 服务建立 gRPC 连接
+        通过发送 Ready 消息来验证 Learner 是否准备就绪
+        支持重试机制，最多尝试 30 次
+
+        2. 错误处理
+        捕获 gRPC 连接错误
+        在连接失败时等待 2 秒后重试
+        记录详细的日志信息
+
+        3. 优雅关闭
+        检查 shutdown_event 信号
+        如果收到关闭信号，立即停止连接尝试
     """
     for _ in range(attempts):
         if shutdown_event.is_set():

@@ -1793,7 +1793,10 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
                 
                 # Clip reward to reasonable range
                 reward = np.clip(reward, -5.0, 40.0)
-                
+
+                # # FIXME:
+                # reward = 10.0
+
                 # Info dictionary for debugging and monitoring
                 info["left_mean_deviation_deg"] = left_mean_deviation_deg
                 info["right_mean_deviation_deg"] = right_mean_deviation_deg

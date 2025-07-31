@@ -1,6 +1,6 @@
 {
     "output_dir": null,
-    "job_name": "rl_kuavo_hil_obs32_action18_joint_control_0730_1915_only_on_line",
+    "job_name": "rl_kuavo_hil_obs32_action18_joint_control_0731_1415_zero_reward",
     "resume": false,
     "seed": 1000,
     "num_workers": 4,

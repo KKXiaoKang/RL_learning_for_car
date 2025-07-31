@@ -107,6 +107,7 @@ LOG_PREFIX = "[LEARNER]"
 # MAIN ENTRY POINTS AND CORE ALGORITHM FUNCTIONS #
 #################################################
 
+DEBUG_PRINT_FLAG = True
 
 @parser.wrap()
 def train_cli(cfg: TrainRLServerPipelineConfig):
@@ -506,6 +507,9 @@ def add_actor_information_and_train(
                 "next_observation_feature": next_observation_features,  # 下一观测特征
                 "complementary_info": batch["complementary_info"],  # 补充信息
             }
+            # 打印用于sample采样的 utd_ratio 的值
+            if DEBUG_PRINT_FLAG:
+                print(f" utd_ratio forward_batch : {forward_batch}")
 
             # 使用前向传播方法计算评论家损失
             critic_output = policy.forward(forward_batch, model="critic")
@@ -661,6 +665,11 @@ def add_actor_information_and_train(
 
         # 如果需要，将策略推送给Actor
         if time.time() - last_time_policy_pushed > policy_parameters_push_frequency:  # 如果距离上次推送的时间超过了指定频率
+            if DEBUG_PRINT_FLAG:
+                print(f" ============================== learner push_actor_policy_to_queue ======================================  ")
+                print(f" policy: {policy.actor} ")
+                print(f" parameters_queue: {parameters_queue} ")
+                print(f" ================================================ ")
             push_actor_policy_to_queue(parameters_queue=parameters_queue, policy=policy)  # 推送策略参数到队列
             last_time_policy_pushed = time.time()  # 更新上次推送时间
 
@@ -1273,6 +1282,13 @@ def process_transitions(
         # 将数据转换为transition列表
         transition_list = bytes_to_transitions(buffer=transition_list)
 
+        # DEBUG 
+        if DEBUG_PRINT_FLAG:
+            pass
+            # print(f" ============================== learner process_transitions ======================================  ")
+            # print(f" transition_list: {transition_list} ")
+            # print(f" ================================================ ")
+        
         # 遍历transition列表
         for transition in transition_list:
             transition = move_transition_to_device(transition=transition, device=device) # 将transition数据移动到cuda
@@ -1288,7 +1304,7 @@ def process_transitions(
                 continue
 
             replay_buffer.add(**transition) # 将transition数据添加到在线replay_buffer中
-
+            print(" ====== a transition has been added to replay buffer ========== ")
             # Add to offline buffer if it's an intervention
             # 如果在线policy数据当中有干预数据，则将数据添加到离线回放缓冲区当中
             if dataset_repo_id is not None and transition.get("complementary_info", {}).get(
