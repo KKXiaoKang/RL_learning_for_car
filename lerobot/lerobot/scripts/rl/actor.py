@@ -273,6 +273,7 @@ def act_with_policy(
     # Add counters for intervention rate calculation
     episode_intervention_steps = 0 # 干预步数
     episode_total_steps = 0 # 总步数
+    episode_length = 0 # 回合长度（步数）
 
     policy_timer = TimerManager("Policy inference", log=False) # 策略推理计时器
 
@@ -304,6 +305,7 @@ def act_with_policy(
         sum_reward_episode += float(reward) # 累计奖励
         # Increment total steps counter for intervention rate
         episode_total_steps += 1 # 总步数
+        episode_length += 1 # 回合长度计数
 
         # NOTE: We override the action if the intervention is True, because the action applied is the intervention action
         # 检查是否发生人类干预
@@ -391,6 +393,9 @@ def act_with_policy(
                         "Interaction step": interaction_step, # 此次episode的交互步数
                         "Episode intervention": int(episode_intervention), # 此次episode是否发生干预
                         "Intervention rate": intervention_rate, # 此次episode的干预率
+                        "Episode length": episode_length, # 回合长度
+                        "Episode terminated": done, # 回合是否正常终止（达到目标）
+                        "Episode truncated": truncated, # 回合是否被截断（超时等）
                         **stats,
                     }
                 )
@@ -401,6 +406,7 @@ def act_with_policy(
             episode_intervention = False   
             episode_intervention_steps = 0
             episode_total_steps = 0
+            episode_length = 0
             obs, info = online_env.reset()
         
         # NOTE: 频率控制 - 如果fps不为空，则进行频率控制

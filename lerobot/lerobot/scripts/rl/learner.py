@@ -684,6 +684,59 @@ def add_actor_information_and_train(
                 training_infos["offline_replay_buffer_size"] = len(offline_replay_buffer)  # 离线回放缓冲区大小
             training_infos["Optimization step"] = optimization_step  # 优化步骤
 
+            # 计算并记录单个 critic 的 Q 值
+            with torch.no_grad():
+                # 获取当前 Q 值预测（下一状态和下一动作的 Q 值）
+                next_actions, _, _ = policy.actor(next_observations, next_observation_features)
+                
+                # 如果有离散动作，需要分离连续动作部分
+                if policy.config.num_discrete_actions is not None:
+                    next_actions_continuous = next_actions[:, :-1]  # 除去最后一维（离散动作）
+                else:
+                    next_actions_continuous = next_actions
+                
+                # Target Q值 (使用下一状态和下一动作)
+                target_q_values = policy.critic_forward(
+                    observations=next_observations,
+                    actions=next_actions_continuous,
+                    use_target=True,
+                    observation_features=next_observation_features,
+                )
+                
+                # Current Q值 (使用当前状态和当前动作)
+                current_actions_continuous = actions
+                if policy.config.num_discrete_actions is not None:
+                    current_actions_continuous = actions[:, :-1]  # 除去最后一维（离散动作）
+                
+                current_q_values = policy.critic_forward(
+                    observations=observations,
+                    actions=current_actions_continuous,
+                    use_target=False,
+                    observation_features=observation_features,
+                )
+                
+                # 记录每个 Target Critic 的 Q 值
+                for i in range(target_q_values.shape[0]):  # 遍历每个 target critic
+                    target_q_mean = target_q_values[i].mean().item()  # 计算该 target critic 的平均 Q 值
+                    training_infos[f"Q_target_critic_{i+1}"] = target_q_mean
+                
+                # 记录每个 Current Critic 的 Q 值
+                for i in range(current_q_values.shape[0]):  # 遍历每个 current critic
+                    current_q_mean = current_q_values[i].mean().item()  # 计算该 current critic 的平均 Q 值
+                    training_infos[f"Q_current_critic_{i+1}"] = current_q_mean
+            
+            # 记录 TD target 值（如果可用）
+            if hasattr(policy, 'last_td_target') and policy.last_td_target is not None:
+                td_target_mean = policy.last_td_target.mean().item()  # TD target 的平均值
+                td_target_std = policy.last_td_target.std().item()   # TD target 的标准差
+                td_target_min = policy.last_td_target.min().item()   # TD target 的最小值
+                td_target_max = policy.last_td_target.max().item()   # TD target 的最大值
+                
+                training_infos["TD_target_mean"] = td_target_mean
+                training_infos["TD_target_std"] = td_target_std
+                training_infos["TD_target_min"] = td_target_min
+                training_infos["TD_target_max"] = td_target_max
+            
             # 记录训练指标
             if wandb_logger:  # 如果有WandB日志记录器
                 wandb_logger.log_dict(d=training_infos, mode="train", custom_step_key="Optimization step")  # 记录训练信息
@@ -1252,7 +1305,20 @@ def process_interaction_message(
 
     # Log if logger available
     if wandb_logger:
-        wandb_logger.log_dict(d=message, mode="train", custom_step_key="Interaction step")
+        # Create a copy of the message to add better labeling for episode termination status
+        wandb_message = message.copy()
+        
+        # Add clearer labels for episode termination status and remove original fields
+        if "Episode terminated" in wandb_message:
+            wandb_message["Episode_terminated_success"] = wandb_message.pop("Episode terminated")
+        if "Episode truncated" in wandb_message:
+            wandb_message["Episode_truncated_timeout"] = wandb_message.pop("Episode truncated")
+        
+        # Ensure episode length is properly labeled for wandb and remove original field
+        if "Episode length" in wandb_message:
+            wandb_message["Episode_length_steps"] = wandb_message.pop("Episode length")
+        
+        wandb_logger.log_dict(d=wandb_message, mode="train", custom_step_key="Interaction step")
 
     return message
 

@@ -74,6 +74,9 @@ class SACPolicy(
         self._init_actor(continuous_action_dim) # 🔥 初始化actor
         self._init_temperature() # 🔥 初始化温度
 
+        # Initialize member variable to store td_target for wandb logging
+        self.last_td_target: Tensor | None = None
+    
     def get_optim_params(self) -> dict:
         optim_params = {
             "actor": [
@@ -289,6 +292,9 @@ class SACPolicy(
                 min_q = min_q - (self.temperature * next_log_probs)
 
             td_target = rewards + (1 - done) * self.config.discount * min_q
+
+            # Store td_target for wandb logging (detach to avoid affecting gradients)
+            self.last_td_target = td_target.detach().clone()
 
         # 3- compute predicted qs
         if self.config.num_discrete_actions is not None:
