@@ -1310,9 +1310,9 @@ def process_interaction_message(
         
         # Add clearer labels for episode termination status and remove original fields
         if "Episode terminated" in wandb_message:
-            wandb_message["Episode_terminated_success"] = wandb_message.pop("Episode terminated")
+            wandb_message["Episode_terminated_success"] = int(wandb_message.pop("Episode terminated"))
         if "Episode truncated" in wandb_message:
-            wandb_message["Episode_truncated_timeout"] = wandb_message.pop("Episode truncated")
+            wandb_message["Episode_truncated_timeout"] = int(wandb_message.pop("Episode truncated"))
         
         # Ensure episode length is properly labeled for wandb and remove original field
         if "Episode length" in wandb_message:
