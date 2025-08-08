@@ -1018,7 +1018,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
                     reward = -mse_total_eef
                     
                     # 可选：添加一个scale factor让奖励范围更合理
-                    reward_scale = 100.0  # 位置误差通常比较小，需要放大
+                    reward_scale = 10.0  # 位置误差通常比较小，需要放大
                     reward *= reward_scale
                 # Test now reward
                 print(f" ===== eef target now step reward ===== {reward}")                             
