@@ -720,10 +720,19 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
                 # Set velocity commands if available
                 if has_cmd_vel:
                     vel_cmd = self.latest_cmd_vel
-                    action[0] = vel_cmd.linear.x
-                    action[1] = vel_cmd.linear.y 
-                    action[2] = vel_cmd.linear.z
-                    action[3] = vel_cmd.angular.z
+                    action_dim = self.env.action_space.shape[0]
+                    
+                    # Check if we're in TEST_DEMO_USE_ACTION_8_DIM mode (2 vel dimensions)
+                    if action_dim == 8:
+                        # Only set x and yaw for 8-dim mode: [x, yaw, left_eef(3), right_eef(3)]
+                        action[0] = vel_cmd.linear.x
+                        action[1] = vel_cmd.angular.z
+                    else:
+                        # Original 4 velocity dimensions: [x, y, z, yaw]
+                        action[0] = vel_cmd.linear.x
+                        action[1] = vel_cmd.linear.y 
+                        action[2] = vel_cmd.linear.z
+                        action[3] = vel_cmd.angular.z
                 
                 # Set arm commands based on WBC observation mode
                 if not self.wbc_observation_enabled:
@@ -737,38 +746,93 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
                         vr_left_pos = np.array(left_pose.pos_xyz)
                         vr_right_pos = np.array(right_pose.pos_xyz)
                         
-                        # Convert to increments based on fixed reference positions
-                        if (hasattr(self.env, 'unwrapped') and 
-                            hasattr(self.env.unwrapped, 'FIXED_LEFT_POS') and 
-                            hasattr(self.env.unwrapped, 'FIXED_RIGHT_POS')):
-                            # Get fixed reference positions from environment
-                            fixed_left_pos = self.env.unwrapped.FIXED_LEFT_POS
-                            fixed_right_pos = self.env.unwrapped.FIXED_RIGHT_POS
-                            max_increment_range = getattr(self.env.unwrapped, 'MAX_INCREMENT_RANGE', 0.2)
-                            
-                            # Calculate increments from fixed reference positions
-                            left_increment = vr_left_pos - fixed_left_pos
-                            right_increment = vr_right_pos - fixed_right_pos
-                            
-                            # Limit increments to reasonable ranges
-                            left_increment = np.clip(left_increment, -max_increment_range, max_increment_range)
-                            right_increment = np.clip(right_increment, -max_increment_range, max_increment_range)
-                            
-                            # Set incremental action
-                            action[4:7] = left_increment   # Left hand increment
-                            action[7:10] = right_increment # Right hand increment
-                            
-                            if self.debug:
-                                print(f"[VR INCREMENTAL DEBUG] VR positions - Left: {vr_left_pos}, Right: {vr_right_pos}")
-                                print(f"[VR INCREMENTAL DEBUG] Fixed positions - Left: {fixed_left_pos}, Right: {fixed_right_pos}")
-                                print(f"[VR INCREMENTAL DEBUG] Calculated increments - Left: {left_increment}, Right: {right_increment}")
+                        # Get arm action dimensions from environment
+                        action_dim = self.env.action_space.shape[0]
+                        
+                        # Check if we have TEST_DEMO_USE_ACTION_8_DIM mode (2 vel + 6 arm = 8 total)
+                        if action_dim == 8:
+                            # TEST_DEMO_USE_ACTION_8_DIM mode: use direct position scaling
+                            if (hasattr(self.env, 'unwrapped') and 
+                                hasattr(self.env.unwrapped, '_scale_action_to_eef_positions')):
+                                # Use the environment's scaling method to convert positions to action
+                                ee_action = np.concatenate([vr_left_pos, vr_right_pos])
+                                try:
+                                    left_pos, right_pos = self.env.unwrapped._scale_action_to_eef_positions(ee_action)
+                                    # Convert back to normalized action space [-1,1]
+                                    # This is a reverse scaling - we need to find the action that produces these positions
+                                    EEF_LIMITS = self.env.unwrapped.EEF_POS_LIMITS
+                                    left_action = np.array([
+                                        2 * (vr_left_pos[0] - EEF_LIMITS['x_min']) / (EEF_LIMITS['x_max'] - EEF_LIMITS['x_min']) - 1,
+                                        2 * (vr_left_pos[1] - EEF_LIMITS['left_y_min']) / (EEF_LIMITS['left_y_max'] - EEF_LIMITS['left_y_min']) - 1,
+                                        2 * (vr_left_pos[2] - EEF_LIMITS['z_min']) / (EEF_LIMITS['z_max'] - EEF_LIMITS['z_min']) - 1
+                                    ])
+                                    right_action = np.array([
+                                        2 * (vr_right_pos[0] - EEF_LIMITS['x_min']) / (EEF_LIMITS['x_max'] - EEF_LIMITS['x_min']) - 1,
+                                        2 * (vr_right_pos[1] - EEF_LIMITS['right_y_min']) / (EEF_LIMITS['right_y_max'] - EEF_LIMITS['right_y_min']) - 1,
+                                        2 * (vr_right_pos[2] - EEF_LIMITS['z_min']) / (EEF_LIMITS['z_max'] - EEF_LIMITS['z_min']) - 1
+                                    ])
+                                    
+                                    # Clip to valid action range
+                                    left_action = np.clip(left_action, -1.0, 1.0)
+                                    right_action = np.clip(right_action, -1.0, 1.0)
+                                    
+                                    # Assign to action array: [vel(2), left_eef(3), right_eef(3)]
+                                    action[2:5] = left_action
+                                    action[5:8] = right_action
+                                    
+                                    if self.debug:
+                                        print(f"[VR DIRECT SCALING DEBUG] VR positions - Left: {vr_left_pos}, Right: {vr_right_pos}")
+                                        print(f"[VR DIRECT SCALING DEBUG] Scaled actions - Left: {left_action}, Right: {right_action}")
+                                        
+                                except Exception as e:
+                                    print(f"Warning: Failed to scale VR positions to actions: {e}")
+                                    # Fallback to zero arm actions
+                                    action[2:8] = 0.0
+                            else:
+                                # No scaling method available, use zero arm actions
+                                action[2:8] = 0.0
                         else:
-                            # Fallback: treat VR positions as direct increments (for compatibility)
-                            # This might happen during initialization
-                            left_increment = np.clip(vr_left_pos, -0.1, 0.1)  # Small default range
-                            right_increment = np.clip(vr_right_pos, -0.1, 0.1)
-                            action[4:7] = left_increment
-                            action[7:10] = right_increment
+                            # Original incremental mode for action_dim > 8
+                            # Convert to increments based on fixed reference positions
+                            if (hasattr(self.env, 'unwrapped') and 
+                                hasattr(self.env.unwrapped, 'FIXED_LEFT_POS') and 
+                                hasattr(self.env.unwrapped, 'FIXED_RIGHT_POS')):
+                                # Get fixed reference positions from environment
+                                fixed_left_pos = self.env.unwrapped.FIXED_LEFT_POS
+                                fixed_right_pos = self.env.unwrapped.FIXED_RIGHT_POS
+                                max_increment_range = getattr(self.env.unwrapped, 'MAX_INCREMENT_RANGE', 0.2)
+                                
+                                # Calculate increments from fixed reference positions
+                                left_increment = vr_left_pos - fixed_left_pos
+                                right_increment = vr_right_pos - fixed_right_pos
+                                
+                                # Limit increments to reasonable ranges
+                                left_increment = np.clip(left_increment, -max_increment_range, max_increment_range)
+                                right_increment = np.clip(right_increment, -max_increment_range, max_increment_range)
+                                
+                                # Set incremental action - ensure we don't exceed action dimensions
+                                if action_dim >= 10:
+                                    action[4:7] = left_increment   # Left hand increment
+                                    action[7:10] = right_increment # Right hand increment
+                                elif action_dim >= 7:
+                                    action[4:7] = left_increment   # Only left hand increment
+                                
+                                if self.debug:
+                                    print(f"[VR INCREMENTAL DEBUG] VR positions - Left: {vr_left_pos}, Right: {vr_right_pos}")
+                                    print(f"[VR INCREMENTAL DEBUG] Fixed positions - Left: {fixed_left_pos}, Right: {fixed_right_pos}")
+                                    print(f"[VR INCREMENTAL DEBUG] Calculated increments - Left: {left_increment}, Right: {right_increment}")
+                            else:
+                                # Fallback: treat VR positions as direct increments (for compatibility)
+                                # This might happen during initialization
+                                left_increment = np.clip(vr_left_pos, -0.1, 0.1)  # Small default range
+                                right_increment = np.clip(vr_right_pos, -0.1, 0.1)
+                                
+                                # Set incremental action - ensure we don't exceed action dimensions
+                                if action_dim >= 10:
+                                    action[4:7] = left_increment
+                                    action[7:10] = right_increment
+                                elif action_dim >= 7:
+                                    action[4:7] = left_increment
                 
                 else:
                     # Non-WBC mode: use joint trajectory data

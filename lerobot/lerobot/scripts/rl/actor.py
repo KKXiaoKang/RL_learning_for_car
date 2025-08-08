@@ -97,7 +97,7 @@ ACTOR_SHUTDOWN_TIMEOUT = 30
 # Main entry point #
 #################################################
 
-DEBUG_PRINT_FLAG = True
+DEBUG_PRINT_FLAG = False
 
 @parser.wrap()
 def actor_cli(cfg: TrainRLServerPipelineConfig):
@@ -289,12 +289,45 @@ def act_with_policy(
             # Time policy inference and check if it meets FPS requirement
             with policy_timer:
                 action = policy.select_action(batch=obs) # 选择动作
+                
+                # 获取动作统计信息用于wandb记录
+                action_mean = None
+                action_std = None
+                try:
+                    # 获取action的分布统计信息
+                    observations_features = None
+                    if policy.shared_encoder and policy.actor.encoder.has_images:
+                        observations_features = policy.actor.encoder.get_cached_image_features(obs, normalize=True)
+                    
+                    # 调用actor的forward方法获取均值
+                    with torch.no_grad():
+                        _, _, means = policy.actor(obs, observations_features)
+                        action_mean = means.cpu().numpy().flatten()
+                        
+                        # 计算标准差（从actor网络获取）
+                        obs_enc = policy.actor.encoder(obs, cache=observations_features, detach=policy.actor.encoder_is_shared)
+                        outputs = policy.actor.network(obs_enc)
+                        if policy.actor.fixed_std is None:
+                            log_std = policy.actor.std_layer(outputs)
+                            std = torch.exp(log_std)
+                            std = torch.clamp(std, policy.actor.std_min, policy.actor.std_max)
+                            action_std = std.cpu().numpy().flatten()
+                        else:
+                            action_std = policy.actor.fixed_std.cpu().numpy().flatten()
+                except Exception as e:
+                    # 如果获取统计信息失败，记录错误但不影响正常执行
+                    logging.warning(f"Failed to get action statistics: {e}")
+                    action_mean = None
+                    action_std = None
+                    
             policy_fps = policy_timer.fps_last
 
             log_policy_frequency_issue(policy_fps=policy_fps, cfg=cfg, interaction_step=interaction_step)
 
         else: # 如果小于100步, 使用随机动作，学习前使用随机动作进行探索
             action = online_env.action_space.sample()
+            action_mean = None
+            action_std = None
 
         # truncated 表示是否提前终止，比如达到最大步数
         # done 表示是否完成，比如到达目标位置
@@ -339,6 +372,25 @@ def act_with_policy(
                 complementary_info=info,
             )
         )
+        
+        # NOTE: 发送步级别的统计信息到learner用于wandb记录
+        step_stats = {
+            "Step reward": float(reward),
+            "Global step": interaction_step,
+            "Episode step": episode_length,
+        }
+        
+        # 添加action统计信息（如果可用）
+        if action_mean is not None:
+            step_stats["Action mean"] = action_mean.tolist() if hasattr(action_mean, 'tolist') else action_mean
+        if action_std is not None:
+            step_stats["Action std"] = action_std.tolist() if hasattr(action_std, 'tolist') else action_std
+            
+        # 发送step级别的信息到interaction队列
+        interactions_queue.put(
+            python_object_to_bytes(step_stats)
+        )
+        
         # NOTE:assign obs to the next obs and continue the rollout
         obs = next_obs
 

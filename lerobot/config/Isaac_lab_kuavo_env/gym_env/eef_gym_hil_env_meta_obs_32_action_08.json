@@ -1,0 +1,50 @@
+{
+    "type": "hil",
+    "wrapper": {
+        "control_time_s": 20.0,
+        "reset_time_s": 2.0,
+        "control_mode": "meta_vr",
+        "vel_smoothing_factor": 0.2,
+        "arm_smoothing_factor": 0.2,
+        "wbc_observation_enabled": false,
+        "display_cameras": false,
+        "add_joint_velocity_to_observation": false,
+        "add_ee_pose_to_observation": false,
+        "crop_params_dict": null,
+        "resize_size": null,
+        "fixed_reset_joint_positions": null,
+        "gripper_penalty": 0.0
+    },
+    "name": "rl_kuavo_MetaVR_env",
+    "mode": null,
+    "task": "RLKuavoMetaVR-v0",
+    "device": "cuda",
+    "fps": 10,
+    "use_viewer": true,
+    "use_gamepad": true,
+    "repo_id": null,
+    "dataset_root": null,
+    "num_episodes": 2,
+    "episode": 0,
+    "pretrained_policy_name_or_path": null,
+    "push_to_hub": true,
+    "features": {
+        "observation.state": {
+            "type": "STATE",
+            "shape": [
+                32
+            ]
+        },
+        "action": {
+            "type": "ACTION",
+            "shape": [
+                8
+            ]
+        }
+    },
+    "features_map": {
+        "observation.state": "observation.state",
+        "action": "action"
+    },
+    "reward_classifier_pretrained_path": null
+}

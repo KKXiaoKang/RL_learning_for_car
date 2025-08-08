@@ -11,7 +11,7 @@
     "save_freq": 2000,
     "wandb": {
         "enable": true,
-        "project": "rl_kuavo_MetaVR_hil",
+        "project": "rl_kuavo_MetaVR_hil_real_control",
         "disable_artifact": true
     },
     "dataset": null, 

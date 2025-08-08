@@ -107,7 +107,7 @@ LOG_PREFIX = "[LEARNER]"
 # MAIN ENTRY POINTS AND CORE ALGORITHM FUNCTIONS #
 #################################################
 
-DEBUG_PRINT_FLAG = True
+DEBUG_PRINT_FLAG = False
 
 @parser.wrap()
 def train_cli(cfg: TrainRLServerPipelineConfig):
@@ -1300,25 +1300,94 @@ def process_interaction_message(
 ):
     """Process a single interaction message with consistent handling."""
     message = bytes_to_python_object(message)
-    # Shift interaction step for consistency with checkpointed state
-    message["Interaction step"] += interaction_step_shift
+    
+    # 区分不同类型的消息
+    is_episode_message = "Episodic reward" in message
+    is_step_message = "Step reward" in message
+    
+    # 根据消息类型处理step信息
+    if is_episode_message:
+        # Episode级别消息：使用Interaction step
+        message["Interaction step"] += interaction_step_shift
+        step_key = "Interaction step"
+    elif is_step_message:
+        # Step级别消息：使用Global step
+        if "Global step" in message:
+            message["Global step"] += interaction_step_shift
+            step_key = "Global step"
+        else:
+            # 兼容性处理：如果没有Global step，则添加它
+            message["Global step"] = message.get("Interaction step", 0) + interaction_step_shift
+            step_key = "Global step"
+    else:
+        # 默认处理其他类型消息
+        if "Interaction step" in message:
+            message["Interaction step"] += interaction_step_shift
+            step_key = "Interaction step"
+        else:
+            step_key = None
 
     # Log if logger available
     if wandb_logger:
         # Create a copy of the message to add better labeling for episode termination status
         wandb_message = message.copy()
         
-        # Add clearer labels for episode termination status and remove original fields
-        if "Episode terminated" in wandb_message:
-            wandb_message["Episode_terminated_success"] = int(wandb_message.pop("Episode terminated"))
-        if "Episode truncated" in wandb_message:
-            wandb_message["Episode_truncated_timeout"] = int(wandb_message.pop("Episode truncated"))
+        if is_episode_message:
+            # Episode级别消息的处理逻辑
+            # Add clearer labels for episode termination status and remove original fields
+            if "Episode terminated" in wandb_message:
+                wandb_message["Episode_terminated_success"] = int(wandb_message.pop("Episode terminated"))
+            if "Episode truncated" in wandb_message:
+                wandb_message["Episode_truncated_timeout"] = int(wandb_message.pop("Episode truncated"))
+            
+            # Ensure episode length is properly labeled for wandb and remove original field
+            if "Episode length" in wandb_message:
+                wandb_message["Episode_length_steps"] = wandb_message.pop("Episode length")
+                
+        elif is_step_message:
+            # Step级别消息的处理逻辑
+            # 处理action统计信息
+            if "Action mean" in wandb_message:
+                action_mean = wandb_message["Action mean"]
+                if isinstance(action_mean, list):
+                    # 为每个动作维度单独记录均值
+                    import numpy as np
+                    action_mean_array = np.array(action_mean)
+                    
+                    # 记录每个动作维度的均值
+                    for i, mean_val in enumerate(action_mean_array):
+                        wandb_message[f"Action_mean_joint_{i}"] = float(mean_val)
+                    
+                    # # 记录总体统计量
+                    # wandb_message["Action_mean_overall"] = float(np.mean(action_mean_array))
+                    # wandb_message["Action_mean_std"] = float(np.std(action_mean_array))
+                    # wandb_message["Action_mean_max"] = float(np.max(action_mean_array))
+                    # wandb_message["Action_mean_min"] = float(np.min(action_mean_array))
+                    del wandb_message["Action mean"]
+                    
+            if "Action std" in wandb_message:
+                action_std = wandb_message["Action std"]
+                if isinstance(action_std, list):
+                    # 为每个动作维度单独记录标准差
+                    import numpy as np
+                    action_std_array = np.array(action_std)
+                    
+                    # 记录每个动作维度的标准差
+                    for i, std_val in enumerate(action_std_array):
+                        wandb_message[f"Action_std_joint_{i}"] = float(std_val)
+                    
+                    # # 记录总体统计量
+                    # wandb_message["Action_std_overall"] = float(np.mean(action_std_array))
+                    # wandb_message["Action_std_std"] = float(np.std(action_std_array))
+                    # wandb_message["Action_std_max"] = float(np.max(action_std_array))
+                    # wandb_message["Action_std_min"] = float(np.min(action_std_array))
+                    del wandb_message["Action std"]
         
-        # Ensure episode length is properly labeled for wandb and remove original field
-        if "Episode length" in wandb_message:
-            wandb_message["Episode_length_steps"] = wandb_message.pop("Episode length")
-        
-        wandb_logger.log_dict(d=wandb_message, mode="train", custom_step_key="Interaction step")
+        # 使用适当的step key进行记录
+        if step_key:
+            wandb_logger.log_dict(d=wandb_message, mode="train", custom_step_key=step_key)
+        else:
+            wandb_logger.log_dict(d=wandb_message, mode="train")
 
     return message
 
@@ -1370,7 +1439,7 @@ def process_transitions(
                 continue
 
             replay_buffer.add(**transition) # 将transition数据添加到在线replay_buffer中
-            print(" ====== a transition has been added to replay buffer ========== ")
+            # print(" ====== a transition has been added to replay buffer ========== ")
             # Add to offline buffer if it's an intervention
             # 如果在线policy数据当中有干预数据，则将数据添加到离线回放缓冲区当中
             if dataset_repo_id is not None and transition.get("complementary_info", {}).get(

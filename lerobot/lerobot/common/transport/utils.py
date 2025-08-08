@@ -73,7 +73,7 @@ def receive_bytes_in_chunks(iterator, queue: Queue, shutdown_event: Event, log_p
 
     logging.info(f"{log_prefix} Starting receiver")
     for item in iterator:
-        print(f" {test_count} : ============ receive_bytes_in_chunks ================ ")
+        # print(f" {test_count} : ============ receive_bytes_in_chunks ================ ")
         test_count+=1
         
         logging.debug(f"{log_prefix} Received item")
