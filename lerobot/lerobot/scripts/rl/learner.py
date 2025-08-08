@@ -891,7 +891,16 @@ def save_training_checkpoint(
     """
     logging.info(f"Checkpoint policy after step {optimization_step}")
     _num_digits = max(6, len(str(online_steps)))
-    interaction_step = interaction_message["Interaction step"] if interaction_message is not None else 0
+    
+    # Handle both episode-level and step-level messages
+    interaction_step = 0
+    if interaction_message is not None:
+        # Try to get Interaction step first (episode-level message)
+        if "Interaction step" in interaction_message:
+            interaction_step = interaction_message["Interaction step"]
+        # Fall back to Global step (step-level message)
+        elif "Global step" in interaction_message:
+            interaction_step = interaction_message["Global step"]
 
     # Create checkpoint directory
     checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, online_steps, optimization_step)
