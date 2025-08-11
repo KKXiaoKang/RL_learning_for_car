@@ -22,10 +22,15 @@ from gym_hil.isaacLab_gym_env import IsaacLabGymEnv
 from collections import deque
 import time
 
-TEST_DEMO_USE_ACTION_8_DIM = True # 躯干 2 + 6pose = 8 action dim 8控制
+"""
+# 躯干 2 + 14joint = 16 action dim 16控制 | True
+# 躯干 2 + 6pose = 8 action dim 8控制 | False
+"""
+TEST_DEMO_USE_ACTION_16_DIM = False 
+USE_CMD_VEL = False
 
 IF_USE_ZERO_OBS_FLAG = False # 是否使用0观测
-IF_USE_ARM_MPC_CONTROL = True # 是否使用运动学mpc | ik作为末端控制手段
+IF_USE_ARM_MPC_CONTROL = False # 是否使用运动学mpc | ik作为末端控制手段
 LEARN_TARGET_EEF_POSE_TARGET = True # 是否使用目标末端位置作为学习目标
 
 # 增加DEMO模式的动作尺度常量
@@ -140,11 +145,12 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         self.vr_cmd_vel_lock = threading.Lock()
         self.vr_arm_traj_lock = threading.Lock()
 
-        # 添加当前增量状态跟踪
-        self.current_left_increment = np.zeros(3, dtype=np.float32)
-        self.current_right_increment = np.zeros(3, dtype=np.float32)
-        self.last_left_increment = np.zeros(3, dtype=np.float32)
-        self.last_right_increment = np.zeros(3, dtype=np.float32)
+        # 添加当前末端执行器位置状态跟踪（用于增量控制）
+        self.current_left_pos = np.array([0.3178026345146559, 0.4004180715613648, -0.019417275957965042], dtype=np.float32)
+        self.current_right_pos = np.array([0.3178026345146559, -0.4004180715613648, -0.019417275957965042], dtype=np.float32)
+        
+        # 增量控制参数
+        self.INCREMENT_SCALE = 0.01  # 将action[-1,1]缩放到±0.01m的增量范围
 
         # Call the base class constructor to set up the node and observation buffer
         super().__init__()
@@ -168,28 +174,45 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         if self.enable_roll_pitch_control:
             self.vel_dim = 6
             self.vel_action_scale = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0])  # m/s and rad/s
-        elif TEST_DEMO_USE_ACTION_8_DIM:
-            self.vel_dim = 2
-            self.vel_action_scale = np.array([1.0, 1.0])  # m/s and rad/s 控制x和yaw
         else:
             self.vel_dim = 4
             self.vel_action_scale = np.array([1.0, 1.0, 1.0, 1.0])  # m/s and rad/s x y z yaw
+        
+        if TEST_DEMO_USE_ACTION_16_DIM:
+            self.vel_dim = 2
+            self.vel_action_scale = np.array([1.0, 1.0])  # m/s and rad/s 控制x和yaw
+        else:
+            if USE_CMD_VEL:
+                self.vel_dim = 2
+                self.vel_action_scale = np.array([1.0, 1.0])  # m/s and rad/s 控制x和yaw
+            else:
+                self.vel_dim = 0
+                self.vel_action_scale = np.array([1.0, 1.0])  # m/s and rad/s 控制x和yaw
         
         """
             action_dim = vel_dim + arm_dim
         """
         # Use provided action_dim if specified, otherwise use default calculation
-        if TEST_DEMO_USE_ACTION_8_DIM:
+        if TEST_DEMO_USE_ACTION_16_DIM:
             # vel_dim 2 + arm angle 7 + 7 
             self.arm_dim = 14
             self.action_dim = self.vel_dim + self.arm_dim  # 2 + 7 + 7 = 16
-        elif self.wbc_observation_enabled:
-            self.arm_dim = 14 # 关节 joint space
-            self.action_dim = self.vel_dim + self.arm_dim # 4 + 14 = 18
         else:
-            # Default behavior: 14 for arm joints
-            self.arm_dim = 6 # 末端 eef position
-            self.action_dim = self.vel_dim + self.arm_dim # 4 + 6 = 10
+            # vel_dim 2 + eef pose 3 + 3
+            if USE_CMD_VEL:
+                self.arm_dim = 6
+                self.action_dim = self.vel_dim + self.arm_dim # vel_dim 2 + eef pose 3 + 3 = 8
+            else:
+                self.arm_dim = 6
+                self.action_dim = self.arm_dim # ef pose 3 + 3 = 6
+        
+        # elif self.wbc_observation_enabled:
+        #     self.arm_dim = 14 # 关节 joint space
+        #     self.action_dim = self.vel_dim + self.arm_dim # 4 + 14 = 18
+        # else:
+        #     # Default behavior: 14 for arm joints
+        #     self.arm_dim = 6 # 末端 eef position
+        #     self.action_dim = self.vel_dim + self.arm_dim # 4 + 6 = 10
 
         agent_box = spaces.Box(-np.inf, np.inf, (agent_dim,), dtype=np.float32)
         env_box = spaces.Box(-np.inf, np.inf, (env_state_dim,), dtype=np.float32)
@@ -446,7 +469,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             
             # Process arm trajectory data if available - Convert to increments
             if self._latest_vr_arm_traj is not None and len(self._latest_vr_arm_traj.position) >= self.arm_dim:
-                if TEST_DEMO_USE_ACTION_8_DIM:
+                if TEST_DEMO_USE_ACTION_16_DIM:
                     # Joint control mode: convert joint angles directly
                     arm_positions_deg = np.array(self._latest_vr_arm_traj.position[:self.arm_dim], dtype=np.float32)
                     arm_positions_rad = np.deg2rad(arm_positions_deg)
@@ -742,13 +765,16 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         Args:
             action: The action array to send
         """
-        global TEST_DEMO_USE_ACTION_8_DIM
+        global TEST_DEMO_USE_ACTION_16_DIM
         if not self._should_publish_action:
             # During VR intervention, don't publish actions - VR system handles control
             return
         
         # De-normalize and publish cmd_vel
-        if TEST_DEMO_USE_ACTION_8_DIM:
+        if TEST_DEMO_USE_ACTION_16_DIM:
+            """
+                2 + 7 + 7 = 16
+            """
             twist_cmd = Twist()
             vel_action = action[:self.vel_dim] * self.vel_action_scale
             twist_cmd.linear.x = vel_action[0]
@@ -766,27 +792,63 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             print(" ================ send_action | ee_action: ", ee_action)
             # vel pub
             self.cmd_vel_pub.publish(twist_cmd) 
-            # eef pub
-            # self._publish_action_based_arm_poses(ee_action)
+            # joint pub
             self._publish_joint_control_arm_poses(ee_action)
+        else:
+            """
+                2 + 3 + 3 = 8 (增量控制模式)
+                action[0:2]: 底盘速度控制 (x, yaw)
+                action[2:5]: 左手位置增量 (x, y, z) - 每步±0.01m
+                action[5:8]: 右手位置增量 (x, y, z) - 每步±0.01m
+            """
+            if USE_CMD_VEL:
+                twist_cmd = Twist()
+                vel_action = action[:self.vel_dim] * self.vel_action_scale
+                twist_cmd.linear.x = vel_action[0]
+                twist_cmd.linear.y = 0.0 
+                twist_cmd.linear.z = 0.0 
+                twist_cmd.angular.x = 0.0
+                twist_cmd.angular.y = 0.0
+                twist_cmd.angular.z = vel_action[1]
+                ee_action = action[self.vel_dim:]
+                print(" ============================================================ ")
+                print(" ==================== vel eef step begin ============================")
+                print( " ==============  send_action | action: ", action)
+                print(" ================ send_action | len action: ", len(action))
+                print(" ================ send_action | vel_action: ", vel_action)
+                print(" ================ send_action | ee_action (increments): ", ee_action)
+                # vel pub
+                self.cmd_vel_pub.publish(twist_cmd) 
+                # eef pub (增量控制)
+                self._publish_action_based_arm_poses(ee_action)
+            else:
+                ee_action = action
+                print(" ============================================================ ")
+                print(" ==================== only eef step begin ============================")
+                print( " ==============  send_action | action: ", action)
+                print(" ================ send_action | len action: ", len(action))
+                print(" ================ send_action | ee_action (increments): ", ee_action)
+                # eef pub (增量控制)
+                self._publish_action_based_arm_poses(ee_action)
 
     def _publish_fixed_arm_poses(self):
         """
         Publish fixed arm poses for the approach stage.
+        Also updates the current position state for incremental control.
         """
         if IF_USE_ARM_MPC_CONTROL:
             self.change_mobile_ctrl_mode(IncrementalMpcCtrlMode.ArmOnly.value)
             print( "=============== change_mobile_ctrl_mode to ArmOnly ================")
-        # Fixed poses for approach stage
-        # DEMO_TARGET_LEFT_POS = np.array([0.4678026345146559, 0.2004180715613648, 0.15417275957965042])
-        # DEMO_TARGET_LEFT_QUAT = np.array([0.0, -0.70711, 0.0, 0.70711])
-        # DEMO_TARGET_RIGHT_POS = np.array([0.4678026345146559, -0.2004180715613648, 0.15417275957965042])
-        # DEMO_TARGET_RIGHT_QUAT = np.array([0.0, -0.70711, 0.0, 0.70711])
         
+        # 使用初始位置作为固定姿态
         left_pos = np.array([0.3178026345146559, 0.4004180715613648, -0.019417275957965042])
         left_quat = np.array([0.0, -0.70711, 0.0, 0.70711])
         right_pos = np.array([0.3178026345146559, -0.4004180715613648, -0.019417275957965042])
         right_quat = np.array([0.0, -0.70711, 0.0, 0.70711])
+        
+        # 更新当前位置状态以匹配发布的位置
+        self.current_left_pos = left_pos.copy()
+        self.current_right_pos = right_pos.copy()
         
         left_elbow_pos = np.zeros(3)
         right_elbow_pos = np.zeros(3)
@@ -810,11 +872,17 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         msg.ik_param = ikSolveParam()
         msg.frame = 3  # VR Frame
         self.ee_pose_pub.publish(msg)
+        
+        if self.debug:
+            print(f"[FIXED POSES] Set initial positions - Left: {left_pos}, Right: {right_pos}")
 
     def _publish_action_based_arm_poses(self, ee_action: np.ndarray):
         """
-        Publish arm poses based on the action input.
-        Now uses direct position scaling to specified ranges instead of incremental control.
+        Publish arm poses based on the action input using incremental control.
+        
+        Action mapping:
+        - action[0:3]: left hand x,y,z position increments (scaled from [-1,1] to ±0.01m)
+        - action[3:6]: right hand x,y,z position increments (scaled from [-1,1] to ±0.01m)
         
         Args:
             ee_action: The arm portion of the action array (normalized [-1,1])
@@ -823,8 +891,24 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             self.change_mobile_ctrl_mode(IncrementalMpcCtrlMode.ArmOnly.value)
             print( "=============== change_mobile_ctrl_mode to ArmOnly ================")
         
-        # 使用新的scaling方法将action直接转换为绝对位置
-        left_pos, right_pos = self._scale_action_to_eef_positions(ee_action)
+        # 确保action长度足够
+        if len(ee_action) < 6:
+            rospy.logwarn(f"ee_action length {len(ee_action)} < 6, padding with zeros")
+            padded_action = np.zeros(6)
+            padded_action[:len(ee_action)] = ee_action
+            ee_action = padded_action
+        
+        # 提取左右手的增量action
+        left_increment_action = ee_action[0:3]  # [x, y, z] 增量
+        right_increment_action = ee_action[3:6]  # [x, y, z] 增量
+        
+        # 将action[-1,1]缩放到±0.01m的增量范围
+        left_increment = left_increment_action * self.INCREMENT_SCALE
+        right_increment = right_increment_action * self.INCREMENT_SCALE
+        
+        # 更新当前位置（基于增量）
+        self.current_left_pos += left_increment
+        self.current_right_pos += right_increment
         
         # 保持固定的姿态
         left_quat = self.FIXED_LEFT_QUAT.copy()
@@ -833,11 +917,11 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         right_elbow_pos = np.zeros(3)
 
         msg = twoArmHandPoseCmd()
-        msg.hand_poses.left_pose.pos_xyz = left_pos.tolist()
+        msg.hand_poses.left_pose.pos_xyz = self.current_left_pos.tolist()
         msg.hand_poses.left_pose.quat_xyzw = left_quat.tolist()
         msg.hand_poses.left_pose.elbow_pos_xyz = left_elbow_pos.tolist()
 
-        msg.hand_poses.right_pose.pos_xyz = right_pos.tolist()
+        msg.hand_poses.right_pose.pos_xyz = self.current_right_pos.tolist()
         msg.hand_poses.right_pose.quat_xyzw = right_quat.tolist()
         msg.hand_poses.right_pose.elbow_pos_xyz = right_elbow_pos.tolist()
         
@@ -847,6 +931,10 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         msg.ik_param = ikSolveParam()
         msg.frame = 3  # keep current frame3 | 3 为vr系
         self.ee_pose_pub.publish(msg)
+        
+        if self.debug:
+            print(f"[INCREMENT CONTROL] Left increment: {left_increment}, New pos: {self.current_left_pos}")
+            print(f"[INCREMENT CONTROL] Right increment: {right_increment}, New pos: {self.current_right_pos}")
 
     def _publish_joint_control_arm_poses(self, joint_action: np.ndarray):
         """
@@ -897,8 +985,10 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             # 等待3秒 让手臂自然归位
             time.sleep(3)
 
-            # 调用一下去到默认的fixed pose
-            # self._publish_fixed_arm_poses()
+            # 使用eef pose控制时每次回到固定位置
+            if not TEST_DEMO_USE_ACTION_16_DIM:
+                self._publish_fixed_arm_poses()
+
             time.sleep(1)
             
         except (rospy.ServiceException, rospy.ROSException) as e:
@@ -918,7 +1008,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         agent_state = obs['agent_pos']
         env_state = obs['environment_state']
         
-        global TEST_DEMO_USE_ACTION_8_DIM
+        global TEST_DEMO_USE_ACTION_16_DIM
         global LEARN_TARGET_EEF_POSE_TARGET
         
         global DEMO_TARGET_LEFT_POS
@@ -926,60 +1016,62 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         
         if not LEARN_TARGET_EEF_POSE_TARGET:
             """
-                学习控制eef pose | 使用关节角度作为学习目标
+                学习控制eef pose or joint | 使用关节角度作为学习目标
             """
-            if TEST_DEMO_USE_ACTION_8_DIM:
-                # ========== JOINT CONTROL MODE ==========
-                if self.episode_step_count >= 200:
-                    # Timeout - terminate but no success
-                    terminated = True
-                    info["success"] = False
-                else:
-                    terminated = False
-                    info["success"] = False
+            # ========== JOINT CONTROL MODE ==========
+            if self.episode_step_count >= 200:
+                # Timeout - terminate but no success
+                terminated = True
+                info["success"] = False
+            else:
+                terminated = False
+                info["success"] = False
+            
+            # FIXME:=========== 重新设计的reward - 基于目标关节角度 ====================
+            reward = 0.0
+            
+            current_joint_angles = agent_state[6:20]  # arm_data位置
+            
+            # 目标关节角度 (左手7个 + 右手7个 = 14个)
+            target_joint_angles = DEMO_TARGET_ALL_JOINT_ANGLES
+            
+            # 计算关节角度差异的MSE
+            joint_angle_diff = current_joint_angles - target_joint_angles
+            mse_joint_angles = np.mean(joint_angle_diff ** 2) # reward = -np.mean((action - target_action) ** 2)
+            
+            # 选择奖励函数类型 (可以切换不同的实现)
+            reward_type = "MSE_joint_angles"  # 新的基于关节角度的MSE奖励
+            
+            if reward_type == "MSE_joint_angles":
+                # 基于关节角度MSE的奖励函数
+                # 使用负的MSE，让agent最小化与目标的差异
+                reward = -mse_joint_angles
                 
-                # FIXME:=========== 重新设计的reward - 基于目标关节角度 ====================
-                reward = 0.0
+                # 可选：添加一个scale factor让奖励范围更合理
+                reward_scale = 1.0  # 可以调整这个值
+                reward *= reward_scale
                 
-                current_joint_angles = agent_state[6:20]  # arm_data位置
-                
-                # 目标关节角度 (左手7个 + 右手7个 = 14个)
-                target_joint_angles = DEMO_TARGET_ALL_JOINT_ANGLES
-                
-                # 计算关节角度差异的MSE
-                joint_angle_diff = current_joint_angles - target_joint_angles
-                mse_joint_angles = np.mean(joint_angle_diff ** 2) # reward = -np.mean((action - target_action) ** 2)
-                
-                # 选择奖励函数类型 (可以切换不同的实现)
-                reward_type = "MSE_joint_angles"  # 新的基于关节角度的MSE奖励
-                
-                if reward_type == "MSE_joint_angles":
-                    # 基于关节角度MSE的奖励函数
-                    # 使用负的MSE，让agent最小化与目标的差异
-                    reward = -mse_joint_angles
-                    
-                    # 可选：添加一个scale factor让奖励范围更合理
-                    reward_scale = 1.0  # 可以调整这个值
-                    reward *= reward_scale
-                    
-                    if self.debug and self.episode_step_count % 10 == 0:  # 每10步打印一次
-                        print(f"[REWARD DEBUG] MSE joint angles: {mse_joint_angles:.6f}, Reward: {reward:.6f}")
-                        print(f"[REWARD DEBUG] Max joint diff: {np.max(np.abs(joint_angle_diff)):.4f} rad ({np.rad2deg(np.max(np.abs(joint_angle_diff))):.2f} deg)")
-                elif reward_type == "original":
-                    # 原始的指数衰减函数 (保留作为备选)
-                    target_action = np.ones_like(self.last_action) * 0.0
-                    action_distance = np.linalg.norm(action - target_action)
-                    reward = np.exp(-action_distance)
-                elif reward_type == "shaped":
-                    # 更平缓的奖励函数，提供更好的梯度信号
-                    target_action = np.ones_like(self.last_action) * 0.0
-                    action_distance = np.linalg.norm(action - target_action)
-                    reward = 1.0 / (1.0 + action_distance)
+                if self.debug and self.episode_step_count % 10 == 0:  # 每10步打印一次
+                    print(f"[REWARD DEBUG] MSE joint angles: {mse_joint_angles:.6f}, Reward: {reward:.6f}")
+                    print(f"[REWARD DEBUG] Max joint diff: {np.max(np.abs(joint_angle_diff)):.4f} rad ({np.rad2deg(np.max(np.abs(joint_angle_diff))):.2f} deg)")
+            elif reward_type == "original":
+                # 原始的指数衰减函数 (保留作为备选)
+                target_action = np.ones_like(self.last_action) * 0.0
+                action_distance = np.linalg.norm(action - target_action)
+                reward = np.exp(-action_distance)
+            elif reward_type == "shaped":
+                # 更平缓的奖励函数，提供更好的梯度信号
+                target_action = np.ones_like(self.last_action) * 0.0
+                action_distance = np.linalg.norm(action - target_action)
+                reward = 1.0 / (1.0 + action_distance)
         else:
             """
-                学习控制eef pose | 使用目标eef pose作为学习目标
+                学习控制eef pose or joint | 使用目标eef pose作为学习目标
             """
-            if TEST_DEMO_USE_ACTION_8_DIM:
+            reward_type = "MSE" # MSE shaped
+
+            if reward_type == "MSE":
+                print(" === use MSE reward function === ")
                 # ========== EEF POSITION CONTROL MODE ==========
                 if self.episode_step_count >= 200:
                     # Timeout - terminate but no success
@@ -998,6 +1090,9 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
                 target_left_eef_pos = DEMO_TARGET_LEFT_POS
                 target_right_eef_pos = DEMO_TARGET_RIGHT_POS
                 
+                print(f" ==== current_left_eef_pos : {current_left_eef_pos}")
+                print(f" ==== current_right_eef_pos : {current_right_eef_pos}")
+
                 # 计算左右手位置差异的MSE
                 left_eef_diff = current_left_eef_pos - target_left_eef_pos
                 right_eef_diff = current_right_eef_pos - target_right_eef_pos
@@ -1020,8 +1115,52 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
                     # 可选：添加一个scale factor让奖励范围更合理
                     reward_scale = 10.0  # 位置误差通常比较小，需要放大
                     reward *= reward_scale
-                # Test now reward
-                print(f" ===== eef target now step reward ===== {reward}")                             
+            elif reward_type == "shaped":
+                # ========== EEF POSITION CONTROL MODE ==========
+                if self.episode_step_count >= 200:
+                    # Timeout - terminate but no success
+                    terminated = True
+                    info["success"] = False
+                else:
+                    terminated = False
+                    info["success"] = False
+                # log print
+                print(" ==== use shaped reward function === ")
+
+                # =========== SAC-Friendly Reward Design for EEF Position Control ====================
+                reward = 0.0
+
+                # 可调参数 | 改为5.0 | 1.0
+                DIST_SCALE = 5.0        # 距离缩放（越大越宽容，越小越苛刻）
+                MAX_REWARD = 1.0        # 最大奖励
+                # DIST_MIN = 0.001        # 避免除零
+
+                # 当前末端位置
+                current_left_eef_pos = agent_state[23:26]
+                current_right_eef_pos = agent_state[26:29]
+
+                # 目标末端位置（常量）
+                target_left = DEMO_TARGET_LEFT_POS
+                target_right = DEMO_TARGET_RIGHT_POS
+
+                # 欧氏距离
+                dist_left = np.linalg.norm(current_left_eef_pos - target_left)
+                dist_right = np.linalg.norm(current_right_eef_pos - target_right)
+
+                # 单手 reward
+                r_left = 1.0 / (1.0 + dist_left)
+                r_right = 1.0 / (1.0 + dist_right)
+
+                # 组合方式：平均
+                reward = (r_left + r_right) / 2.0
+
+                # # 平均距离
+                # avg_dist = (dist_left + dist_right) / 2.0
+                # # 指数衰减奖励（靠近时接近 MAX_REWARD，远离时接近 0）
+                # reward = MAX_REWARD * np.exp(-DIST_SCALE * avg_dist)
+                # reward = MAX_REWARD * np.exp(-DIST_SCALE * dist_left) * np.exp(-DIST_SCALE * dist_right)
+
+        
         return reward, terminated, info
 
 
@@ -1139,15 +1278,23 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         if hasattr(self, 'good_symmetry_achieved'):
             self.good_symmetry_achieved = False
 
-        # Reset incremental control state
-        self.current_left_increment.fill(0.0)
-        self.current_right_increment.fill(0.0)
-        self.last_left_increment.fill(0.0)
-        self.last_right_increment.fill(0.0)
+        # Reset incremental control state - 重置到初始位置
+        self.current_left_pos = np.array([0.3178026345146559, 0.4004180715613648, -0.019417275957965042], dtype=np.float32)
+        self.current_right_pos = np.array([0.3178026345146559, -0.4004180715613648, -0.019417275957965042], dtype=np.float32)
+
+        # Reset reward tracking variables for improved reward function
+        self.last_mean_distance = None
+        self.last_ee_action = None
+
+        # Reset reward tracking variables for improved reward function
+        if hasattr(self, 'last_mse_total_eef'):
+            self.last_mse_total_eef = None
+        if hasattr(self, 'last_ee_action'):
+            self.last_ee_action = None
         
         # Reset demo mode progress tracking
-        global TEST_DEMO_USE_ACTION_8_DIM
-        if TEST_DEMO_USE_ACTION_8_DIM:
+        global TEST_DEMO_USE_ACTION_16_DIM
+        if TEST_DEMO_USE_ACTION_16_DIM:
             # Reset joint control tracking for DEMO mode
             if hasattr(self, 'best_joint_deviation'):
                 self.best_joint_deviation = float('inf')
