@@ -1068,99 +1068,46 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             """
                 学习控制eef pose or joint | 使用目标eef pose作为学习目标
             """
-            reward_type = "MSE" # MSE shaped
+            print(" === use MSE reward function === ")
+            # ========== EEF POSITION CONTROL MODE ==========
+            if self.episode_step_count >= 200:
+                # Timeout - terminate but no success
+                terminated = True
+                info["success"] = False
+            else:
+                terminated = False
+                info["success"] = False
+            
+            # FIXME:=========== 重新设计的reward - 基于目标末端执行器位置 ====================
+            reward = 0.0
+            
+            current_left_eef_pos = agent_state[23:26]   # base_link坐标系左手位置
+            current_right_eef_pos = agent_state[26:29]  # base_link坐标系右手位置
+            
+            target_left_eef_pos = DEMO_TARGET_LEFT_POS
+            target_right_eef_pos = DEMO_TARGET_RIGHT_POS
+            
+            print(f" ==== current_left_eef_pos : {current_left_eef_pos}")
+            print(f" ==== current_right_eef_pos : {current_right_eef_pos}")
 
-            if reward_type == "MSE":
-                print(" === use MSE reward function === ")
-                # ========== EEF POSITION CONTROL MODE ==========
-                if self.episode_step_count >= 200:
-                    # Timeout - terminate but no success
-                    terminated = True
-                    info["success"] = False
-                else:
-                    terminated = False
-                    info["success"] = False
-                
-                # FIXME:=========== 重新设计的reward - 基于目标末端执行器位置 ====================
-                reward = 0.0
-                
-                current_left_eef_pos = agent_state[23:26]   # base_link坐标系左手位置
-                current_right_eef_pos = agent_state[26:29]  # base_link坐标系右手位置
-                
-                target_left_eef_pos = DEMO_TARGET_LEFT_POS
-                target_right_eef_pos = DEMO_TARGET_RIGHT_POS
-                
-                print(f" ==== current_left_eef_pos : {current_left_eef_pos}")
-                print(f" ==== current_right_eef_pos : {current_right_eef_pos}")
+            # 计算左右手位置差异的MSE
+            left_eef_diff = current_left_eef_pos - target_left_eef_pos
+            right_eef_diff = current_right_eef_pos - target_right_eef_pos
+            
+            # 分别计算左右手的MSE
+            mse_left_eef = np.mean(left_eef_diff ** 2)
+            mse_right_eef = np.mean(right_eef_diff ** 2)
+            
+            # 总MSE（左右手的平均）
+            mse_total_eef = (mse_left_eef + mse_right_eef)
+            
+            # 使用负的MSE，让agent最小化与目标的差异
+            reward = -mse_total_eef
+            
+            # 可选：添加一个scale factor让奖励范围更合理
+            reward_scale = 10.0  # 位置误差通常比较小，需要放大
+            reward *= reward_scale
 
-                # 计算左右手位置差异的MSE
-                left_eef_diff = current_left_eef_pos - target_left_eef_pos
-                right_eef_diff = current_right_eef_pos - target_right_eef_pos
-                
-                # 分别计算左右手的MSE
-                mse_left_eef = np.mean(left_eef_diff ** 2)
-                mse_right_eef = np.mean(right_eef_diff ** 2)
-                
-                # 总MSE（左右手的平均）
-                mse_total_eef = (mse_left_eef + mse_right_eef)
-                
-                # 选择奖励函数类型
-                reward_type = "MSE_eef_positions"  # 基于末端执行器位置的MSE奖励
-                
-                if reward_type == "MSE_eef_positions":
-                    # 基于末端执行器位置MSE的奖励函数
-                    # 使用负的MSE，让agent最小化与目标的差异
-                    reward = -mse_total_eef
-                    
-                    # 可选：添加一个scale factor让奖励范围更合理
-                    reward_scale = 10.0  # 位置误差通常比较小，需要放大
-                    reward *= reward_scale
-            elif reward_type == "shaped":
-                # ========== EEF POSITION CONTROL MODE ==========
-                if self.episode_step_count >= 200:
-                    # Timeout - terminate but no success
-                    terminated = True
-                    info["success"] = False
-                else:
-                    terminated = False
-                    info["success"] = False
-                # log print
-                print(" ==== use shaped reward function === ")
-
-                # =========== SAC-Friendly Reward Design for EEF Position Control ====================
-                reward = 0.0
-
-                # 可调参数 | 改为5.0 | 1.0
-                DIST_SCALE = 5.0        # 距离缩放（越大越宽容，越小越苛刻）
-                MAX_REWARD = 1.0        # 最大奖励
-                # DIST_MIN = 0.001        # 避免除零
-
-                # 当前末端位置
-                current_left_eef_pos = agent_state[23:26]
-                current_right_eef_pos = agent_state[26:29]
-
-                # 目标末端位置（常量）
-                target_left = DEMO_TARGET_LEFT_POS
-                target_right = DEMO_TARGET_RIGHT_POS
-
-                # 欧氏距离
-                dist_left = np.linalg.norm(current_left_eef_pos - target_left)
-                dist_right = np.linalg.norm(current_right_eef_pos - target_right)
-
-                # 单手 reward
-                r_left = 1.0 / (1.0 + dist_left)
-                r_right = 1.0 / (1.0 + dist_right)
-
-                # 组合方式：平均
-                reward = (r_left + r_right) / 2.0
-
-                # # 平均距离
-                # avg_dist = (dist_left + dist_right) / 2.0
-                # # 指数衰减奖励（靠近时接近 MAX_REWARD，远离时接近 0）
-                # reward = MAX_REWARD * np.exp(-DIST_SCALE * avg_dist)
-                # reward = MAX_REWARD * np.exp(-DIST_SCALE * dist_left) * np.exp(-DIST_SCALE * dist_right)
-
-        
         return reward, terminated, info
 
 

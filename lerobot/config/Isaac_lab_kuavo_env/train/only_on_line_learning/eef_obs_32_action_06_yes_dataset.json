@@ -1,6 +1,6 @@
 {
     "output_dir": null,
-    "job_name": "11_test_incre_eef_ik_learn_default eef pose | temperature_init 1.00 | discount 0.95 | fps05_action_10_grad_clip_norm_10_reward_mse_no_batch_size_256 | lr_1e-3 | target_entropy_null  ",
+    "job_name": "12_test_incre_eef_ik_learn_default eef pose | temperature_init 1.00 | discount 0.95 | fps05_action_10_grad_clip_norm_10_reward_mse_no_batch_size_256 | lr_1e-3 | target_entropy_null  ",
     "resume": false,
     "seed": 1000,
     "num_workers": 4,

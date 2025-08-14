@@ -19,14 +19,14 @@
     "mode": "eval",
     "task": "RLKuavoMetaVR-v0",
     "device": "cuda",
-    "fps": 10,
+    "fps": 3,
     "use_viewer": true,
     "use_gamepad": true,
     "repo_id": null,
     "dataset_root": null,
     "num_episodes": 10,
     "episode": 0,
-    "pretrained_policy_name_or_path": "/home/lab/RL/lerobot/outputs/train/2025-08-11/09-39-03_11_test_incre_eef_ik_learn_default eef pose | temperature_init 1.00 | discount 0.95 | fps05_action_10_grad_clip_norm_10_reward_mse_no_batch_size_256 | lr_1e-3 | target_entropy_null  /checkpoints/last/pretrained_model",
+    "pretrained_policy_name_or_path": "/home/lab/RL/lerobot/outputs/train/2025-08-12/09-39-01_12_test_incre_eef_ik_learn_default eef pose | temperature_init 1.00 | discount 0.95 | fps05_action_10_grad_clip_norm_10_reward_mse_no_batch_size_256 | lr_1e-3 | target_entropy_null  /checkpoints/last/pretrained_model",
     "push_to_hub": true,
     "features": {
         "observation.state": {
