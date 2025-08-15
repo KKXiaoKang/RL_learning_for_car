@@ -6,6 +6,16 @@ This tool interpolates between Cartesian key-points using Bézier curves for rob
 It ensures continuity between consecutive segments and provides visualization capabilities.
 Also publishes trajectories as ROS messages for real-time execution.
 """
+"""
+    # 仅仅发布actions
+    python3 robotic_bezier_action_record_tool.py --mode actions
+
+    # 播放轨迹 + 发布actions
+    python3 robotic_bezier_action_record_tool.py --mode play_actions --rate 10.0 --debug
+
+    # 循环播放轨迹 + Actions
+    python3 robotic_bezier_action_record_tool.py --mode play_actions --rate 10.0 --loop --debug
+"""
 
 import json
 import numpy as np
@@ -22,7 +32,7 @@ try:
     from kuavo_msgs.msg import twoArmHandPoseCmd, twoArmHandPose, ikSolveParam
     from visualization_msgs.msg import Marker, MarkerArray
     from geometry_msgs.msg import Point
-    from std_msgs.msg import ColorRGBA
+    from std_msgs.msg import ColorRGBA, Float64MultiArray
     ROS_AVAILABLE = True
 except ImportError:
     print("Warning: ROS packages not available. ROS functionality will be disabled.")
@@ -34,17 +44,19 @@ class BezierTrajectoryGenerator:
     Generates smooth Bézier trajectories for robotic end-effector motion.
     """
     
-    def __init__(self, key_points_file: str = "key_point.json", enable_ros: bool = True):
+    def __init__(self, key_points_file: str = "key_point.json", enable_ros: bool = True, debug: bool = False):
         """
         Initialize the Bézier trajectory generator.
         
         Args:
             key_points_file: Path to the JSON file containing key-points
             enable_ros: Whether to enable ROS functionality
+            debug: Whether to enable debug output
         """
         self.key_points_file = key_points_file
         self.key_points = self._load_key_points()
         self.enable_ros = enable_ros and ROS_AVAILABLE
+        self.debug = debug
         
         # ROS setup
         if self.enable_ros:
@@ -68,6 +80,18 @@ class BezierTrajectoryGenerator:
             self.right_trajectory_pub = rospy.Publisher(
                 '/kuavo_strategy/arm_key_point/right', 
                 MarkerArray, 
+                queue_size=10
+            )
+            
+            # Create publishers for scaled action differences
+            self.left_action_pub = rospy.Publisher(
+                '/sac/kuavo_eef_action_scale_left',
+                Float64MultiArray,
+                queue_size=10
+            )
+            self.right_action_pub = rospy.Publisher(
+                '/sac/kuavo_eef_action_scale_right', 
+                Float64MultiArray,
                 queue_size=10
             )
             
@@ -302,6 +326,188 @@ class BezierTrajectoryGenerator:
             self.left_trajectory_pub.publish(left_markers)
             self.right_trajectory_pub.publish(right_markers)
             print("Published trajectory visualization markers")
+    
+    def calculate_trajectory_actions(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        计算贝塞尔轨迹点之间的增量，并缩放回action空间[-1,1]。
+        
+        Returns:
+            left_actions, right_actions: 每个轨迹点对应的action数组
+        """
+        # 生成轨迹
+        left_positions, _ = self.interpolate_trajectory('left_hand')
+        right_positions, _ = self.interpolate_trajectory('right_hand')
+        
+        # 计算位置增量（相邻点之间的差值）
+        left_increments = np.diff(left_positions, axis=0)  # shape: (n-1, 3)
+        right_increments = np.diff(right_positions, axis=0)  # shape: (n-1, 3)
+        
+        # 参考rl_kuavo_gym_env.py中的缩放方法
+        # INCREMENT_SCALE = 0.01，即 action[-1,1] * 0.01 = ±0.01m的增量范围
+        INCREMENT_SCALE = 0.01
+        
+        # 将增量从米制缩放回action空间 [-1,1]
+        # increment = action * INCREMENT_SCALE -> action = increment / INCREMENT_SCALE
+        left_actions = left_increments / INCREMENT_SCALE  # shape: (n-1, 3)
+        right_actions = right_increments / INCREMENT_SCALE  # shape: (n-1, 3)
+        
+        # 限制action范围在[-1, 1]内
+        left_actions = np.clip(left_actions, -1.0, 1.0)
+        right_actions = np.clip(right_actions, -1.0, 1.0)
+        
+        return left_actions, right_actions
+    
+    def publish_trajectory_actions(self):
+        """
+        发布轨迹点之间的action到ROS话题。
+        """
+        if not self.enable_ros:
+            print("Warning: ROS is not enabled. Cannot publish trajectory actions.")
+            return
+        
+        # 计算action序列
+        left_actions, right_actions = self.calculate_trajectory_actions()
+        
+        # 发布左手action序列
+        left_msg = Float64MultiArray()
+        left_msg.data = left_actions.flatten().tolist()  # 展平为一维数组
+        self.left_action_pub.publish(left_msg)
+        
+        # 发布右手action序列
+        right_msg = Float64MultiArray()
+        right_msg.data = right_actions.flatten().tolist()  # 展平为一维数组
+        self.right_action_pub.publish(right_msg)
+        
+        print(f"Published trajectory actions:")
+        print(f"  Left actions shape: {left_actions.shape}, range: [{np.min(left_actions):.3f}, {np.max(left_actions):.3f}]")
+        print(f"  Right actions shape: {right_actions.shape}, range: [{np.min(right_actions):.3f}, {np.max(right_actions):.3f}]")
+        print(f"  Published to topics:")
+        print(f"    - /sac/kuavo_eef_action_scale_left")
+        print(f"    - /sac/kuavo_eef_action_scale_right")
+        
+        # 打印action统计信息
+        self._print_action_statistics(left_actions, right_actions)
+    
+    def _print_action_statistics(self, left_actions: np.ndarray, right_actions: np.ndarray):
+        """
+        打印action序列的详细统计信息。
+        
+        Args:
+            left_actions: 左手action序列 (n, 3)
+            right_actions: 右手action序列 (n, 3)
+        """
+        print("\n" + "="*50)
+        print("ACTION STATISTICS")
+        print("="*50)
+        
+        # 左手统计
+        print(f"Left Hand Actions:")
+        print(f"  Shape: {left_actions.shape}")
+        print(f"  X-axis: mean={np.mean(left_actions[:, 0]):.4f}, std={np.std(left_actions[:, 0]):.4f}, range=[{np.min(left_actions[:, 0]):.4f}, {np.max(left_actions[:, 0]):.4f}]")
+        print(f"  Y-axis: mean={np.mean(left_actions[:, 1]):.4f}, std={np.std(left_actions[:, 1]):.4f}, range=[{np.min(left_actions[:, 1]):.4f}, {np.max(left_actions[:, 1]):.4f}]")
+        print(f"  Z-axis: mean={np.mean(left_actions[:, 2]):.4f}, std={np.std(left_actions[:, 2]):.4f}, range=[{np.min(left_actions[:, 2]):.4f}, {np.max(left_actions[:, 2]):.4f}]")
+        
+        # 右手统计
+        print(f"Right Hand Actions:")
+        print(f"  Shape: {right_actions.shape}")
+        print(f"  X-axis: mean={np.mean(right_actions[:, 0]):.4f}, std={np.std(right_actions[:, 0]):.4f}, range=[{np.min(right_actions[:, 0]):.4f}, {np.max(right_actions[:, 0]):.4f}]")
+        print(f"  Y-axis: mean={np.mean(right_actions[:, 1]):.4f}, std={np.std(right_actions[:, 1]):.4f}, range=[{np.min(right_actions[:, 1]):.4f}, {np.max(right_actions[:, 1]):.4f}]")
+        print(f"  Z-axis: mean={np.mean(right_actions[:, 2]):.4f}, std={np.std(right_actions[:, 2]):.4f}, range=[{np.min(right_actions[:, 2]):.4f}, {np.max(right_actions[:, 2]):.4f}]")
+        
+        # 总体统计
+        all_actions = np.concatenate([left_actions, right_actions], axis=0)
+        print(f"Overall Actions:")
+        print(f"  Total steps: {len(all_actions)}")
+        print(f"  Mean magnitude: {np.mean(np.linalg.norm(all_actions, axis=1)):.4f}")
+        print(f"  Max magnitude: {np.max(np.linalg.norm(all_actions, axis=1)):.4f}")
+        print(f"  Actions in range [-1,1]: {np.all(np.abs(all_actions) <= 1.0)}")
+        
+        # 超出范围的action统计
+        out_of_range = np.abs(all_actions) > 1.0
+        if np.any(out_of_range):
+            print(f"  WARNING: {np.sum(out_of_range)} action values exceed [-1,1] range!")
+            print(f"  Max absolute value: {np.max(np.abs(all_actions)):.4f}")
+        
+        print("="*50)
+    
+    def play_trajectory_with_actions(self, playback_rate: float = 10.0, loop: bool = False):
+        """
+        播放轨迹的同时发布对应的action序列。
+        
+        Args:
+            playback_rate: 播放速率 (Hz)
+            loop: 是否循环播放
+        """
+        if not self.enable_ros:
+            print("Warning: ROS is not enabled. Cannot play trajectory with actions.")
+            return
+        
+        # 生成轨迹和actions
+        trajectory_data = self.get_trajectory_data()
+        left_positions = trajectory_data['left_hand']['positions']
+        left_orientations = trajectory_data['left_hand']['orientations']
+        right_positions = trajectory_data['right_hand']['positions']
+        right_orientations = trajectory_data['right_hand']['orientations']
+        
+        # 计算action序列
+        left_actions, right_actions = self.calculate_trajectory_actions()
+        
+        # 发布可视化
+        self.publish_trajectory_visualization()
+        
+        # 显示action统计信息
+        print(f"Calculated trajectory actions:")
+        print(f"  Left actions shape: {left_actions.shape}, range: [{np.min(left_actions):.3f}, {np.max(left_actions):.3f}]")
+        print(f"  Right actions shape: {right_actions.shape}, range: [{np.min(right_actions):.3f}, {np.max(right_actions):.3f}]")
+        
+        # 如果启用debug，显示详细统计
+        if self.debug:
+            self._print_action_statistics(left_actions, right_actions)
+        
+        rate = rospy.Rate(playback_rate)
+        
+        print(f"Starting trajectory playback with actions at {playback_rate} Hz...")
+        print(f"Total trajectory points: {len(left_positions)}")
+        print(f"Total action steps: {len(left_actions)}")
+        print("Press Ctrl+C to stop")
+        
+        try:
+            while not rospy.is_shutdown():
+                # 发布轨迹点和对应的actions
+                for i in range(len(left_positions)):
+                    if rospy.is_shutdown():
+                        break
+                    
+                    # 发布当前pose
+                    self.publish_single_pose(
+                        left_positions[i], left_orientations[i],
+                        right_positions[i], right_orientations[i]
+                    )
+                    
+                    # 发布对应的action（如果有的话）
+                    if i < len(left_actions):
+                        left_action_msg = Float64MultiArray()
+                        left_action_msg.data = left_actions[i].tolist()
+                        self.left_action_pub.publish(left_action_msg)
+                        
+                        right_action_msg = Float64MultiArray()
+                        right_action_msg.data = right_actions[i].tolist()
+                        self.right_action_pub.publish(right_action_msg)
+                        
+                        if self.debug and i % 10 == 0:  # 每10步打印一次
+                            print(f"Step {i}: Left action: {left_actions[i]}, Right action: {right_actions[i]}")
+                    
+                    rate.sleep()
+                
+                if not loop:
+                    break
+                else:
+                    print("Looping trajectory with actions...")
+        
+        except rospy.ROSInterruptException:
+            print("Trajectory playback with actions interrupted")
+        except KeyboardInterrupt:
+            print("Trajectory playback with actions stopped by user")
     
     def interpolate_trajectory(self, hand: str, num_points_per_segment: int = 50) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -659,7 +865,7 @@ def main():
     
     import argparse
     parser = argparse.ArgumentParser(description="Bézier trajectory generator for robotic end-effectors")
-    parser.add_argument('--mode', choices=['visualize', 'play', 'keyframe', 'export', 'rviz'], 
+    parser.add_argument('--mode', choices=['visualize', 'play', 'keyframe', 'export', 'rviz', 'actions', 'play_actions'], 
                        default='visualize', help='Operation mode')
     parser.add_argument('--rate', type=float, default=10.0, 
                        help='Playback rate in Hz (for play mode)')
@@ -671,12 +877,14 @@ def main():
                        help='Disable ROS functionality')
     parser.add_argument('--no-plot', action='store_true', 
                        help='Disable plot display (for visualization mode)')
+    parser.add_argument('--debug', action='store_true', 
+                       help='Enable debug output')
     
     args = parser.parse_args()
     
     try:
         # Initialize the trajectory generator
-        generator = BezierTrajectoryGenerator(enable_ros=not args.no_ros)
+        generator = BezierTrajectoryGenerator(enable_ros=not args.no_ros, debug=args.debug)
         
         if args.mode == 'visualize':
             # Generate and visualize trajectories
@@ -725,6 +933,21 @@ def main():
             print("  - /kuavo_strategy/arm_key_point/right")
             print("Add MarkerArray displays in RViz with these topics")
         
+        elif args.mode == 'actions':
+            # Calculate and publish trajectory actions
+            if not generator.enable_ros:
+                print("Error: ROS is required for action publishing")
+                return 1
+            generator.publish_trajectory_actions()
+            print("Trajectory actions calculated and published")
+        
+        elif args.mode == 'play_actions':
+            # Play trajectory with synchronized action publishing
+            if not generator.enable_ros:
+                print("Error: ROS is required for trajectory playback with actions")
+                return 1
+            generator.play_trajectory_with_actions(playback_rate=args.rate, loop=args.loop)
+        
     except Exception as e:
         print(f"Error: {e}")
         return 1
@@ -739,7 +962,7 @@ def demo_usage():
     
     try:
         # Initialize generator
-        generator = BezierTrajectoryGenerator(enable_ros=False)  # Disable ROS for demo
+        generator = BezierTrajectoryGenerator(enable_ros=False, debug=False)  # Disable ROS for demo
         
         print("1. Visualizing trajectories...")
         generator.visualize_trajectories(show_plot=False, save_plot=True)
@@ -759,6 +982,8 @@ def demo_usage():
             print("   python robotic_bezier_action_record_tool.py --mode keyframe --frame-id 1")
             print("   python robotic_bezier_action_record_tool.py --mode play --loop")
             print("   python robotic_bezier_action_record_tool.py --mode rviz")
+            print("   python robotic_bezier_action_record_tool.py --mode actions")
+            print("   python robotic_bezier_action_record_tool.py --mode play_actions --rate 10.0")
         else:
             print("\nNote: ROS packages not available. Install them to enable ROS functionality.")
             
