@@ -1,0 +1,776 @@
+#!/usr/bin/env python3
+"""
+Robotic Bézier Action Record Tool
+
+This tool interpolates between Cartesian key-points using Bézier curves for robotic end-effector trajectories.
+It ensures continuity between consecutive segments and provides visualization capabilities.
+Also publishes trajectories as ROS messages for real-time execution.
+"""
+
+import json
+import numpy as np
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+from scipy.spatial.transform import Rotation as R
+from typing import List, Tuple, Dict, Any
+import os
+import time
+
+# ROS imports
+try:
+    import rospy
+    from kuavo_msgs.msg import twoArmHandPoseCmd, twoArmHandPose, ikSolveParam
+    from visualization_msgs.msg import Marker, MarkerArray
+    from geometry_msgs.msg import Point
+    from std_msgs.msg import ColorRGBA
+    ROS_AVAILABLE = True
+except ImportError:
+    print("Warning: ROS packages not available. ROS functionality will be disabled.")
+    ROS_AVAILABLE = False
+
+
+class BezierTrajectoryGenerator:
+    """
+    Generates smooth Bézier trajectories for robotic end-effector motion.
+    """
+    
+    def __init__(self, key_points_file: str = "key_point.json", enable_ros: bool = True):
+        """
+        Initialize the Bézier trajectory generator.
+        
+        Args:
+            key_points_file: Path to the JSON file containing key-points
+            enable_ros: Whether to enable ROS functionality
+        """
+        self.key_points_file = key_points_file
+        self.key_points = self._load_key_points()
+        self.enable_ros = enable_ros and ROS_AVAILABLE
+        
+        # ROS setup
+        if self.enable_ros:
+            self._setup_ros()
+    
+    def _setup_ros(self):
+        """Setup ROS node and publishers/subscribers."""
+        try:
+            # Initialize ROS node
+            rospy.init_node("bezier_trajectory_publisher", anonymous=True)
+            
+            # Create publisher for IK commands
+            self.ik_pub = rospy.Publisher('/ik/two_arm_hand_pose_cmd', twoArmHandPoseCmd, queue_size=10)
+            
+            # Create publishers for trajectory visualization
+            self.left_trajectory_pub = rospy.Publisher(
+                '/kuavo_strategy/arm_key_point/left', 
+                MarkerArray, 
+                queue_size=10
+            )
+            self.right_trajectory_pub = rospy.Publisher(
+                '/kuavo_strategy/arm_key_point/right', 
+                MarkerArray, 
+                queue_size=10
+            )
+            
+            # Create subscriber for IK results (optional callback)
+            self.ik_result_sub = rospy.Subscriber("/ik/result", twoArmHandPose, self._ik_result_callback)
+            
+            # Wait for connections
+            time.sleep(1.0)
+            
+            print("ROS node initialized successfully")
+            
+        except Exception as e:
+            print(f"Failed to setup ROS: {e}")
+            self.enable_ros = False
+    
+    def _ik_result_callback(self, msg):
+        """Callback for IK result messages."""
+        # Optional: Handle IK result feedback
+        pass
+        
+    def _load_key_points(self) -> Dict[str, Any]:
+        """Load key-points from JSON file."""
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        file_path = os.path.join(script_dir, self.key_points_file)
+        
+        with open(file_path, 'r') as f:
+            data = json.load(f)
+        return data['key_points']
+    
+    def cubic_bezier(self, p0: np.ndarray, p1: np.ndarray, p2: np.ndarray, p3: np.ndarray, t: np.ndarray) -> np.ndarray:
+        """
+        Calculate cubic Bézier curve points.
+        
+        Cubic Bézier formula: B(t) = (1-t)³P₀ + 3(1-t)²tP₁ + 3(1-t)t²P₂ + t³P₃
+        
+        Args:
+            p0, p1, p2, p3: Control points for the Bézier curve
+            t: Parameter array from 0 to 1
+            
+        Returns:
+            Array of interpolated points
+        """
+        t = t.reshape(-1, 1)  # Make t column vector for broadcasting
+        
+        return ((1 - t) ** 3 * p0 + 
+                3 * (1 - t) ** 2 * t * p1 + 
+                3 * (1 - t) * t ** 2 * p2 + 
+                t ** 3 * p3)
+    
+    def generate_control_points(self, positions: List[np.ndarray], smoothness_factor: float = 0.3) -> List[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+        """
+        Generate control points for cubic Bézier curves ensuring C1 continuity.
+        
+        Args:
+            positions: List of key-point positions
+            smoothness_factor: Factor controlling the smoothness (0-1)
+            
+        Returns:
+            List of tuples containing (p0, p1, p2, p3) for each segment
+        """
+        if len(positions) < 2:
+            raise ValueError("At least 2 positions are required")
+        
+        segments = []
+        
+        for i in range(len(positions) - 1):
+            p0 = positions[i]
+            p3 = positions[i + 1]
+            
+            # Calculate direction vectors for smooth transitions
+            if i == 0:
+                # First segment: use forward difference
+                if len(positions) > 2:
+                    direction_out = (positions[i + 2] - positions[i]) * smoothness_factor
+                else:
+                    direction_out = (p3 - p0) * smoothness_factor
+                p1 = p0 + direction_out / 3
+            else:
+                # Use previous segment's direction for continuity
+                prev_direction = (p0 - positions[i - 1])
+                p1 = p0 + prev_direction * smoothness_factor / 3
+            
+            if i == len(positions) - 2:
+                # Last segment: use backward difference
+                if i > 0:
+                    direction_in = (positions[i + 1] - positions[i - 1]) * smoothness_factor
+                else:
+                    direction_in = (p3 - p0) * smoothness_factor
+                p2 = p3 - direction_in / 3
+            else:
+                # Use next segment's direction for continuity
+                next_direction = (positions[i + 2] - p0)
+                p2 = p3 - next_direction * smoothness_factor / 3
+            
+            segments.append((p0, p1, p2, p3))
+        
+        return segments
+    
+    def _manual_slerp(self, q1: R, q2: R, t: float) -> R:
+        """
+        Manual spherical linear interpolation for older scipy versions.
+        
+        Args:
+            q1: Starting rotation
+            q2: Ending rotation  
+            t: Interpolation parameter (0-1)
+            
+        Returns:
+            Interpolated rotation
+        """
+        # Convert to quaternions
+        quat1 = q1.as_quat()
+        quat2 = q2.as_quat()
+        
+        # Ensure shortest path (dot product should be positive)
+        dot = np.dot(quat1, quat2)
+        if dot < 0.0:
+            quat2 = -quat2
+            dot = -dot
+        
+        # If quaternions are very close, use linear interpolation
+        if dot > 0.9995:
+            result = quat1 + t * (quat2 - quat1)
+            result = result / np.linalg.norm(result)
+            return R.from_quat(result)
+        
+        # Calculate angle between quaternions
+        theta_0 = np.arccos(np.abs(dot))
+        sin_theta_0 = np.sin(theta_0)
+        theta = theta_0 * t
+        sin_theta = np.sin(theta)
+        
+        # Calculate interpolated quaternion
+        s0 = np.cos(theta) - dot * sin_theta / sin_theta_0
+        s1 = sin_theta / sin_theta_0
+        result = s0 * quat1 + s1 * quat2
+        
+        return R.from_quat(result)
+    
+    def create_trajectory_markers(self, positions: np.ndarray, hand: str) -> MarkerArray:
+        """
+        Create MarkerArray for trajectory visualization in RViz.
+        
+        Args:
+            positions: Array of 3D positions
+            hand: 'left' or 'right' for color coding
+            
+        Returns:
+            MarkerArray containing trajectory visualization markers
+        """
+        if not self.enable_ros:
+            return None
+            
+        marker_array = MarkerArray()
+        
+        # Create line strip marker for trajectory
+        trajectory_marker = Marker()
+        trajectory_marker.header.frame_id = "base_link"
+        trajectory_marker.header.stamp = rospy.Time.now()
+        trajectory_marker.ns = f"{hand}_trajectory"
+        trajectory_marker.id = 0
+        trajectory_marker.type = Marker.LINE_STRIP
+        trajectory_marker.action = Marker.ADD
+        
+        # Set marker scale
+        trajectory_marker.scale.x = 0.01  # Line width
+        
+        # Set color based on hand
+        if hand == 'left':
+            trajectory_marker.color = ColorRGBA(1.0, 0.0, 1.0, 0.8)  # Blue
+        else:
+            trajectory_marker.color = ColorRGBA(1.0, 0.0, 1.0, 0.8)  # Red
+        
+        # Add all trajectory points
+        for pos in positions:
+            point = Point()
+            point.x = pos[0]
+            point.y = pos[1]
+            point.z = pos[2]
+            trajectory_marker.points.append(point)
+        
+        marker_array.markers.append(trajectory_marker)
+        
+        # Create sphere markers for key points (every 10th point for clarity)
+        for i in range(0, len(positions), 10):
+            sphere_marker = Marker()
+            sphere_marker.header.frame_id = "base_link"
+            sphere_marker.header.stamp = rospy.Time.now()
+            sphere_marker.ns = f"{hand}_points"
+            sphere_marker.id = i // 10
+            sphere_marker.type = Marker.SPHERE
+            sphere_marker.action = Marker.ADD
+            
+            # Set position
+            sphere_marker.pose.position.x = positions[i][0]
+            sphere_marker.pose.position.y = positions[i][1]
+            sphere_marker.pose.position.z = positions[i][2]
+            sphere_marker.pose.orientation.w = 1.0
+            
+            # Set scale
+            sphere_marker.scale.x = 0.02
+            sphere_marker.scale.y = 0.02
+            sphere_marker.scale.z = 0.02
+            
+            # Set color (slightly different from trajectory)
+            if hand == 'left':
+                sphere_marker.color = ColorRGBA(0.0, 1.0, 1.0, 1.0)  # Lighter blue
+            else:
+                sphere_marker.color = ColorRGBA(0.0, 1.0, 1.0, 1.0)  # Lighter red
+            
+            marker_array.markers.append(sphere_marker)
+        
+        return marker_array
+    
+    def publish_trajectory_visualization(self):
+        """
+        Publish trajectory visualization markers to RViz.
+        """
+        if not self.enable_ros:
+            print("Warning: ROS is not enabled. Cannot publish visualization.")
+            return
+        
+        # Generate trajectories
+        left_positions, _ = self.interpolate_trajectory('left_hand')
+        right_positions, _ = self.interpolate_trajectory('right_hand')
+        
+        # Create and publish markers
+        left_markers = self.create_trajectory_markers(left_positions, 'left')
+        right_markers = self.create_trajectory_markers(right_positions, 'right')
+        
+        if left_markers and right_markers:
+            self.left_trajectory_pub.publish(left_markers)
+            self.right_trajectory_pub.publish(right_markers)
+            print("Published trajectory visualization markers")
+    
+    def interpolate_trajectory(self, hand: str, num_points_per_segment: int = 50) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Interpolate trajectory for specified hand using Bézier curves.
+        
+        Args:
+            hand: 'left_hand' or 'right_hand'
+            num_points_per_segment: Number of interpolated points per segment
+            
+        Returns:
+            Tuple of (positions, orientations) arrays
+        """
+        keyframes = self.key_points['keyframes']
+        
+        # Extract positions and quaternions
+        positions = []
+        quaternions = []
+        
+        for frame in keyframes:
+            positions.append(np.array(frame[hand]['position']))
+            quaternions.append(np.array(frame[hand]['quaternion']))
+        
+        # Generate control points for position interpolation
+        position_segments = self.generate_control_points(positions)
+        
+        # Interpolate positions using Bézier curves
+        interpolated_positions = []
+        t_values = np.linspace(0, 1, num_points_per_segment)
+        
+        for p0, p1, p2, p3 in position_segments:
+            segment_positions = self.cubic_bezier(p0, p1, p2, p3, t_values)
+            interpolated_positions.append(segment_positions)
+        
+        # Concatenate all segments (remove duplicate points at junctions)
+        all_positions = []
+        for i, segment in enumerate(interpolated_positions):
+            if i == 0:
+                all_positions.append(segment)
+            else:
+                # Skip the first point to avoid duplication
+                all_positions.append(segment[1:])
+        
+        final_positions = np.vstack(all_positions)
+        
+        # For orientations, use spherical linear interpolation (SLERP)
+        interpolated_orientations = []
+        
+        for i in range(len(quaternions) - 1):
+            q1 = R.from_quat(quaternions[i])
+            q2 = R.from_quat(quaternions[i + 1])
+            
+            # Create rotation interpolation
+            segment_rotations = []
+            for t in t_values:
+                # SLERP between quaternions - compatible with older scipy versions
+                try:
+                    # For scipy >= 1.2.0
+                    interpolated_rot = q1.slerp(q2, t)
+                except AttributeError:
+                    # For older scipy versions, use manual SLERP
+                    interpolated_rot = self._manual_slerp(q1, q2, t)
+                segment_rotations.append(interpolated_rot.as_quat())
+            
+            interpolated_orientations.append(np.array(segment_rotations))
+        
+        # Concatenate orientation segments
+        all_orientations = []
+        for i, segment in enumerate(interpolated_orientations):
+            if i == 0:
+                all_orientations.append(segment)
+            else:
+                all_orientations.append(segment[1:])
+        
+        final_orientations = np.vstack(all_orientations)
+        
+        return final_positions, final_orientations
+    
+    def visualize_trajectories(self, save_plot: bool = True, show_plot: bool = True):
+        """
+        Visualize the interpolated trajectories for both hands.
+        
+        Args:
+            save_plot: Whether to save the plot to file
+            show_plot: Whether to display the plot
+        """
+        # Generate trajectories for both hands
+        left_positions, left_orientations = self.interpolate_trajectory('left_hand')
+        right_positions, right_orientations = self.interpolate_trajectory('right_hand')
+        
+        # Extract key-point positions for visualization
+        left_keypoints = []
+        right_keypoints = []
+        
+        for frame in self.key_points['keyframes']:
+            left_keypoints.append(frame['left_hand']['position'])
+            right_keypoints.append(frame['right_hand']['position'])
+        
+        left_keypoints = np.array(left_keypoints)
+        right_keypoints = np.array(right_keypoints)
+        
+        # Create 3D plot
+        fig = plt.figure(figsize=(15, 10))
+        ax = fig.add_subplot(111, projection='3d')
+        
+        # Plot interpolated trajectories
+        ax.plot(left_positions[:, 0], left_positions[:, 1], left_positions[:, 2], 
+                'b-', linewidth=2, label='Left Hand Trajectory', alpha=0.8)
+        ax.plot(right_positions[:, 0], right_positions[:, 1], right_positions[:, 2], 
+                'r-', linewidth=2, label='Right Hand Trajectory', alpha=0.8)
+        
+        # Plot key-points
+        ax.scatter(left_keypoints[:, 0], left_keypoints[:, 1], left_keypoints[:, 2], 
+                  c='blue', s=100, marker='o', label='Left Hand Key-points', alpha=1.0)
+        ax.scatter(right_keypoints[:, 0], right_keypoints[:, 1], right_keypoints[:, 2], 
+                  c='red', s=100, marker='s', label='Right Hand Key-points', alpha=1.0)
+        
+        # Add key-point labels
+        for i, (left_kp, right_kp) in enumerate(zip(left_keypoints, right_keypoints)):
+            ax.text(left_kp[0], left_kp[1], left_kp[2], f'L{i}', fontsize=10, color='blue')
+            ax.text(right_kp[0], right_kp[1], right_kp[2], f'R{i}', fontsize=10, color='red')
+        
+        # Set labels and title
+        ax.set_xlabel('X (m)')
+        ax.set_ylabel('Y (m)')
+        ax.set_zlabel('Z (m)')
+        ax.set_title('Robotic End-Effector Bézier Trajectories (base_link frame)')
+        ax.legend()
+        
+        # Set equal aspect ratio
+        max_range = np.array([left_positions.max() - left_positions.min(),
+                             right_positions.max() - right_positions.min()]).max() / 2.0
+        
+        mid_x = (left_positions[:, 0].max() + left_positions[:, 0].min()) * 0.5
+        mid_y = (left_positions[:, 1].max() + left_positions[:, 1].min()) * 0.5
+        mid_z = (left_positions[:, 2].max() + left_positions[:, 2].min()) * 0.5
+        
+        ax.set_xlim(mid_x - max_range, mid_x + max_range)
+        ax.set_ylim(mid_y - max_range, mid_y + max_range)
+        ax.set_zlim(mid_z - max_range, mid_z + max_range)
+        
+        # Add grid
+        ax.grid(True, alpha=0.3)
+        
+        if save_plot:
+            plt.savefig('bezier_trajectories.png', dpi=300, bbox_inches='tight')
+            print("Plot saved as 'bezier_trajectories.png'")
+        
+        if show_plot:
+            plt.show()
+    
+    def get_trajectory_data(self) -> Dict[str, np.ndarray]:
+        """
+        Get the complete trajectory data for both hands.
+        
+        Returns:
+            Dictionary containing trajectory data
+        """
+        left_positions, left_orientations = self.interpolate_trajectory('left_hand')
+        right_positions, right_orientations = self.interpolate_trajectory('right_hand')
+        
+        return {
+            'left_hand': {
+                'positions': left_positions,
+                'orientations': left_orientations
+            },
+            'right_hand': {
+                'positions': right_positions,
+                'orientations': right_orientations
+            }
+        }
+    
+    def export_trajectory(self, filename: str = 'trajectory_data.json'):
+        """
+        Export trajectory data to JSON file.
+        
+        Args:
+            filename: Output filename
+        """
+        trajectory_data = self.get_trajectory_data()
+        
+        # Convert numpy arrays to lists for JSON serialization
+        export_data = {
+            'left_hand': {
+                'positions': trajectory_data['left_hand']['positions'].tolist(),
+                'orientations': trajectory_data['left_hand']['orientations'].tolist()
+            },
+            'right_hand': {
+                'positions': trajectory_data['right_hand']['positions'].tolist(),
+                'orientations': trajectory_data['right_hand']['orientations'].tolist()
+            }
+        }
+        
+        with open(filename, 'w') as f:
+            json.dump(export_data, f, indent=2)
+        
+        print(f"Trajectory data exported to '{filename}'")
+    
+    def create_pose_command_msg(self, left_pos: np.ndarray, left_quat: np.ndarray, 
+                               right_pos: np.ndarray, right_quat: np.ndarray) -> 'twoArmHandPoseCmd':
+        """
+        Create a twoArmHandPoseCmd message for the given poses.
+        
+        Args:
+            left_pos: Left hand position [x, y, z]
+            left_quat: Left hand quaternion [x, y, z, w]
+            right_pos: Right hand position [x, y, z]
+            right_quat: Right hand quaternion [x, y, z, w]
+            
+        Returns:
+            twoArmHandPoseCmd message
+        """
+        if not self.enable_ros:
+            raise RuntimeError("ROS is not enabled or available")
+        
+        eef_pose_msg = twoArmHandPoseCmd()
+        
+        # Set IK parameters from configuration
+        ik_params = self.key_points.get('ik_parameters', {})
+        eef_pose_msg.use_custom_ik_param = ik_params.get('use_custom_ik_param', False)
+        eef_pose_msg.joint_angles_as_q0 = ik_params.get('joint_angles_as_q0', False)
+        
+        # Create ikSolveParam object
+        eef_pose_msg.ik_param = ikSolveParam()
+        
+        # Set frame (0: current frame, 1: world frame, 2: local frame, 3: manipulation world frame)
+        eef_pose_msg.frame = 3
+        
+        # Set joint angles (not used when joint_angles_as_q0 is False)
+        eef_pose_msg.hand_poses.left_pose.joint_angles = np.zeros(7)
+        eef_pose_msg.hand_poses.right_pose.joint_angles = np.zeros(7)
+        
+        # Set left hand pose
+        eef_pose_msg.hand_poses.left_pose.pos_xyz = left_pos.tolist()
+        eef_pose_msg.hand_poses.left_pose.quat_xyzw = left_quat.tolist()
+        
+        # Set right hand pose
+        eef_pose_msg.hand_poses.right_pose.pos_xyz = right_pos.tolist()
+        eef_pose_msg.hand_poses.right_pose.quat_xyzw = right_quat.tolist()
+        
+        # Set elbow positions
+        elbow_positions = self.key_points.get('elbow_positions', {})
+        left_elbow = np.array(elbow_positions.get('left_elbow', [0.0, 0.0, 0.0]))
+        right_elbow = np.array(elbow_positions.get('right_elbow', [0.0, 0.0, 0.0]))
+        
+        eef_pose_msg.hand_poses.left_pose.elbow_pos_xyz = left_elbow.tolist()
+        eef_pose_msg.hand_poses.right_pose.elbow_pos_xyz = right_elbow.tolist()
+        
+        return eef_pose_msg
+    
+    def publish_single_pose(self, left_pos: np.ndarray, left_quat: np.ndarray, 
+                           right_pos: np.ndarray, right_quat: np.ndarray):
+        """
+        Publish a single pose command.
+        
+        Args:
+            left_pos: Left hand position [x, y, z]
+            left_quat: Left hand quaternion [x, y, z, w]
+            right_pos: Right hand position [x, y, z]
+            right_quat: Right hand quaternion [x, y, z, w]
+        """
+        if not self.enable_ros:
+            print("Warning: ROS is not enabled. Cannot publish pose command.")
+            return
+        
+        try:
+            eef_pose_msg = self.create_pose_command_msg(left_pos, left_quat, right_pos, right_quat)
+            self.ik_pub.publish(eef_pose_msg)
+            print(f"Published pose command - Left: {left_pos}, Right: {right_pos}")
+        except Exception as e:
+            print(f"Error publishing pose command: {e}")
+    
+    def play_trajectory(self, playback_rate: float = 10.0, loop: bool = False):
+        """
+        Play the interpolated trajectory by publishing poses at specified rate.
+        
+        Args:
+            playback_rate: Publishing rate in Hz
+            loop: Whether to loop the trajectory continuously
+        """
+        if not self.enable_ros:
+            print("Warning: ROS is not enabled. Cannot play trajectory.")
+            return
+        
+        # Generate trajectories
+        trajectory_data = self.get_trajectory_data()
+        left_positions = trajectory_data['left_hand']['positions']
+        left_orientations = trajectory_data['left_hand']['orientations']
+        right_positions = trajectory_data['right_hand']['positions']
+        right_orientations = trajectory_data['right_hand']['orientations']
+        
+        rate = rospy.Rate(playback_rate)
+        
+        # Publish trajectory visualization
+        self.publish_trajectory_visualization()
+        
+        print(f"Starting trajectory playback at {playback_rate} Hz...")
+        print(f"Total trajectory points: {len(left_positions)}")
+        print("Press Ctrl+C to stop")
+        
+        try:
+            while not rospy.is_shutdown():
+                for i in range(len(left_positions)):
+                    if rospy.is_shutdown():
+                        break
+                    
+                    # Publish current pose
+                    self.publish_single_pose(
+                        left_positions[i], left_orientations[i],
+                        right_positions[i], right_orientations[i]
+                    )
+                    
+                    rate.sleep()
+                
+                if not loop:
+                    break
+                else:
+                    print("Looping trajectory...")
+        
+        except rospy.ROSInterruptException:
+            print("Trajectory playback interrupted")
+        except KeyboardInterrupt:
+            print("Trajectory playback stopped by user")
+    
+    def publish_keyframe(self, frame_id: int):
+        """
+        Publish a specific keyframe pose.
+        
+        Args:
+            frame_id: ID of the keyframe to publish
+        """
+        if not self.enable_ros:
+            print("Warning: ROS is not enabled. Cannot publish keyframe.")
+            return
+        
+        keyframes = self.key_points['keyframes']
+        
+        if frame_id >= len(keyframes):
+            print(f"Error: Frame ID {frame_id} is out of range (0-{len(keyframes)-1})")
+            return
+        
+        frame = keyframes[frame_id]
+        left_pos = np.array(frame['left_hand']['position'])
+        left_quat = np.array(frame['left_hand']['quaternion'])
+        right_pos = np.array(frame['right_hand']['position'])
+        right_quat = np.array(frame['right_hand']['quaternion'])
+        
+        self.publish_single_pose(left_pos, left_quat, right_pos, right_quat)
+        print(f"Published keyframe {frame_id}")
+
+
+def main():
+    """Main function to demonstrate the Bézier trajectory generation."""
+    print("Robotic Bézier Action Record Tool")
+    print("=" * 40)
+    
+    import argparse
+    parser = argparse.ArgumentParser(description="Bézier trajectory generator for robotic end-effectors")
+    parser.add_argument('--mode', choices=['visualize', 'play', 'keyframe', 'export', 'rviz'], 
+                       default='visualize', help='Operation mode')
+    parser.add_argument('--rate', type=float, default=10.0, 
+                       help='Playback rate in Hz (for play mode)')
+    parser.add_argument('--loop', action='store_true', 
+                       help='Loop trajectory continuously (for play mode)')
+    parser.add_argument('--frame-id', type=int, default=0, 
+                       help='Keyframe ID to publish (for keyframe mode)')
+    parser.add_argument('--no-ros', action='store_true', 
+                       help='Disable ROS functionality')
+    parser.add_argument('--no-plot', action='store_true', 
+                       help='Disable plot display (for visualization mode)')
+    
+    args = parser.parse_args()
+    
+    try:
+        # Initialize the trajectory generator
+        generator = BezierTrajectoryGenerator(enable_ros=not args.no_ros)
+        
+        if args.mode == 'visualize':
+            # Generate and visualize trajectories
+            print("Generating Bézier trajectories for robotic end-effectors...")
+            generator.visualize_trajectories(show_plot=not args.no_plot)
+            
+            # Print trajectory statistics
+            trajectory_data = generator.get_trajectory_data()
+            left_positions = trajectory_data['left_hand']['positions']
+            right_positions = trajectory_data['right_hand']['positions']
+            
+            print(f"\nTrajectory Statistics:")
+            print(f"Left hand trajectory points: {len(left_positions)}")
+            print(f"Right hand trajectory points: {len(right_positions)}")
+            print(f"Total trajectory length (left): {np.sum(np.linalg.norm(np.diff(left_positions, axis=0), axis=1)):.3f} m")
+            print(f"Total trajectory length (right): {np.sum(np.linalg.norm(np.diff(right_positions, axis=0), axis=1)):.3f} m")
+        
+        elif args.mode == 'play':
+            # Play trajectory via ROS
+            if not generator.enable_ros:
+                print("Error: ROS is required for trajectory playback")
+                return 1
+            generator.play_trajectory(playback_rate=args.rate, loop=args.loop)
+        
+        elif args.mode == 'keyframe':
+            # Publish single keyframe
+            if not generator.enable_ros:
+                print("Error: ROS is required for keyframe publishing")
+                return 1
+            generator.publish_keyframe(args.frame_id)
+        
+        elif args.mode == 'export':
+            # Export trajectory data
+            generator.export_trajectory()
+            print("Trajectory data exported successfully")
+        
+        elif args.mode == 'rviz':
+            # Publish trajectory visualization to RViz
+            if not generator.enable_ros:
+                print("Error: ROS is required for RViz visualization")
+                return 1
+            generator.publish_trajectory_visualization()
+            print("Trajectory visualization published to RViz")
+            print("Topics:")
+            print("  - /kuavo_strategy/arm_key_point/left")
+            print("  - /kuavo_strategy/arm_key_point/right")
+            print("Add MarkerArray displays in RViz with these topics")
+        
+    except Exception as e:
+        print(f"Error: {e}")
+        return 1
+    
+    return 0
+
+
+def demo_usage():
+    """Demonstrate different usage modes of the tool."""
+    print("\nDemo Usage Examples:")
+    print("=" * 50)
+    
+    try:
+        # Initialize generator
+        generator = BezierTrajectoryGenerator(enable_ros=False)  # Disable ROS for demo
+        
+        print("1. Visualizing trajectories...")
+        generator.visualize_trajectories(show_plot=False, save_plot=True)
+        
+        print("2. Getting trajectory data...")
+        trajectory_data = generator.get_trajectory_data()
+        print(f"   Generated {len(trajectory_data['left_hand']['positions'])} trajectory points")
+        
+        print("3. Exporting trajectory data...")
+        generator.export_trajectory('demo_trajectory.json')
+        
+        print("\nDemo completed successfully!")
+        
+        if ROS_AVAILABLE:
+            print("\nROS Usage Examples:")
+            print("   python robotic_bezier_action_record_tool.py --mode play --rate 5.0")
+            print("   python robotic_bezier_action_record_tool.py --mode keyframe --frame-id 1")
+            print("   python robotic_bezier_action_record_tool.py --mode play --loop")
+            print("   python robotic_bezier_action_record_tool.py --mode rviz")
+        else:
+            print("\nNote: ROS packages not available. Install them to enable ROS functionality.")
+            
+    except Exception as e:
+        print(f"Demo error: {e}")
+
+
+if __name__ == "__main__":
+    import sys
+    
+    # Check if demo mode
+    if len(sys.argv) > 1 and sys.argv[1] == 'demo':
+        demo_usage()
+    else:
+        sys.exit(main())

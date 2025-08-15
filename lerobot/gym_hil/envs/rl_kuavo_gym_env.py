@@ -37,11 +37,17 @@ LEARN_TARGET_EEF_POSE_TARGET = True # 是否使用目标末端位置作为学习
 DEMO_MAX_INCREMENT_PER_STEP = 0.02  # DEMO模式下每步最大2cm增量（精细控制）
 DEMO_MAX_INCREMENT_RANGE = 0.4     # DEMO模式下最大累积增量范围40cm
 
-# Demo mode target end-effector positions (base_link coordinates)
-DEMO_TARGET_LEFT_POS = np.array([0.4678026345146559, 0.2004180715613648, 0.15417275957965042])
+# 手肘关节配置
+DEMO_LEFT_ELBOW_POS = np.array([0.0178026345146559, 0.3004180715613648, 0.19417275957965042])
+DEMO_RIGHT_ELBOW_POS = np.array([0.0178026345146559, -0.3004180715613648, 0.19417275957965042])
+
+# Target Key-Points
+DEMO_TARGET_LEFT_POS_WORLD = np.array([0.49856212735176086, 0.22971099615097046, 0.9128270149230957])
 DEMO_TARGET_LEFT_QUAT = np.array([0.0, -0.70711, 0.0, 0.70711])
-DEMO_TARGET_RIGHT_POS = np.array([0.4678026345146559, -0.2004180715613648, 0.15417275957965042])
+DEMO_TARGET_RIGHT_POS_WORLD = np.array([0.49856212735176086, -0.22971099615097046, 0.9128270149230957])
 DEMO_TARGET_RIGHT_QUAT = np.array([0.0, -0.70711, 0.0, 0.70711])
+# normal box pose: 0.4083724915981293 -0.009208906441926956 0.9235677719116211
+DEMO_TARGET_BOX_POS_WORLD = np.array([0.4000142514705658, 0.0020876736380159855, 1.1273181653022766]) 
 
 # Joint control mode target joint angles (in radians)
 DEMO_TARGET_LEFT_JOINT_ANGLES = np.array([
@@ -836,6 +842,9 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         Publish fixed arm poses for the approach stage.
         Also updates the current position state for incremental control.
         """
+        global DEMO_LEFT_ELBOW_POS
+        global DEMO_RIGHT_ELBOW_POS
+
         if IF_USE_ARM_MPC_CONTROL:
             self.change_mobile_ctrl_mode(IncrementalMpcCtrlMode.ArmOnly.value)
             print( "=============== change_mobile_ctrl_mode to ArmOnly ================")
@@ -850,17 +859,17 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         self.current_left_pos = left_pos.copy()
         self.current_right_pos = right_pos.copy()
         
-        left_elbow_pos = np.zeros(3)
-        right_elbow_pos = np.zeros(3)
+        left_elbow_pos = DEMO_LEFT_ELBOW_POS
+        right_elbow_pos = DEMO_RIGHT_ELBOW_POS
 
         msg = twoArmHandPoseCmd()
         msg.hand_poses.left_pose.pos_xyz = left_pos.tolist()
         msg.hand_poses.left_pose.quat_xyzw = left_quat.tolist()
-        msg.hand_poses.left_pose.elbow_pos_xyz = left_elbow_pos.tolist()
+        msg.hand_poses.left_pose.elbow_pos_xyz = left_elbow_pos # left_elbow_pos.tolist()
 
         msg.hand_poses.right_pose.pos_xyz = right_pos.tolist()
         msg.hand_poses.right_pose.quat_xyzw = right_quat.tolist()
-        msg.hand_poses.right_pose.elbow_pos_xyz = right_elbow_pos.tolist()
+        msg.hand_poses.right_pose.elbow_pos_xyz = right_elbow_pos # right_elbow_pos.tolist()
         
         # Set default IK params
         msg.use_custom_ik_param = False
@@ -887,6 +896,9 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         Args:
             ee_action: The arm portion of the action array (normalized [-1,1])
         """
+        global DEMO_LEFT_ELBOW_POS
+        global DEMO_RIGHT_ELBOW_POS
+        
         if IF_USE_ARM_MPC_CONTROL:
             self.change_mobile_ctrl_mode(IncrementalMpcCtrlMode.ArmOnly.value)
             print( "=============== change_mobile_ctrl_mode to ArmOnly ================")
@@ -913,8 +925,8 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         # 保持固定的姿态
         left_quat = self.FIXED_LEFT_QUAT.copy()
         right_quat = self.FIXED_RIGHT_QUAT.copy()
-        left_elbow_pos = np.zeros(3)
-        right_elbow_pos = np.zeros(3)
+        left_elbow_pos = DEMO_LEFT_ELBOW_POS
+        right_elbow_pos = DEMO_RIGHT_ELBOW_POS
 
         msg = twoArmHandPoseCmd()
         msg.hand_poses.left_pose.pos_xyz = self.current_left_pos.tolist()
@@ -928,6 +940,11 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         # Set default IK params (can be customized as needed)
         msg.use_custom_ik_param = False
         msg.joint_angles_as_q0 = False
+        # if not IF_USE_ARM_MPC_CONTROL:
+        #     msg.joint_angles_as_q0 = True
+        # else:
+        #     msg.joint_angles_as_q0 = False
+        
         msg.ik_param = ikSolveParam()
         msg.frame = 3  # keep current frame3 | 3 为vr系
         self.ee_pose_pub.publish(msg)
@@ -1011,9 +1028,10 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         global TEST_DEMO_USE_ACTION_16_DIM
         global LEARN_TARGET_EEF_POSE_TARGET
         
-        global DEMO_TARGET_LEFT_POS
-        global DEMO_TARGET_RIGHT_POS
-        
+        global DEMO_TARGET_LEFT_POS_WORLD
+        global DEMO_TARGET_RIGHT_POS_WORLD
+        global DEMO_TARGET_BOX_POS_WORLD
+
         if not LEARN_TARGET_EEF_POSE_TARGET:
             """
                 学习控制eef pose or joint | 使用关节角度作为学习目标
@@ -1079,31 +1097,49 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
                 info["success"] = False
             
             # FIXME:=========== 重新设计的reward - 基于目标末端执行器位置 ====================
-            reward = 0.0
+            """
+                L_rewad = w1 * Mse_box_left + w2 * Mse_box_right + alpha * box_down_fail
+            """
+            mse_eef = 0.0
+            mse_box = 0.0
+            box_down_fail = 0.0
+                        
+            # box lift target MSE - 根据WBC模式选择正确的数据源
+            if self.wbc_observation_enabled:
+                # WBC模式：box位置在agent_state[29:32]
+                current_box_pos_world = agent_state[29:32]
+            else:
+                # 非WBC模式：box位置在environment_state[0:3]
+                current_box_pos_world = env_state[0:3]
             
-            current_left_eef_pos = agent_state[23:26]   # base_link坐标系左手位置
-            current_right_eef_pos = agent_state[26:29]  # base_link坐标系右手位置
+            current_box_pos_z = current_box_pos_world[2]
+            target_box_pos_world = DEMO_TARGET_BOX_POS_WORLD
+            mse_box = np.mean((current_box_pos_world - target_box_pos_world) ** 2)
+            mse_box = -mse_box
             
-            target_left_eef_pos = DEMO_TARGET_LEFT_POS
-            target_right_eef_pos = DEMO_TARGET_RIGHT_POS
-            
-            print(f" ==== current_left_eef_pos : {current_left_eef_pos}")
-            print(f" ==== current_right_eef_pos : {current_right_eef_pos}")
-
             # 计算左右手位置差异的MSE
-            left_eef_diff = current_left_eef_pos - target_left_eef_pos
-            right_eef_diff = current_right_eef_pos - target_right_eef_pos
-            
-            # 分别计算左右手的MSE
-            mse_left_eef = np.mean(left_eef_diff ** 2)
-            mse_right_eef = np.mean(right_eef_diff ** 2)
-            
-            # 总MSE（左右手的平均）
-            mse_total_eef = (mse_left_eef + mse_right_eef)
+            current_left_eef_pos_world = agent_state[0:3]   # world坐标系左手位置
+            current_right_eef_pos_world = agent_state[3:6]  # world坐标系右手位置
+            target_left_eef_pos_world = DEMO_TARGET_LEFT_POS_WORLD
+            target_right_eef_pos_world = DEMO_TARGET_RIGHT_POS_WORLD
+            mse_left_eef = np.mean((current_left_eef_pos_world - target_left_eef_pos_world) ** 2)
+            mse_right_eef = np.mean((current_right_eef_pos_world - target_right_eef_pos_world) ** 2)
+            mse_eef = -(mse_left_eef + mse_right_eef)
             
             # 使用负的MSE，让agent最小化与目标的差异
-            reward = -mse_total_eef
+            reward = mse_eef + mse_box + box_down_fail
             
+            # success condition - 成功判断
+            if current_box_pos_z > target_box_pos_world[2]:
+                terminated = True
+                info["success"] = True
+
+            # box fail - 箱子掉了
+            if current_box_pos_z < 0.20:
+                terminated = True
+                info["success"] = False
+                reward = -30.0
+
             # 可选：添加一个scale factor让奖励范围更合理
             reward_scale = 10.0  # 位置误差通常比较小，需要放大
             reward *= reward_scale
