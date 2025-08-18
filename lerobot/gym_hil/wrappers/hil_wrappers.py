@@ -554,10 +554,13 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
             from geometry_msgs.msg import Twist
             from sensor_msgs.msg import JointState
             from kuavo_msgs.msg import twoArmHandPoseCmd
+            from std_msgs.msg import Float64MultiArray, Bool
             self.rospy = rospy
             self.Twist = Twist
             self.JointState = JointState
             self.twoArmHandPoseCmd = twoArmHandPoseCmd
+            self.Float64MultiArray = Float64MultiArray
+            self.Bool = Bool
             self.ros_available = True
         except ImportError:
             print("Warning: ROS dependencies not available for VR intervention listening")
@@ -582,7 +585,17 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
         self.latest_cmd_vel = None
         self.latest_arm_traj = None
         self.latest_ee_pose_cmd = None
+        self.latest_left_action = None
+        self.latest_right_action = None
         self.vr_action_lock = threading.Lock()
+        
+        # Episode tracking to prevent stale data usage
+        self.current_episode_id = 0
+        self.left_action_episode_id = -1
+        self.right_action_episode_id = -1
+        
+        # Publisher to request trajectory restart
+        self.trajectory_restart_pub = None
         
         # Setup ROS subscribers for VR-generated commands
         if self.ros_available:
@@ -595,14 +608,29 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
             self.cmd_vel_sub = self.rospy.Subscriber(
                 '/cmd_vel', self.Twist, self._cmd_vel_callback, queue_size=1
             )
-            self.arm_traj_sub = self.rospy.Subscriber(
-                '/mm_kuavo_arm_traj', self.JointState, self._arm_traj_callback, queue_size=1
+            
+            # Subscribe to Bézier trajectory action topics
+            self.left_action_sub = self.rospy.Subscriber(
+                '/sac/kuavo_eef_action_scale_left', self.Float64MultiArray, 
+                self._left_action_callback, queue_size=1
             )
-            # Subscribe to end-effector pose commands for WBC mode
-            self.ee_pose_cmd_sub = self.rospy.Subscriber(
-                '/mm/two_arm_hand_pose_cmd', self.twoArmHandPoseCmd, self._ee_pose_cmd_callback, queue_size=1
+            self.right_action_sub = self.rospy.Subscriber(
+                '/sac/kuavo_eef_action_scale_right', self.Float64MultiArray, 
+                self._right_action_callback, queue_size=1
             )
+            
+            # Publisher to request trajectory restart
+            self.trajectory_restart_pub = self.rospy.Publisher(
+                '/sac/trajectory_restart_request', self.Bool, queue_size=1
+            )
+            
             print("VR intervention listeners setup successfully")
+            print("Listening to topics:")
+            print("  - /cmd_vel")
+            print("  - /sac/kuavo_eef_action_scale_left")
+            print("  - /sac/kuavo_eef_action_scale_right")
+            print("Publishing to topics:")
+            print("  - /sac/trajectory_restart_request")
         except Exception as e:
             print(f"Failed to setup VR listeners: {e}")
             self.ros_available = False
@@ -612,76 +640,27 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
         with self.vr_action_lock:
             self.latest_cmd_vel = msg
 
-    def _arm_traj_callback(self, msg):
-        """Callback for VR-generated arm trajectory messages."""
+    def _left_action_callback(self, msg):
+        """Callback for left hand action scale messages."""
         with self.vr_action_lock:
-            self.latest_arm_traj = msg
-
-    def _ee_pose_cmd_callback(self, msg):
-        """Callback for VR-generated end-effector pose command messages."""
-        with self.vr_action_lock:
-            self.latest_ee_pose_cmd = msg
-
-    def _convert_vr_to_action(self):
-        """Convert VR-generated ROS messages to environment action format."""
-        with self.vr_action_lock:
-            cmd_vel = self.latest_cmd_vel
-            arm_traj = self.latest_arm_traj
-
-        # If no VR data available, return zero action
-        if cmd_vel is None or arm_traj is None:
-            return self.zero_action.copy()
-
-        action = np.zeros(self.env.action_space.shape, dtype=np.float32)
-        
-        # Convert cmd_vel to velocity action
-        if hasattr(self.env, 'enable_roll_pitch_control') and self.env.enable_roll_pitch_control:
-            # 6D velocity control
-            vel_action = np.array([
-                cmd_vel.linear.x,
-                cmd_vel.linear.y, 
-                cmd_vel.linear.z,
-                cmd_vel.angular.x,
-                cmd_vel.angular.y,
-                cmd_vel.angular.z
-            ])
-            # Normalize by vel_action_scale if available
-            if hasattr(self.env, 'vel_action_scale'):
-                vel_action = vel_action / self.env.vel_action_scale
-            action[:6] = vel_action
-            arm_start_idx = 6
-        else:
-            # 4D velocity control  
-            vel_action = np.array([
-                cmd_vel.linear.x,
-                cmd_vel.linear.y,
-                cmd_vel.linear.z, 
-                cmd_vel.angular.z
-            ])
-            # Normalize by vel_action_scale if available
-            if hasattr(self.env, 'vel_action_scale'):
-                vel_action = vel_action / self.env.vel_action_scale
-            action[:4] = vel_action
-            arm_start_idx = 4
-
-        # Convert arm trajectory to normalized action
-        if len(arm_traj.position) >= 14:
-            arm_positions_deg = np.array(arm_traj.position[:14])
-            # Convert degrees to radians
-            arm_positions_rad = np.deg2rad(arm_positions_deg)
-            
-            # Normalize to [-1, 1] using joint centers and scales if available
-            if hasattr(self.env, 'arm_joint_centers') and hasattr(self.env, 'arm_joint_scales'):
-                arm_action = (arm_positions_rad - self.env.arm_joint_centers) / self.env.arm_joint_scales
-                # Clamp to [-1, 1]
-                arm_action = np.clip(arm_action, -1.0, 1.0)
+            # Convert Float64MultiArray to numpy array
+            if len(msg.data) >= 3:  # Ensure we have at least x, y, z components
+                self.latest_left_action = np.array(msg.data[:3], dtype=np.float32)
+                self.left_action_episode_id = self.current_episode_id
+                print(f"[VR DEBUG] Received left action for episode {self.current_episode_id}: {self.latest_left_action}")
             else:
-                # Fallback: assume positions are already in reasonable range
-                arm_action = np.clip(arm_positions_rad / np.pi, -1.0, 1.0)
-                
-            action[arm_start_idx:arm_start_idx+14] = arm_action
+                print(f"Warning: Left action data has insufficient components: {len(msg.data)}")
 
-        return action
+    def _right_action_callback(self, msg):
+        """Callback for right hand action scale messages."""
+        with self.vr_action_lock:
+            # Convert Float64MultiArray to numpy array
+            if len(msg.data) >= 3:  # Ensure we have at least x, y, z components
+                self.latest_right_action = np.array(msg.data[:3], dtype=np.float32)
+                self.right_action_episode_id = self.current_episode_id
+                print(f"[VR DEBUG] Received right action for episode {self.current_episode_id}: {self.latest_right_action}")
+            else:
+                print(f"Warning: Right action data has insufficient components: {len(msg.data)}")
 
     def get_vr_action(self):
         """
@@ -709,156 +688,53 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
         # Get VR action from ROS topics
         vr_action = None
         with self.vr_action_lock:
-            # Check if we have any VR data available
-            has_cmd_vel = self.latest_cmd_vel is not None
-            has_arm_data = (self.latest_arm_traj is not None) or (self.latest_ee_pose_cmd is not None)
+            # Check if we have action data from Bézier trajectory topics for current episode
+            has_left_action = (self.latest_left_action is not None and 
+                             self.left_action_episode_id == self.current_episode_id)
+            has_right_action = (self.latest_right_action is not None and 
+                              self.right_action_episode_id == self.current_episode_id)
             
-            if has_cmd_vel or has_arm_data:
-                # Create action array with correct dimensions from environment
-                action = np.zeros(self.env.action_space.shape[0], dtype=np.float32)
-                
-                # Set velocity commands if available
-                if has_cmd_vel:
-                    vel_cmd = self.latest_cmd_vel
-                    action_dim = self.env.action_space.shape[0]
+            # Only proceed if we're actually in intervention mode AND have valid CURRENT episode data
+            if is_intervention and (has_left_action or has_right_action):
+                # If we have both left and right actions, combine them into a single action
+                if has_left_action and has_right_action:
+                    # Combine left and right actions according to environment's action space
+                    # Assuming the action space expects [left_x, left_y, left_z, right_x, right_y, right_z]
+                    vr_action = np.concatenate([self.latest_left_action, self.latest_right_action])
                     
-                    # Check if we're in TEST_DEMO_USE_ACTION_8_DIM mode (2 vel dimensions)
-                    if action_dim == 8:
-                        # Only set x and yaw for 8-dim mode: [x, yaw, left_eef(3), right_eef(3)]
-                        action[0] = vel_cmd.linear.x
-                        action[1] = vel_cmd.angular.z
-                    else:
-                        # Original 4 velocity dimensions: [x, y, z, yaw]
-                        action[0] = vel_cmd.linear.x
-                        action[1] = vel_cmd.linear.y 
-                        action[2] = vel_cmd.linear.z
-                        action[3] = vel_cmd.angular.z
+                elif has_left_action:
+                    # Only left action available, pad with zeros for right hand
+                    vr_action = np.concatenate([self.latest_left_action, np.zeros(3, dtype=np.float32)])
+                    
+                elif has_right_action:
+                    # Only right action available, pad with zeros for left hand
+                    vr_action = np.concatenate([np.zeros(3, dtype=np.float32), self.latest_right_action])
                 
-                # Set arm commands based on WBC observation mode
-                if not self.wbc_observation_enabled:
-                    # Non-WBC mode: use end-effector pose commands and convert to increments
-                    if self.latest_ee_pose_cmd is not None:
-                        # Extract left and right end-effector poses
-                        left_pose = self.latest_ee_pose_cmd.hand_poses.left_pose
-                        right_pose = self.latest_ee_pose_cmd.hand_poses.right_pose
-                        
-                        # Get absolute positions from VR
-                        vr_left_pos = np.array(left_pose.pos_xyz)
-                        vr_right_pos = np.array(right_pose.pos_xyz)
-                        
-                        # Get arm action dimensions from environment
-                        action_dim = self.env.action_space.shape[0]
-                        
-                        # Check if we have TEST_DEMO_USE_ACTION_8_DIM mode (2 vel + 6 arm = 8 total)
-                        if action_dim == 8:
-                            # TEST_DEMO_USE_ACTION_8_DIM mode: use direct position scaling
-                            if (hasattr(self.env, 'unwrapped') and 
-                                hasattr(self.env.unwrapped, '_scale_action_to_eef_positions')):
-                                # Use the environment's scaling method to convert positions to action
-                                ee_action = np.concatenate([vr_left_pos, vr_right_pos])
-                                try:
-                                    left_pos, right_pos = self.env.unwrapped._scale_action_to_eef_positions(ee_action)
-                                    # Convert back to normalized action space [-1,1]
-                                    # This is a reverse scaling - we need to find the action that produces these positions
-                                    EEF_LIMITS = self.env.unwrapped.EEF_POS_LIMITS
-                                    left_action = np.array([
-                                        2 * (vr_left_pos[0] - EEF_LIMITS['x_min']) / (EEF_LIMITS['x_max'] - EEF_LIMITS['x_min']) - 1,
-                                        2 * (vr_left_pos[1] - EEF_LIMITS['left_y_min']) / (EEF_LIMITS['left_y_max'] - EEF_LIMITS['left_y_min']) - 1,
-                                        2 * (vr_left_pos[2] - EEF_LIMITS['z_min']) / (EEF_LIMITS['z_max'] - EEF_LIMITS['z_min']) - 1
-                                    ])
-                                    right_action = np.array([
-                                        2 * (vr_right_pos[0] - EEF_LIMITS['x_min']) / (EEF_LIMITS['x_max'] - EEF_LIMITS['x_min']) - 1,
-                                        2 * (vr_right_pos[1] - EEF_LIMITS['right_y_min']) / (EEF_LIMITS['right_y_max'] - EEF_LIMITS['right_y_min']) - 1,
-                                        2 * (vr_right_pos[2] - EEF_LIMITS['z_min']) / (EEF_LIMITS['z_max'] - EEF_LIMITS['z_min']) - 1
-                                    ])
-                                    
-                                    # Clip to valid action range
-                                    left_action = np.clip(left_action, -1.0, 1.0)
-                                    right_action = np.clip(right_action, -1.0, 1.0)
-                                    
-                                    # Assign to action array: [vel(2), left_eef(3), right_eef(3)]
-                                    action[2:5] = left_action
-                                    action[5:8] = right_action
-                                    
-                                    if self.debug:
-                                        print(f"[VR DIRECT SCALING DEBUG] VR positions - Left: {vr_left_pos}, Right: {vr_right_pos}")
-                                        print(f"[VR DIRECT SCALING DEBUG] Scaled actions - Left: {left_action}, Right: {right_action}")
-                                        
-                                except Exception as e:
-                                    print(f"Warning: Failed to scale VR positions to actions: {e}")
-                                    # Fallback to zero arm actions
-                                    action[2:8] = 0.0
-                            else:
-                                # No scaling method available, use zero arm actions
-                                action[2:8] = 0.0
+                # Ensure action matches the expected action space dimension
+                if vr_action is not None:
+                    expected_dim = self.env.action_space.shape[0]
+                    if len(vr_action) != expected_dim:
+                        # Adjust action size to match environment's action space
+                        if len(vr_action) < expected_dim:
+                            # Pad with zeros if action is too short
+                            vr_action = np.pad(vr_action, (0, expected_dim - len(vr_action)), mode='constant')
                         else:
-                            # Original incremental mode for action_dim > 8
-                            # Convert to increments based on fixed reference positions
-                            if (hasattr(self.env, 'unwrapped') and 
-                                hasattr(self.env.unwrapped, 'FIXED_LEFT_POS') and 
-                                hasattr(self.env.unwrapped, 'FIXED_RIGHT_POS')):
-                                # Get fixed reference positions from environment
-                                fixed_left_pos = self.env.unwrapped.FIXED_LEFT_POS
-                                fixed_right_pos = self.env.unwrapped.FIXED_RIGHT_POS
-                                max_increment_range = getattr(self.env.unwrapped, 'MAX_INCREMENT_RANGE', 0.2)
-                                
-                                # Calculate increments from fixed reference positions
-                                left_increment = vr_left_pos - fixed_left_pos
-                                right_increment = vr_right_pos - fixed_right_pos
-                                
-                                # Limit increments to reasonable ranges
-                                left_increment = np.clip(left_increment, -max_increment_range, max_increment_range)
-                                right_increment = np.clip(right_increment, -max_increment_range, max_increment_range)
-                                
-                                # Set incremental action - ensure we don't exceed action dimensions
-                                if action_dim >= 10:
-                                    action[4:7] = left_increment   # Left hand increment
-                                    action[7:10] = right_increment # Right hand increment
-                                elif action_dim >= 7:
-                                    action[4:7] = left_increment   # Only left hand increment
-                                
-                                if self.debug:
-                                    print(f"[VR INCREMENTAL DEBUG] VR positions - Left: {vr_left_pos}, Right: {vr_right_pos}")
-                                    print(f"[VR INCREMENTAL DEBUG] Fixed positions - Left: {fixed_left_pos}, Right: {fixed_right_pos}")
-                                    print(f"[VR INCREMENTAL DEBUG] Calculated increments - Left: {left_increment}, Right: {right_increment}")
-                            else:
-                                # Fallback: treat VR positions as direct increments (for compatibility)
-                                # This might happen during initialization
-                                left_increment = np.clip(vr_left_pos, -0.1, 0.1)  # Small default range
-                                right_increment = np.clip(vr_right_pos, -0.1, 0.1)
-                                
-                                # Set incremental action - ensure we don't exceed action dimensions
-                                if action_dim >= 10:
-                                    action[4:7] = left_increment
-                                    action[7:10] = right_increment
-                                elif action_dim >= 7:
-                                    action[4:7] = left_increment
+                            # Truncate if action is too long
+                            vr_action = vr_action[:expected_dim]
+                        
+                    # Ensure the action is within the expected range [-1, 1]
+                    vr_action = np.clip(vr_action, -1.0, 1.0)
                 
-                else:
-                    # Non-WBC mode: use joint trajectory data
-                    # Get the number of arm joints from the environment
-                    arm_dim = self.env.action_space.shape[0] - 4  # 4 for velocity
-                    if self.latest_arm_traj is not None and len(self.latest_arm_traj.position) >= arm_dim:
-                        # JointState message has position array directly (in degrees)
-                        arm_positions_deg = np.array(self.latest_arm_traj.position[:arm_dim])
-                        
-                        # Convert degrees to radians
-                        arm_positions_rad = np.deg2rad(arm_positions_deg)
-                        
-                        # Try to get normalization parameters from environment
-                        if (hasattr(self.env, 'unwrapped') and 
-                            hasattr(self.env.unwrapped, 'arm_joint_centers') and 
-                            hasattr(self.env.unwrapped, 'arm_joint_scales')):
-                            # Normalize to [-1, 1] using environment's parameters
-                            arm_action = (arm_positions_rad - self.env.unwrapped.arm_joint_centers) / self.env.unwrapped.arm_joint_scales
-                            arm_action = np.clip(arm_action, -1.0, 1.0)
-                        else:
-                            # Fallback: simple normalization
-                            arm_action = np.clip(arm_positions_rad / np.pi, -1.0, 1.0)
-                        
-                        action[4:4+arm_dim] = arm_action
-                
-                vr_action = action
+                # Debug information
+                if vr_action is not None:
+                    print(f"VR Action - Left: {self.latest_left_action}, Right: {self.latest_right_action}")
+                    print(f"Combined VR Action: {vr_action}")
+            else:
+                # Not in intervention mode or no valid action data available
+                if is_intervention and not (has_left_action or has_right_action):
+                    print(f"[VR DEBUG] Intervention active but no current episode action data available")
+                    print(f"  Left: valid={self.latest_left_action is not None}, episode_id={self.left_action_episode_id}, current={self.current_episode_id}")
+                    print(f"  Right: valid={self.latest_right_action is not None}, episode_id={self.right_action_episode_id}, current={self.current_episode_id}")
 
         return (
             is_intervention,
@@ -914,6 +790,13 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
                 # Clear the intervention mode in the underlying environment
                 if hasattr(self.env, 'unwrapped') and hasattr(self.env.unwrapped, 'set_vr_intervention_mode'):
                     self.env.unwrapped.set_vr_intervention_mode(False)
+                
+                # Clear VR action data when intervention stops to prevent stale data usage
+                with self.vr_action_lock:
+                    # Reset episode IDs to prevent using stale data
+                    self.left_action_episode_id = -1
+                    self.right_action_episode_id = -1
+                print("[VR DEBUG] Intervention stopped - Invalidated VR action data")
 
         # Update the state for the next step.
         self.was_intervening = is_intervening_now
@@ -933,9 +816,6 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
         # Add VR data availability and action source info for debugging
         if is_intervening_now:
             with self.vr_action_lock:
-                info["vr_cmd_vel_available"] = self.latest_cmd_vel is not None
-                info["vr_arm_traj_available"] = self.latest_arm_traj is not None
-                info["vr_ee_pose_cmd_available"] = self.latest_ee_pose_cmd is not None
                 info["wbc_observation_enabled"] = self.wbc_observation_enabled
                 info["action_source"] = "vr_intervention"
         else:
@@ -954,15 +834,30 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
         self.controller.reset()
         self.was_intervening = False
         
+        # Increment episode ID to invalidate old action data
+        self.current_episode_id += 1
+        
+        # Request trajectory restart from Bézier tool
+        if self.ros_available and self.trajectory_restart_pub:
+            restart_msg = self.Bool()
+            restart_msg.data = True
+            self.trajectory_restart_pub.publish(restart_msg)
+            print(f"[VR DEBUG] Sent trajectory restart request for episode {self.current_episode_id}")
+        
         # Clear VR intervention data
         with self.vr_action_lock:
             self.latest_cmd_vel = None
             self.latest_arm_traj = None
             self.latest_ee_pose_cmd = None
-        
+            # Keep the action data but mark it as invalid for current episode
+            # This prevents using stale data from previous episodes
+            
         # Reset intervention mode in the underlying environment
         if hasattr(self.env, 'unwrapped') and hasattr(self.env.unwrapped, 'set_vr_intervention_mode'):
             self.env.unwrapped.set_vr_intervention_mode(False)
+        
+        print(f"[VR DEBUG] Reset - Episode ID incremented to {self.current_episode_id}")
+        print(f"[VR DEBUG] Previous action episode IDs - Left: {self.left_action_episode_id}, Right: {self.right_action_episode_id}")
             
         return self.env.reset(**kwargs)
 
@@ -979,5 +874,12 @@ class RLKuavoMetaVRWrapper(gym.Wrapper):
                 self.arm_traj_sub.unregister()
             if hasattr(self, 'ee_pose_cmd_sub'):
                 self.ee_pose_cmd_sub.unregister()
+            if hasattr(self, 'left_action_sub'):
+                self.left_action_sub.unregister()
+            if hasattr(self, 'right_action_sub'):
+                self.right_action_sub.unregister()
+            if hasattr(self, 'trajectory_restart_pub'):
+                # Publishers don't need explicit unregistration, but we can set to None
+                self.trajectory_restart_pub = None
                 
         return self.env.close()

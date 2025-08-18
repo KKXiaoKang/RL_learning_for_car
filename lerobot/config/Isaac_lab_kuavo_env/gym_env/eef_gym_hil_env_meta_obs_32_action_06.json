@@ -24,7 +24,7 @@
     "use_gamepad": true,
     "repo_id": null,
     "dataset_root": null,
-    "num_episodes": 2,
+    "num_episodes": 10,
     "episode": 0,
     "pretrained_policy_name_or_path": null,
     "push_to_hub": true,

@@ -28,8 +28,8 @@ A comprehensive tool for generating smooth Bézier trajectories for robotic end-
         "frame": "base_link",
         "description": "Cartesian key-points for left and right hand end-effectors with elbow configurations",
         "elbow_positions": {
-            "left_elbow": [0.0178026345146559, 0.3004180715613648, 0.19417275957965042],
-            "right_elbow": [0.0178026345146559, -0.3004180715613648, 0.19417275957965042]
+            "left_elbow": [-0.0178026345146559, 0.4004180715613648, 0.17417275957965042],
+            "right_elbow": [-0.0178026345146559, -0.4004180715613648, 0.17417275957965042]
         },
         "ik_parameters": {
             "ik_solve_param": 1,

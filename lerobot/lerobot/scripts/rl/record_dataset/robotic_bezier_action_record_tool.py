@@ -32,7 +32,7 @@ try:
     from kuavo_msgs.msg import twoArmHandPoseCmd, twoArmHandPose, ikSolveParam
     from visualization_msgs.msg import Marker, MarkerArray
     from geometry_msgs.msg import Point
-    from std_msgs.msg import ColorRGBA, Float64MultiArray
+    from std_msgs.msg import ColorRGBA, Float64MultiArray, Bool
     ROS_AVAILABLE = True
 except ImportError:
     print("Warning: ROS packages not available. ROS functionality will be disabled.")
@@ -57,6 +57,10 @@ class BezierTrajectoryGenerator:
         self.key_points = self._load_key_points()
         self.enable_ros = enable_ros and ROS_AVAILABLE
         self.debug = debug
+        
+        # Trajectory control
+        self.trajectory_restart_requested = False
+        self.restart_sub = None
         
         # ROS setup
         if self.enable_ros:
@@ -98,10 +102,14 @@ class BezierTrajectoryGenerator:
             # Create subscriber for IK results (optional callback)
             self.ik_result_sub = rospy.Subscriber("/ik/result", twoArmHandPose, self._ik_result_callback)
             
+            # Create subscriber for trajectory restart requests
+            self.restart_sub = rospy.Subscriber("/sac/trajectory_restart_request", Bool, self._restart_callback)
+            
             # Wait for connections
             time.sleep(1.0)
             
             print("ROS node initialized successfully")
+            print("Listening for trajectory restart requests on /sac/trajectory_restart_request")
             
         except Exception as e:
             print(f"Failed to setup ROS: {e}")
@@ -111,6 +119,12 @@ class BezierTrajectoryGenerator:
         """Callback for IK result messages."""
         # Optional: Handle IK result feedback
         pass
+    
+    def _restart_callback(self, msg):
+        """Callback for trajectory restart requests."""
+        if msg.data:
+            self.trajectory_restart_requested = True
+            print("[BEZIER DEBUG] Trajectory restart requested!")
         
     def _load_key_points(self) -> Dict[str, Any]:
         """Load key-points from JSON file."""
@@ -473,9 +487,21 @@ class BezierTrajectoryGenerator:
         
         try:
             while not rospy.is_shutdown():
+                # 检查是否有重启请求
+                if self.trajectory_restart_requested:
+                    print("[BEZIER DEBUG] Restarting trajectory from beginning")
+                    self.trajectory_restart_requested = False
+                    # 重启轨迹：从头开始循环
+                
                 # 发布轨迹点和对应的actions
                 for i in range(len(left_positions)):
                     if rospy.is_shutdown():
+                        break
+                    
+                    # 检查重启请求（在循环中）
+                    if self.trajectory_restart_requested:
+                        print("[BEZIER DEBUG] Restart requested during trajectory, breaking current loop")
+                        self.trajectory_restart_requested = False
                         break
                     
                     # 发布当前pose
@@ -499,10 +525,11 @@ class BezierTrajectoryGenerator:
                     
                     rate.sleep()
                 
-                if not loop:
+                if not loop and not self.trajectory_restart_requested:
                     break
                 else:
-                    print("Looping trajectory with actions...")
+                    if not self.trajectory_restart_requested:
+                        print("Looping trajectory with actions...")
         
         except rospy.ROSInterruptException:
             print("Trajectory playback with actions interrupted")

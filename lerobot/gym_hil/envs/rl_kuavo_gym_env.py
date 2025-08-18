@@ -38,8 +38,12 @@ DEMO_MAX_INCREMENT_PER_STEP = 0.02  # DEMO模式下每步最大2cm增量（精�
 DEMO_MAX_INCREMENT_RANGE = 0.4     # DEMO模式下最大累积增量范围40cm
 
 # 手肘关节配置
-DEMO_LEFT_ELBOW_POS = np.array([0.0178026345146559, 0.3004180715613648, 0.19417275957965042])
-DEMO_RIGHT_ELBOW_POS = np.array([0.0178026345146559, -0.3004180715613648, 0.19417275957965042])
+"""
+    "left_elbow": [-0.0178026345146559, 0.4004180715613648, 0.17417275957965042],
+    "right_elbow": [-0.0178026345146559, -0.4004180715613648, 0.17417275957965042]
+"""
+DEMO_LEFT_ELBOW_POS = np.array([-0.0178026345146559, 0.4004180715613648, 0.17417275957965042])
+DEMO_RIGHT_ELBOW_POS = np.array([-0.0178026345146559, -0.4004180715613648, 0.17417275957965042])
 
 # Target Key-Points
 DEMO_TARGET_LEFT_POS_WORLD = np.array([0.49856212735176086, 0.22971099615097046, 0.9128270149230957])
@@ -790,12 +794,12 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             twist_cmd.angular.y = 0.0
             twist_cmd.angular.z = vel_action[1]
             ee_action = action[self.vel_dim:]
-            print(" ============================================================ ")
-            print(" ==================== step begin ============================")
-            print( " ==============  send_action | action: ", action)
-            print(" ================ send_action | len action: ", len(action))
-            print(" ================ send_action | vel_action: ", vel_action)
-            print(" ================ send_action | ee_action: ", ee_action)
+            # print(" ============================================================ ")
+            # print(" ==================== step begin ============================")
+            # print( " ==============  send_action | action: ", action)
+            # print(" ================ send_action | len action: ", len(action))
+            # print(" ================ send_action | vel_action: ", vel_action)
+            # print(" ================ send_action | ee_action: ", ee_action)
             # vel pub
             self.cmd_vel_pub.publish(twist_cmd) 
             # joint pub
@@ -817,23 +821,23 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
                 twist_cmd.angular.y = 0.0
                 twist_cmd.angular.z = vel_action[1]
                 ee_action = action[self.vel_dim:]
-                print(" ============================================================ ")
-                print(" ==================== vel eef step begin ============================")
-                print( " ==============  send_action | action: ", action)
-                print(" ================ send_action | len action: ", len(action))
-                print(" ================ send_action | vel_action: ", vel_action)
-                print(" ================ send_action | ee_action (increments): ", ee_action)
+                # print(" ============================================================ ")
+                # print(" ==================== vel eef step begin ============================")
+                # print( " ==============  send_action | action: ", action)
+                # print(" ================ send_action | len action: ", len(action))
+                # print(" ================ send_action | vel_action: ", vel_action)
+                # print(" ================ send_action | ee_action (increments): ", ee_action)
                 # vel pub
                 self.cmd_vel_pub.publish(twist_cmd) 
                 # eef pub (增量控制)
                 self._publish_action_based_arm_poses(ee_action)
             else:
                 ee_action = action
-                print(" ============================================================ ")
-                print(" ==================== only eef step begin ============================")
-                print( " ==============  send_action | action: ", action)
-                print(" ================ send_action | len action: ", len(action))
-                print(" ================ send_action | ee_action (increments): ", ee_action)
+                # print(" ============================================================ ")
+                # print(" ==================== only eef step begin ============================")
+                # print( " ==============  send_action | action: ", action)
+                # print(" ================ send_action | len action: ", len(action))
+                # print(" ================ send_action | ee_action (increments): ", ee_action)
                 # eef pub (增量控制)
                 self._publish_action_based_arm_poses(ee_action)
 
@@ -1086,7 +1090,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             """
                 学习控制eef pose or joint | 使用目标eef pose作为学习目标
             """
-            print(" === use MSE reward function === ")
+            # print(" === use MSE reward function === ")
             # ========== EEF POSITION CONTROL MODE ==========
             if self.episode_step_count >= 200:
                 # Timeout - terminate but no success
