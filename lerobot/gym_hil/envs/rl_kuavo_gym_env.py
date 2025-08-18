@@ -113,13 +113,26 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
     def __init__(self, debug: bool = False, image_size=(224, 224), enable_roll_pitch_control: bool = False, 
                  vel_smoothing_factor: float = 0.3, arm_smoothing_factor: float = 0.4, 
                  wbc_observation_enabled: bool = False, action_dim: int = None, image_obs: bool = True,
-                 render_mode: str = None, use_gripper: bool = True, gripper_penalty: float = 0.0):
+                 render_mode: str = None, use_gripper: bool = True, gripper_penalty: float = 0.0,
+                 box_reward_weight: float = 3.0, hand_reward_weight: float = 1.0):
         # Store initialization parameters
         self.image_obs = image_obs
         self.render_mode = render_mode  
         self.use_gripper = use_gripper
         self.gripper_penalty = gripper_penalty
         
+        # Reward weight parameters
+        """
+            最终key-point基于base抬升高度的episode reward
+            0.00 -> -109
+            0.10 -> -89
+            0.20 -> -77
+            0.30 -> -28
+        """
+        self.box_reward_weight = box_reward_weight  # 箱子移动奖励权重
+        self.hand_reward_weight = hand_reward_weight  # 手移动奖励权重
+        print(f"box_reward_weight: {box_reward_weight}, hand_reward_weight: {hand_reward_weight}")
+
         # Separate storage for headerless topics that will be initialized in callbacks.
         # This needs to be done BEFORE super().__init__() which sets up subscribers.
         self.latest_ang_vel = None
@@ -1102,7 +1115,8 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             
             # FIXME:=========== 重新设计的reward - 基于目标末端执行器位置 ====================
             """
-                L_rewad = w1 * Mse_box_left + w2 * Mse_box_right + alpha * box_down_fail
+                L_reward = w_hand * Mse_hand + w_box * Mse_box + alpha * box_down_fail
+                其中 w_box > w_hand 让箱子移动奖励更大
             """
             mse_eef = 0.0
             mse_box = 0.0
@@ -1119,7 +1133,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             current_box_pos_z = current_box_pos_world[2]
             target_box_pos_world = DEMO_TARGET_BOX_POS_WORLD
             mse_box = np.mean((current_box_pos_world - target_box_pos_world) ** 2)
-            mse_box = -mse_box
+            mse_box = -mse_box  # 负MSE，越小越好
             
             # 计算左右手位置差异的MSE
             current_left_eef_pos_world = agent_state[0:3]   # world坐标系左手位置
@@ -1128,15 +1142,28 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             target_right_eef_pos_world = DEMO_TARGET_RIGHT_POS_WORLD
             mse_left_eef = np.mean((current_left_eef_pos_world - target_left_eef_pos_world) ** 2)
             mse_right_eef = np.mean((current_right_eef_pos_world - target_right_eef_pos_world) ** 2)
-            mse_eef = -(mse_left_eef + mse_right_eef)
+            mse_eef = -(mse_left_eef + mse_right_eef)  # 负MSE，越小越好
             
-            # 使用负的MSE，让agent最小化与目标的差异
-            reward = mse_eef + mse_box + box_down_fail
+            # 应用权重：让箱子移动奖励更大
+            weighted_hand_reward = self.hand_reward_weight * mse_eef
+            weighted_box_reward = self.box_reward_weight * mse_box
+            
+            # 使用加权的MSE，让agent优先考虑箱子移动
+            reward = weighted_hand_reward + weighted_box_reward + box_down_fail
+            
+            # Debug信息 - 显示权重应用效果
+            if self.debug and self.episode_step_count % 20 == 0:  # 每20步打印一次
+                print(f"[REWARD DEBUG] Hand MSE: {-mse_eef:.6f}, Box MSE: {-mse_box:.6f}")
+                print(f"[REWARD DEBUG] Weighted Hand: {weighted_hand_reward:.6f}, Weighted Box: {weighted_box_reward:.6f}")
+                print(f"[REWARD DEBUG] Hand weight: {self.hand_reward_weight}, Box weight: {self.box_reward_weight}")
+                print(f"[REWARD DEBUG] Total reward (before scale): {reward:.6f}")
             
             # success condition - 成功判断
             if current_box_pos_z > target_box_pos_world[2]:
                 terminated = True
                 info["success"] = True
+                reward = reward + 3.0
+                print(f"[SUCCESS CONDITION] Box lifted successfully! Current z: {current_box_pos_z:.3f}, Target z: {target_box_pos_world[2]:.3f}")
 
             # box fail - 箱子掉了
             if current_box_pos_z < 0.20:
@@ -1312,7 +1339,8 @@ if __name__ == "__main__":
         rospy.init_node('rl_kuavo_env_test', anonymous=True)
 
     # Instantiate the environment with debugging enabled
-    env = RLKuavoGymEnv(debug=True, enable_roll_pitch_control=False, wbc_observation_enabled=True)
+    env = RLKuavoGymEnv(debug=True, enable_roll_pitch_control=False, wbc_observation_enabled=True,
+                       box_reward_weight=3.0, hand_reward_weight=1.0)
 
     try:
         num_episodes = 3

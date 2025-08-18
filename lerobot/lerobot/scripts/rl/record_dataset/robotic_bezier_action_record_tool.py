@@ -59,8 +59,8 @@ class BezierTrajectoryGenerator:
         self.debug = debug
         
         # Trajectory control
-        self.trajectory_restart_requested = False
-        self.restart_sub = None
+        self.trajectory_paused = False
+        self.pause_sub = None
         
         # ROS setup
         if self.enable_ros:
@@ -102,14 +102,14 @@ class BezierTrajectoryGenerator:
             # Create subscriber for IK results (optional callback)
             self.ik_result_sub = rospy.Subscriber("/ik/result", twoArmHandPose, self._ik_result_callback)
             
-            # Create subscriber for trajectory restart requests
-            self.restart_sub = rospy.Subscriber("/sac/trajectory_restart_request", Bool, self._restart_callback)
+            # Create subscriber for trajectory pause/resume requests
+            self.pause_sub = rospy.Subscriber("/sac/trajectory_pause_request", Bool, self._pause_callback)
             
             # Wait for connections
             time.sleep(1.0)
             
             print("ROS node initialized successfully")
-            print("Listening for trajectory restart requests on /sac/trajectory_restart_request")
+            print("Listening for trajectory pause requests on /sac/trajectory_pause_request")
             
         except Exception as e:
             print(f"Failed to setup ROS: {e}")
@@ -120,11 +120,14 @@ class BezierTrajectoryGenerator:
         # Optional: Handle IK result feedback
         pass
     
-    def _restart_callback(self, msg):
-        """Callback for trajectory restart requests."""
+    def _pause_callback(self, msg):
+        """Callback for trajectory pause/resume requests."""
         if msg.data:
-            self.trajectory_restart_requested = True
-            print("[BEZIER DEBUG] Trajectory restart requested!")
+            self.trajectory_paused = True
+            print("[BEZIER DEBUG] Trajectory paused!")
+        else:
+            self.trajectory_paused = False
+            print("[BEZIER DEBUG] Trajectory resumed!")
         
     def _load_key_points(self) -> Dict[str, Any]:
         """Load key-points from JSON file."""
@@ -487,21 +490,19 @@ class BezierTrajectoryGenerator:
         
         try:
             while not rospy.is_shutdown():
-                # 检查是否有重启请求
-                if self.trajectory_restart_requested:
-                    print("[BEZIER DEBUG] Restarting trajectory from beginning")
-                    self.trajectory_restart_requested = False
-                    # 重启轨迹：从头开始循环
-                
                 # 发布轨迹点和对应的actions
                 for i in range(len(left_positions)):
                     if rospy.is_shutdown():
                         break
                     
-                    # 检查重启请求（在循环中）
-                    if self.trajectory_restart_requested:
-                        print("[BEZIER DEBUG] Restart requested during trajectory, breaking current loop")
-                        self.trajectory_restart_requested = False
+                    # 检查是否暂停
+                    while self.trajectory_paused and not rospy.is_shutdown():
+                        if self.debug:
+                            print("[BEZIER DEBUG] Trajectory paused, waiting for resume...")
+                        rate.sleep()
+                    
+                    # 如果在暂停等待期间收到关闭信号，退出
+                    if rospy.is_shutdown():
                         break
                     
                     # 发布当前pose
@@ -525,11 +526,10 @@ class BezierTrajectoryGenerator:
                     
                     rate.sleep()
                 
-                if not loop and not self.trajectory_restart_requested:
+                if not loop:
                     break
                 else:
-                    if not self.trajectory_restart_requested:
-                        print("Looping trajectory with actions...")
+                    print("Looping trajectory with actions...")
         
         except rospy.ROSInterruptException:
             print("Trajectory playback with actions interrupted")
@@ -837,6 +837,16 @@ class BezierTrajectoryGenerator:
         try:
             while not rospy.is_shutdown():
                 for i in range(len(left_positions)):
+                    if rospy.is_shutdown():
+                        break
+                    
+                    # 检查是否暂停
+                    while self.trajectory_paused and not rospy.is_shutdown():
+                        if self.debug:
+                            print("[BEZIER DEBUG] Trajectory paused, waiting for resume...")
+                        rate.sleep()
+                    
+                    # 如果在暂停等待期间收到关闭信号，退出
                     if rospy.is_shutdown():
                         break
                     
