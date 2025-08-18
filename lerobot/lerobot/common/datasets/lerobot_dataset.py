@@ -483,8 +483,8 @@ class LeRobotDataset(torch.utils.data.Dataset):
         self.episode_data_index = get_episode_data_index(self.meta.episodes, self.episodes)
 
         # Check timestamps
-        timestamps = torch.stack(self.hf_dataset["timestamp"]).numpy()
-        episode_indices = torch.stack(self.hf_dataset["episode_index"]).numpy()
+        timestamps = torch.stack([t.detach().clone() if isinstance(t, torch.Tensor) else torch.tensor(t) for t in self.hf_dataset["timestamp"]]).numpy()
+        episode_indices = torch.stack([e.detach().clone() if isinstance(e, torch.Tensor) else torch.tensor(e) for e in self.hf_dataset["episode_index"]]).numpy()
         ep_data_index_np = {k: t.numpy() for k, t in self.episode_data_index.items()}
         check_timestamps_sync(timestamps, episode_indices, ep_data_index_np, self.fps, self.tolerance_s)
 
@@ -664,7 +664,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         for key in self.meta.video_keys:
             if query_indices is not None and key in query_indices:
                 timestamps = self.hf_dataset.select(query_indices[key])["timestamp"]
-                query_timestamps[key] = torch.stack(timestamps).tolist()
+                query_timestamps[key] = torch.stack([t.detach().clone() if isinstance(t, torch.Tensor) else torch.tensor(t) for t in timestamps]).tolist()
             else:
                 query_timestamps[key] = [current_ts]
 
@@ -672,7 +672,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
 
     def _query_hf_dataset(self, query_indices: dict[str, list[int]]) -> dict:
         return {
-            key: torch.stack(self.hf_dataset.select(q_idx)[key])
+            key: torch.stack([item.detach().clone() if isinstance(item, torch.Tensor) else torch.tensor(item) for item in self.hf_dataset.select(q_idx)[key]])
             for key, q_idx in query_indices.items()
             if key not in self.meta.video_keys
         }
