@@ -1169,7 +1169,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             if current_box_pos_z < 0.20:
                 terminated = True
                 info["success"] = False
-                reward = -30.0
+                reward = reward - 1.0
 
             # 可选：添加一个scale factor让奖励范围更合理
             reward_scale = 10.0  # 位置误差通常比较小，需要放大

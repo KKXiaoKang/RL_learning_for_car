@@ -28,6 +28,8 @@ import torchvision
 from datasets.features.features import register_feature
 from PIL import Image
 
+# def get_safe_default_codec():
+#     return "pyav"
 
 def get_safe_default_codec():
     if importlib.util.find_spec("torchcodec"):
