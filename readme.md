@@ -141,6 +141,21 @@ FROM train
 ```
 
 # Kuavo RL RLPD Hil-Serl
+```bash
+cd lerobot
+pip3 install -e .
+```
+* RL 为了dataset buffer 还是得(RL仓库环境) - lerobot_rl rl环境组合
+- pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu128 --force-reinstall
+- pip install torchcodec --index-url=https://download.pytorch.org/whl/cu128
+- conda install ffmpeg -c conda-forge
+```bash
+nvblox_torch                   0.0.post1.dev15
+torch                          2.8.0+cu128
+torchaudio                     2.8.0+cu128
+torchcodec                     0.6.0+cu128
+torchvision                    0.23.0+cu128
+```
 ## 2025/8/19 - agent实现
 * 目前agent学会如何在固定基下，双手靠近箱子 + 搬运固定位置和朝向的箱子
 * 开发分支
