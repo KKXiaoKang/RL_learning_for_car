@@ -1,0 +1,82 @@
+MLP Network Parameter Comparison Report
+==================================================
+
+Model Information:
+  Model 1: MLP_BC
+    Total parameters: 88,920
+    Weight layers: 5
+    Architecture: [(32, 64), (256, 6), (64, 256), (256, 256), (256, 6)]
+
+  Model 2: SAC_Actor
+    Total parameters: 88,844
+    Weight layers: 5
+    Architecture: [(32, 64), (256, 6), (64, 256), (256, 256), (256, 6)]
+
+Global Comparison:
+  Parameter count difference: 76
+
+Layer-by-Layer Comparison:
+  Layer 1: actor.encoder.state_encoder.0.weight vs actor.encoder.state_encoder.0.weight
+    Shape match: True
+    mean: 61.34% difference
+    std: 653.08% difference
+    min: 1019.15% difference
+    max: 888.44% difference
+    norm: 652.40% difference
+
+  Layer 2: actor.encoder.state_encoder.1.weight vs actor.encoder.state_encoder.1.weight
+    Shape match: True
+    mean: 119.09% difference
+    std: 967.01% difference
+    min: 49.29% difference
+    max: 231.99% difference
+    norm: 125.95% difference
+
+  Layer 3: actor.mean_layer.weight vs actor.mean_layer.weight
+    Shape match: True
+    mean: 2375.98% difference
+    std: 1830.30% difference
+    min: 1699.49% difference
+    max: 3126.86% difference
+    norm: 1830.72% difference
+
+  Layer 4: actor.network.net.0.weight vs actor.network.net.0.weight
+    Shape match: True
+    mean: 939.45% difference
+    std: 499.45% difference
+    min: 443.67% difference
+    max: 428.14% difference
+    norm: 499.47% difference
+
+  Layer 5: actor.network.net.1.weight vs actor.network.net.1.weight
+    Shape match: True
+    mean: 40.39% difference
+    std: 2144.32% difference
+    min: 68.59% difference
+    max: 123.98% difference
+    norm: 56.08% difference
+
+  Layer 6: actor.network.net.3.weight vs actor.network.net.3.weight
+    Shape match: True
+    mean: 8405.24% difference
+    std: 1045.29% difference
+    min: 2112.18% difference
+    max: 1148.41% difference
+    norm: 1053.74% difference
+
+  Layer 7: actor.network.net.4.weight vs actor.network.net.4.weight
+    Shape match: True
+    mean: 60.89% difference
+    std: 1542.35% difference
+    min: 155.39% difference
+    max: 56.30% difference
+    norm: 28.62% difference
+
+  Layer 8: actor.std_layer.weight vs actor.std_layer.weight
+    Shape match: True
+    mean: 957.02% difference
+    std: 160.09% difference
+    min: 327.88% difference
+    max: 1222.01% difference
+    norm: 161.16% difference
+
