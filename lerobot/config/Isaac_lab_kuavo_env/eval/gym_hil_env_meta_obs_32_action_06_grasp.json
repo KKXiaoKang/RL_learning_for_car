@@ -24,7 +24,7 @@
     "use_gamepad": true,
     "repo_id": null,
     "dataset_root": null,
-    "num_episodes": 10,
+    "num_episodes": 9,
     "episode": 0,
     "pretrained_policy_name_or_path": "/home/lab/RL/lerobot/outputs/train/2025-08-18/17-36-30_15_grasp_box_kuavo_reward_mse_demo01_action_06_yes_dataset_temp01_discount095_fps10_seed1000s/checkpoints/last/pretrained_model",
     "push_to_hub": true,

@@ -262,3 +262,49 @@ python3 lerobot/scripts/rl/learner.py --config_path config/Isaac_lab_kuavo_env/t
 * 使用行为克隆的学习方式先初始化actor网络，看是否会比现在训练5小时出效果的收敛时间更短
 * 引入不同朝向的箱子进行搬运
 * 开放浮动基的躯干控制
+
+
+# SAC Actor MLP BC 训练指南
+## train
+```bash
+python3 lerobot/scripts/rl/train_mlp_bc.py --config config/Isaac_lab_kuavo_env/train/only_on_line_learning/mlp_bc_train_grasp_aligned.json
+```
+
+## 将训练好的pt文件进行参数对比和参数转换
+* `/home/lab/RL/lerobot/lerobot/scripts/rl/visual_mlp_network` 文件夹下
+## visual_mlp_network 可视化 mlp参数对比
+* 查看RLPD的当中训练的actor的所有参数
+    * 通过checkpoint路径读取
+```bash
+python3 inspect_actor_params.py
+```
+
+* 可视化actor网格参数
+```bash
+python3 visualize_actor_network.py
+```
+
+* 对比rl actor的mlp参数 和 bc mlp参数 | 同时进行可视化
+```bash
+python3 compare_rl_mlp_bc_mlp.py
+```
+
+* 参数对比工具 | 对比是否可以直接无缝迁移
+```bash
+python3 detailed_parameter_analysis.py
+```
+
+* 转换为safetensors
+```bash
+python3 transfer_mlp_bc_to_sac.py
+```
+
+## 将 MLP BC 替换 现有的 sac actor policy直接验证推理
+* 将`transfer_mlp_bc_to_sac.py`生成的`transferred_sac_model.safetensors`
+* 可以选择直接替换到`lerobot/outputs/train/xxxx/checkpoints/last/pretrained_model/model.safetensors`
+* 替换后可以直接无缝衔接使用，模型验证eval推理代码如下
+```bash
+python3 lerobot/scripts/rl/gym_manipulator.py --config_path config/Isaac_lab_kuavo_env/eval/gym_hil_env_meta_obs_32_action_06_grasp.json
+```
+
+## 如何将transferred_sac_model.safetensors用于warm up?
