@@ -405,7 +405,10 @@ class SACPolicy(
         )
         min_q_preds = q_preds.min(dim=0)[0]
 
-        actor_loss = ((self.temperature * log_probs) - min_q_preds).mean()
+        # TODO
+        dynamic_weight_bc_mse_loss = 1.0 # 动态权重，用于平衡BC的MSE损失和SAC的损失 | 需要从一个占比比较大后期根据熵温度自行调整小
+        bc_mse_loss = 0 # 需要替换为BC的MSE损失，BC参考state-action专家数据动作对，计算MSE损失 | 
+        actor_loss = ((self.temperature * log_probs) - min_q_preds).mean() + dynamic_weight_bc_mse_loss * bc_mse_loss
         return actor_loss
 
     def _init_normalization(self, dataset_stats):

@@ -284,8 +284,19 @@ def act_with_policy(
             logging.info("[ACTOR] Shutting down act_with_policy")
             return
 
-        # 如果当前步数大于online_step_before_learning(100), 使用策略选择的动作
-        if interaction_step >= cfg.policy.online_step_before_learning: 
+        # 判断是否使用策略选择动作
+        # 如果enable_warmup为true，或者步数大于online_step_before_learning，则使用策略选择的动作
+        warmup_enabled = hasattr(cfg.policy, 'enable_warmup') and cfg.policy.enable_warmup
+        past_learning_threshold = interaction_step >= cfg.policy.online_step_before_learning
+        use_policy_action = past_learning_threshold or warmup_enabled
+        
+        # 在第一步或者每1000步记录一次当前的动作选择策略
+        if interaction_step == 0 or interaction_step % 200 == 0:
+            print(f"[ACTOR] Step {interaction_step}: warmup_enabled={warmup_enabled}, "
+                        f"past_learning_threshold={past_learning_threshold}, "
+                        f"use_policy_action={use_policy_action}")
+        
+        if use_policy_action: 
             # Time policy inference and check if it meets FPS requirement
             with policy_timer:
                 action = policy.select_action(batch=obs) # 选择动作
@@ -324,7 +335,7 @@ def act_with_policy(
 
             log_policy_frequency_issue(policy_fps=policy_fps, cfg=cfg, interaction_step=interaction_step)
 
-        else: # 如果小于100步, 使用随机动作，学习前使用随机动作进行探索
+        else: # 如果enable_warmup为false且步数小于online_step_before_learning, 使用随机动作进行探索
             action = online_env.action_space.sample()
             action_mean = None
             action_std = None
