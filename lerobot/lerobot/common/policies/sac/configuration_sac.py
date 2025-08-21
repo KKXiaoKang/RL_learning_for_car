@@ -197,6 +197,16 @@ class SACConfig(PreTrainedConfig):
     actor_learner_config: ActorLearnerConfig = field(default_factory=ActorLearnerConfig)
     # Configuration for concurrency settings (you can use threads or processes for the actor and learner)
     concurrency: ConcurrencyConfig = field(default_factory=ConcurrencyConfig)
+    
+    # Warm-up configuration for loading pre-trained parameters
+    # Path to warm-up model file (e.g., MLP BC model safetensors file)
+    warmup_model_path: str | None = None
+    # Whether to enable warm-up parameter loading
+    enable_warmup: bool = False
+    # Whether to freeze parameters loaded from warm-up model
+    warmup_freeze_loaded_params: bool = False
+    # Whether to require strict parameter matching during warm-up loading
+    warmup_strict_loading: bool = False
 
     # Optimizations
     use_torch_compile: bool = True

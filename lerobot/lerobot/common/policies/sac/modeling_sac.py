@@ -73,6 +73,7 @@ class SACPolicy(
         self._init_critics(continuous_action_dim) # 🔥 初始化critic
         self._init_actor(continuous_action_dim) # 🔥 初始化actor
         self._init_temperature() # 🔥 初始化温度
+        self._init_warmup_parameters() # 🔥 初始化warm-up参数（如果启用）
 
         # Initialize member variable to store td_target for wandb logging
         self.last_td_target: Tensor | None = None
@@ -572,6 +573,46 @@ class SACPolicy(
         self.log_alpha = nn.Parameter(torch.tensor([math.log(temp_init)])) # 输入x>0的变量，输出log_alpha可以为正数或者负数，
         # 从 log_alpha 当中通过exp还原为temperature
         self.temperature = self.log_alpha.exp().item() # temperature 必须为一个 x > 0 的数字
+
+    def _init_warmup_parameters(self):
+        """Initialize warm-up parameters if enabled."""
+        if not self.config.enable_warmup or not self.config.warmup_model_path:
+            return
+        
+        import logging
+        from .warmup_utils import WarmupParameterLoader, validate_warmup_model_path
+        
+        # Validate warmup model path
+        validated_path = validate_warmup_model_path(self.config.warmup_model_path)
+        if not validated_path:
+            logging.warning(f"Invalid warm-up model path: {self.config.warmup_model_path}")
+            return
+        
+        # Create loader and load parameters
+        loader = WarmupParameterLoader()
+        if not loader.load_warmup_parameters(validated_path):
+            logging.error("Failed to load warm-up parameters")
+            return
+        
+        # Apply parameters to actor
+        success = loader.apply_warmup_parameters(
+            target_model=self.actor,
+            strict=self.config.warmup_strict_loading,
+            freeze_loaded_params=self.config.warmup_freeze_loaded_params
+        )
+        
+        if success:
+            logging.info("✅ Successfully applied warm-up parameters to SAC Actor")
+            
+            # Log warm-up information
+            warmup_info = loader.get_warmup_info()
+            logging.info(f"Warm-up info: {warmup_info}")
+            
+            # Store warmup info in config for later reference
+            if not hasattr(self.config, '_warmup_info'):
+                self.config._warmup_info = warmup_info
+        else:
+            logging.error("❌ Failed to apply warm-up parameters to SAC Actor")
 
 
 class SACObservationEncoder(nn.Module):

@@ -536,8 +536,11 @@ def main():
     print("=" * 50)
     
     # 默认路径
-    mlp_bc_checkpoint = "/home/lab/RL/lerobot/outputs/mlp_bc_grasp_training_aligned_2/checkpoint_step_2000.pt"
-    sac_checkpoint_dir = "/home/lab/RL/lerobot/outputs/train/2025-08-18/17-36-30_15_grasp_box_kuavo_reward_mse_demo01_action_06_yes_dataset_temp01_discount095_fps10_seed1000s/checkpoints/last"
+    mlp_bc_checkpoint = \
+        "/home/lab/RL/lerobot/outputs/mlp_bc_grasp_training_aligned_2/checkpoint_step_2000.pt"
+    
+    sac_checkpoint_dir = \
+        "/home/lab/RL/lerobot/outputs/train/2025-08-20/19-13-39_16_warm_up_grasp_box_kuavo_reward_mse_demo01_action_06_yes_dataset_temp01_discount095_fps10_seed1000s/checkpoints/0002000"
     
     # 创建对比器
     comparator = NetworkParameterComparator()

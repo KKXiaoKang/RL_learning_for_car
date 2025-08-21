@@ -20,10 +20,10 @@
     "actor.std_layer.bias": "actor.std_layer.bias"
   },
   "mlp_bc_only_params": [
+    "normalize_targets.action_max",
     "normalize_inputs.observation_state_max",
     "normalize_targets.action_min",
-    "normalize_inputs.observation_state_min",
-    "normalize_targets.action_max"
+    "normalize_inputs.observation_state_min"
   ],
   "metadata": {
     "transfer_info": "Transferred from MLP BC to SAC format",

@@ -1,0 +1,59 @@
+{
+    "type": "hil",
+    "wrapper": {
+        "control_time_s": 20.0,
+        "reset_time_s": 2.0,
+        "control_mode": "meta_vr",
+        "vel_smoothing_factor": 0.2,
+        "arm_smoothing_factor": 0.2,
+        "wbc_observation_enabled": false,
+        "display_cameras": false,
+        "add_joint_velocity_to_observation": false,
+        "add_ee_pose_to_observation": false,
+        "crop_params_dict": null,
+        "resize_size": null,
+        "fixed_reset_joint_positions": null,
+        "gripper_penalty": 0.0
+    },
+    "name": "rl_kuavo_MetaVR_env",
+    "mode": "eval",
+    "task": "RLKuavoMetaVR-v0",
+    "device": "cuda",
+    "fps": 10,
+    "use_viewer": true,
+    "use_gamepad": true,
+    "repo_id": null,
+    "dataset_root": null,
+    "num_episodes": 9,
+    "episode": 0,
+    "pretrained_policy_name_or_path": "/home/lab/RL/lerobot/outputs/train/2025-08-20/19-13-39_16_warm_up_grasp_box_kuavo_reward_mse_demo01_action_06_yes_dataset_temp01_discount095_fps10_seed1000s/checkpoints/last/pretrained_model",
+    "push_to_hub": true,
+    "features": {
+        "observation.images.front": {
+            "type": "VISUAL",
+            "shape": [
+                3,
+                224,
+                224
+            ]
+        },
+        "observation.state": {
+            "type": "STATE",
+            "shape": [
+                32
+            ]
+        },
+        "action": {
+            "type": "ACTION",
+            "shape": [
+                6
+            ]
+        }
+    },
+    "features_map": {
+        "observation.images.front": "observation.images.front",
+        "observation.state": "observation.state",
+        "action": "action"
+    },
+    "reward_classifier_pretrained_path": null
+}
