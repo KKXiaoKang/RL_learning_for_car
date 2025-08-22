@@ -2137,6 +2137,7 @@ def make_robot_env(cfg: EnvConfig) -> gym.Env:
                 vel_smoothing_factor = getattr(cfg.wrapper, 'vel_smoothing_factor', 0.3)
                 arm_smoothing_factor = getattr(cfg.wrapper, 'arm_smoothing_factor', 0.4)
                 wbc_observation_enabled = getattr(cfg.wrapper, 'wbc_observation_enabled', True)
+                auto_record_tool_enable = getattr(cfg.wrapper, 'auto_record_tool_enable', False)
             # Extract action_dim from features if available
             if hasattr(cfg, 'features') and 'action' in cfg.features:
                 action_dim = cfg.features['action'].shape[0]
@@ -2149,7 +2150,8 @@ def make_robot_env(cfg: EnvConfig) -> gym.Env:
                           vel_smoothing_factor=vel_smoothing_factor,
                           arm_smoothing_factor=arm_smoothing_factor,
                           wbc_observation_enabled=wbc_observation_enabled,
-                          action_dim=action_dim)
+                          action_dim=action_dim,
+                          auto_record_tool_enable=auto_record_tool_enable)
             # First process observations to LeRobot format
             env = GymHilObservationProcessorWrapper(env=env)
             

@@ -35,15 +35,15 @@ from lerobot.common.policies.utils import get_device_from_parameters
 # Add ROS imports for visualization
 try:
     import rospy
-    from sensor_msgs.msg import Image
-    from cv_bridge import CvBridge, CvBridgeError
+    from sensor_msgs.msg import Image, CompressedImage
+    import cv2
     ROS_AVAILABLE = True
 except ImportError:
     ROS_AVAILABLE = False
     rospy = None
     Image = None
-    CvBridge = None
-    CvBridgeError = None
+    CompressedImage = None
+    cv2 = None
 
 
 DISCRETE_DIMENSION_INDEX = -1  # Gripper is always the last dimension
@@ -638,11 +638,10 @@ class SACObservationEncoder(nn.Module):
 
         if self.enable_feature_viz and ROS_AVAILABLE and rospy is not None:
             try:
-                # Initialize ROS publisher for feature visualization
-                self.feature_viz_pub = rospy.Publisher('/vision_features/resnet10_features', Image, queue_size=1, tcp_nodelay=True)
-                self.cv_bridge = CvBridge()
+                # Initialize ROS publisher for feature visualization (using CompressedImage for better performance)
+                self.feature_viz_pub = rospy.Publisher('/vision_features/resnet10_features/compressed', CompressedImage, queue_size=1, tcp_nodelay=True)
                 self.feature_viz_enabled = True
-                rospy.loginfo("Feature visualization enabled - publishing to /vision_features/resnet10_features")
+                rospy.loginfo("Feature visualization enabled - publishing to /vision_features/resnet10_features/compressed")
             except Exception as e:
                 rospy.logwarn(f"Failed to initialize feature visualization: {e}")
                 self.feature_viz_enabled = False
@@ -708,10 +707,15 @@ class SACObservationEncoder(nn.Module):
                     rospy.logwarn(f"Unsupported feature shape for visualization: {features.shape}")
                     return
                 
-                # Publish as ROS Image message
-                ros_image = self.cv_bridge.cv2_to_imgmsg(feat_rgb, "rgb8")
+                # Publish as ROS CompressedImage message
+                ros_image = CompressedImage()
                 ros_image.header.stamp = rospy.Time.now()
                 ros_image.header.frame_id = f"features_{image_key.replace('.', '_')}"
+                ros_image.format = "jpeg"
+                
+                # Encode image to JPEG format
+                _, encoded_img = cv2.imencode('.jpg', feat_rgb)
+                ros_image.data = encoded_img.tobytes()
                 
                 self.feature_viz_pub.publish(ros_image)
                 

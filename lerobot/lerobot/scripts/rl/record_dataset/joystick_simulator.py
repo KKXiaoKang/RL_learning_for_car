@@ -18,6 +18,7 @@ import signal
 try:
     import rospy
     from noitom_hi5_hand_udp_python.msg import JoySticks
+    from std_srvs.srv import Trigger, TriggerResponse
     ROS_AVAILABLE = True
 except ImportError:
     print("Warning: ROS packages not available. ROS functionality will be disabled.")
@@ -33,6 +34,7 @@ class JoystickSimulator:
         """Initialize the joystick simulator."""
         self.enable_ros = ROS_AVAILABLE
         self.publisher = None
+        self.service_server = None
         self.publishing = False
         self.intervention_active = False
         self.bezier_process = None
@@ -61,10 +63,19 @@ class JoystickSimulator:
                 queue_size=10
             )
             
+            # Create service server for auto record tool
+            self.service_server = rospy.Service(
+                '/robot_control/start_record_tool',
+                Trigger,
+                self.handle_start_record_tool
+            )
+            
             # Wait for connections
             time.sleep(1.0)
             
             print("ROS joystick simulator initialized successfully")
+            print("  - Publisher: /quest_joystick_data")
+            print("  - Service: /robot_control/start_record_tool")
             
         except Exception as e:
             print(f"Failed to setup ROS: {e}")
@@ -105,6 +116,41 @@ class JoystickSimulator:
         msg.right_second_button_touched = False
         
         return msg
+    
+    def handle_start_record_tool(self, req):
+        """
+        Handle the start record tool service request.
+        
+        Args:
+            req: Trigger service request (empty)
+            
+        Returns:
+            TriggerResponse: Service response with success status and message
+        """
+        try:
+            # Log the service call
+            rospy.loginfo("Received start_record_tool service request")
+            
+            # Start the Bezier tool in a non-blocking way
+            self.start_bezier_tool()
+            
+            # Create response
+            response = TriggerResponse()
+            response.success = True
+            response.message = "Bezier trajectory tool started successfully"
+            
+            rospy.loginfo("start_record_tool service completed successfully")
+            return response
+            
+        except Exception as e:
+            rospy.logerr(f"Error in start_record_tool service: {e}")
+            
+            # Create error response
+            response = TriggerResponse()
+            response.success = False
+            response.message = f"Failed to start Bezier tool: {str(e)}"
+            
+            return response
     
     def publish_joystick_data(self):
         """Publish joystick data continuously."""
@@ -198,7 +244,7 @@ class JoystickSimulator:
                 sys.executable, 
                 bezier_script, 
                 "--mode", "play_actions", 
-                "--rate", "10.0", 
+                "--rate", "15.0", 
                 "--debug"
             ]
             
@@ -258,10 +304,14 @@ class JoystickSimulator:
         print("="*60)
         print(f"ROS Available: {'✓' if self.enable_ros else '✗'}")
         print(f"Publishing: {'✓' if self.publishing else '✗'}")
+        print(f"Service Server: {'✓' if self.service_server else '✗'}")
         print(f"Intervention: {'ACTIVE' if self.intervention_active else 'INACTIVE'}")
         print(f"Left Grip: {self.left_grip:.1f}")
         print(f"Right Grip: {self.right_grip:.1f}")
         print(f"Bézier Tool: {self.get_bezier_status()}")
+        print("="*60)
+        if self.service_server:
+            print("Service: /robot_control/start_record_tool (ACTIVE)")
         print("="*60)
     
     def print_menu(self):
@@ -276,8 +326,9 @@ class JoystickSimulator:
         print("5. Trigger Episode Success")
         print("6. Trigger Episode Failure")
         print("7. Show Status")
-        print("8. Quick Start (Publishing + Bézier Tool)")
-        print("9. Quick Stop (Stop All)")
+        print("8. Test Record Tool Service")
+        print("9. Quick Start (Publishing + Bézier Tool)")
+        print("10. Quick Stop (Stop All)")
         print("0. Exit")
         print("="*60)
     
@@ -317,10 +368,41 @@ class JoystickSimulator:
         print("✓ Quick stop completed!")
         print("  - All processes stopped")
     
+    def test_record_tool_service(self):
+        """Test the record tool service by calling it locally."""
+        if not self.enable_ros:
+            print("❌ ROS not available - cannot test service")
+            return
+        
+        try:
+            print("\n🧪 Testing record tool service...")
+            
+            # Wait for the service to be available
+            rospy.wait_for_service('/robot_control/start_record_tool', timeout=2.0)
+            
+            # Create service proxy
+            start_record_tool = rospy.ServiceProxy('/robot_control/start_record_tool', Trigger)
+            
+            # Call the service
+            response = start_record_tool()
+            
+            if response.success:
+                print(f"✅ Service call successful: {response.message}")
+            else:
+                print(f"❌ Service call failed: {response.message}")
+                
+        except rospy.ServiceException as e:
+            print(f"❌ Service call failed: {e}")
+        except rospy.ROSException as e:
+            print(f"❌ ROS error: {e}")
+        except Exception as e:
+            print(f"❌ Unexpected error: {e}")
+    
     def run_interactive_menu(self):
         """Run the interactive menu."""
         print("Meta VR Joystick Simulator")
         print("Simulates Quest3 controller for testing intervention functionality")
+        print("Provides ROS service: /robot_control/start_record_tool")
         
         if not self.enable_ros:
             print("\n⚠️  WARNING: ROS not available! Limited functionality.")
@@ -330,7 +412,7 @@ class JoystickSimulator:
                 self.print_menu()
                 
                 try:
-                    choice = input("\nEnter your choice (0-9): ").strip()
+                    choice = input("\nEnter your choice (0-10): ").strip()
                     
                     if choice == '1':
                         if self.publishing:
@@ -357,9 +439,12 @@ class JoystickSimulator:
                         self.print_status()
                     
                     elif choice == '8':
-                        self.quick_start()
+                        self.test_record_tool_service()
                     
                     elif choice == '9':
+                        self.quick_start()
+                    
+                    elif choice == '10':
                         self.quick_stop()
                     
                     elif choice == '0':

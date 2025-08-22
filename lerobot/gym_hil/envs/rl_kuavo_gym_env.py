@@ -7,9 +7,10 @@ import message_filters
 import threading
 import os
 import xml.etree.ElementTree as ET
-
+import cv2
+from std_srvs.srv import Trigger
 from geometry_msgs.msg import PoseStamped, Twist
-from sensor_msgs.msg import Image, JointState
+from sensor_msgs.msg import Image, JointState, CompressedImage
 from std_msgs.msg import Float64MultiArray
 from kuavo_msgs.msg import sensorsData
 from ocs2_msgs.msg import mpc_observation
@@ -80,6 +81,65 @@ class IncrementalMpcCtrlMode(Enum):
     ERROR = -1
     """错误状态"""
 
+def ros_image_to_cv2(ros_image):
+    """
+    Convert ROS Image message to OpenCV image format without using cv_bridge.
+    Compatible with numpy 2.x.
+    
+    Args:
+        ros_image: sensor_msgs/Image message
+        
+    Returns:
+        OpenCV image (numpy array)
+    """
+    # Get image data as numpy array
+    if ros_image.encoding == 'rgb8':
+        channels = 3
+        dtype = np.uint8
+    elif ros_image.encoding == 'bgr8':
+        channels = 3  
+        dtype = np.uint8
+    elif ros_image.encoding == 'mono8':
+        channels = 1
+        dtype = np.uint8
+    elif ros_image.encoding == '16UC1':
+        channels = 1
+        dtype = np.uint16
+    else:
+        raise ValueError(f"Unsupported encoding: {ros_image.encoding}")
+    
+    # Convert image data to numpy array
+    img_array = np.frombuffer(ros_image.data, dtype=dtype)
+    
+    # Reshape to image dimensions
+    if channels == 1:
+        cv_image = img_array.reshape(ros_image.height, ros_image.width)
+    else:
+        cv_image = img_array.reshape(ros_image.height, ros_image.width, channels)
+    
+    return cv_image
+
+
+def ros_compressed_image_to_cv2(compressed_image):
+    """
+    Convert ROS CompressedImage message to OpenCV image format.
+    Compatible with numpy 2.x.
+    
+    Args:
+        compressed_image: sensor_msgs/CompressedImage message
+        
+    Returns:
+        OpenCV image (numpy array)
+    """
+    # Convert compressed image data to numpy array
+    np_arr = np.frombuffer(compressed_image.data, np.uint8)
+    
+    # Decode the image
+    cv_image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+    
+    return cv_image
+
+
 class RLKuavoGymEnv(IsaacLabGymEnv):
     """
     A gymnasium environment for the RL Kuavo robot task in Isaac Lab.
@@ -114,12 +174,17 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
                  vel_smoothing_factor: float = 0.3, arm_smoothing_factor: float = 0.4, 
                  wbc_observation_enabled: bool = False, action_dim: int = None, image_obs: bool = True,
                  render_mode: str = None, use_gripper: bool = True, gripper_penalty: float = 0.0,
-                 box_reward_weight: float = 3.0, hand_reward_weight: float = 1.0):
+                 box_reward_weight: float = 3.0, hand_reward_weight: float = 1.0,
+                 auto_record_tool_enable: bool = False):
         # Store initialization parameters
         self.image_obs = image_obs
         self.render_mode = render_mode  
         self.use_gripper = use_gripper
         self.gripper_penalty = gripper_penalty
+        
+        # 是否启用自动录制功能
+        self.auto_record_tool_enable = auto_record_tool_enable
+        print(f"auto_record_tool_enable 自动录制功能: {auto_record_tool_enable}")
         
         # Reward weight parameters
         """
@@ -671,14 +736,23 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
 
         with self.obs_lock:
             try:
-                # # Process image data
-                # cv_image = self.bridge.imgmsg_to_cv2(image, "bgr8")
-                # 创建224x224x3的零填充图像（BGR格式）
-                cv_image = np.zeros((224, 224, 3), dtype=np.uint8)
-
-                # TODO: Resize image if necessary, for now assuming it's the correct size
-                # cv_image = cv2.resize(cv_image, self.image_size)
-                rgb_image = cv_image[:, :, ::-1].copy() # BGR to RGB
+                # Process image data using custom function instead of cv_bridge
+                cv_image = ros_image_to_cv2(image)
+                
+                # Resize image to target size
+                cv_image = cv2.resize(cv_image, self.image_size)
+                
+                # Convert BGR to RGB if necessary
+                if image.encoding == 'bgr8':
+                    rgb_image = cv_image[:, :, ::-1].copy()  # BGR to RGB
+                elif image.encoding == 'rgb8':
+                    rgb_image = cv_image.copy()
+                else:
+                    # For other encodings, assume RGB or convert to RGB
+                    if len(cv_image.shape) == 2:  # Grayscale
+                        rgb_image = cv2.cvtColor(cv_image, cv2.COLOR_GRAY2RGB)
+                    else:
+                        rgb_image = cv_image.copy()
 
                 # Process state data
                 left_eef_position = np.array([left_eef.pose.position.x, left_eef.pose.position.y, left_eef.pose.position.z])
@@ -1325,6 +1399,15 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             if hasattr(self, 'right_hand_achieved'):
                 self.right_hand_achieved = False
 
+        # 是否启用了自动录制功能 - 一般用于自动录制的时候激活自动专家工具
+        if self.auto_record_tool_enable:
+            rospy.wait_for_service('/robot_control/start_record_tool')
+            try:
+                start_record_tool = rospy.ServiceProxy('/robot_control/start_record_tool', Trigger)
+                start_record_tool()
+            except rospy.ServiceException as e:
+                print(f"Service call failed: {e}")
+                
         return obs_stable, {}
 
 

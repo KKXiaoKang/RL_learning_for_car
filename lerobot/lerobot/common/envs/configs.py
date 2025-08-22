@@ -191,6 +191,7 @@ class EnvTransformConfig:
     vel_smoothing_factor: float = 0.3
     arm_smoothing_factor: float = 0.4
     wbc_observation_enabled: bool = True
+    auto_record_tool_enable: bool = False
 
 
 @EnvConfig.register_subclass(name="gym_manipulator")
