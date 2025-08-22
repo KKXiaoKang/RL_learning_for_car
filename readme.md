@@ -308,3 +308,13 @@ python3 lerobot/scripts/rl/gym_manipulator.py --config_path config/Isaac_lab_kua
 ```
 
 ## 如何将transferred_sac_model.safetensors用于warm up?
+* 通过`enable_warmup`参数，决定是否启用actor warm up, 如果为true则加载`warmup_model_path`路径下的safetensors用于加载actor的默认参数
+* 如果不需要enable_warmup, 设置为fasle, 则会默认不使用warm up
+```json
+{
+    "warmup_model_path": "/home/lab/RL/lerobot/lerobot/scripts/rl/visual_mlp_network/transfer_mlp2actor/transferred_sac_model.safetensors",
+    "enable_warmup": false,
+    "warmup_freeze_loaded_params": false,
+    "warmup_strict_loading": false,
+}
+```
