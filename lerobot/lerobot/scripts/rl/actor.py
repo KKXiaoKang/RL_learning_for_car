@@ -102,6 +102,12 @@ DEBUG_PRINT_FLAG = False
 @parser.wrap()
 def actor_cli(cfg: TrainRLServerPipelineConfig):
     cfg.validate()
+    
+    # Set environment variable to identify this as an actor process
+    # This will be used by the SACPolicy to enable feature visualization only for actors
+    import os
+    os.environ['LEROBOT_PROCESS_TYPE'] = 'actor'
+    
     display_pid = False
     if not use_threads(cfg):
         import torch.multiprocessing as mp

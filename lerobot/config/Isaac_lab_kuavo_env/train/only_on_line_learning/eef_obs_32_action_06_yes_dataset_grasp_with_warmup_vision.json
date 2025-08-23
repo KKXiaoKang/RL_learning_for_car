@@ -1,0 +1,184 @@
+{
+    "output_dir": null,
+    "job_name": "20_warm_up_grasp_box_kuavo_reward_mse_demo01_action_06_yes_dataset_temp01_discount095_fps10_seed1000s",
+    "resume": false,
+    "seed": 3407,
+    "num_workers": 4,
+    "batch_size": 256,
+    "steps": 100000,
+    "log_freq": 1,
+    "save_checkpoint": true,
+    "save_freq": 2000,
+    "wandb": {
+        "enable": true,
+        "project": "rl_kuavo_MetaVR_hil_real_control",
+        "disable_artifact": true
+    },
+    "dataset": {
+        "repo_id": "KANGKKANG/rl_graspbox_increase_0818_vision",
+        "use_imagenet_stats": false
+    },
+    "policy": {
+        "type": "sac",
+        "n_obs_steps": 1,
+        "normalization_mapping": {
+            "STATE": "MIN_MAX",
+            "ACTION": "MIN_MAX"
+        },
+        "dataset_stats": {
+            "observation.images.front": {
+                "mean": [
+                    0.001,
+                    0.001,
+                    0.001
+                ],
+                "std": [
+                    0.001,
+                    0.001,
+                    0.001
+                ]
+            },
+            "observation.state": {
+                "min": [0.3105616569519043, 0.22492851316928864, 0.8344297409057617, 0.3105264902114868, -0.39578977227211, 0.8342817425727844, -0.4179624915122986, 0.15573333203792572, -0.5722920894622803, -1.73529851436615, 0.14562150835990906, -0.27168530225753784, -0.6946127414703369, -0.417876273393631, -0.32175517082214355, -0.11675671488046646, -1.7351598739624023, -0.45321953296661377, -0.5172445774078369, -0.6934300661087036, 0.0, 0.0, 0.8664000034332275, 0.31056156754493713, 0.22492864727973938, -0.03197019547224045, 0.3105262815952301, -0.3957894742488861, -0.0321183055639267, 0.3995510935783386, -3.6325305700302124e-05, 0.9173180460929871],
+                "max": [0.4959534704685211, 0.395735502243042, 1.1273553371429443, 0.49640607833862305, -0.22631590068340302, 1.127084493637085, 0.1305837780237198, 0.32372820377349854, 0.11677340418100357, -0.9337179660797119, 0.45248445868492126, 0.5165674090385437, 0.4868347942829132, 0.13012374937534332, -0.1547607034444809, 0.5685178637504578, -0.9333935379981995, -0.1464923620223999, 0.2716745138168335, 0.48945197463035583, 0.0, 0.0, 0.8664000034332275, 0.49595338106155396, 0.39573541283607483, 0.2609550952911377, 0.4964057505130768, -0.22631579637527466, 0.2606841027736664, 0.44094258546829224, 0.00221467693336308, 1.131787896156311]
+            },
+            "action": {
+                "min": [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0],
+                "max": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+            }
+        },
+        "input_features": {
+            "observation.images.front": {
+                "type": "VISUAL",
+                "shape": [ 3, 224, 224 ]
+            },
+            "observation.state": {
+                "type": "STATE",
+                "shape": [ 32 ]
+            }
+        },
+        "output_features": {
+            "action": {
+                "type": "ACTION",
+                "shape": [ 6 ]
+            }
+        },
+        "device": "cuda",
+        "use_amp": false,
+        "storage_device": "cpu",
+        "vision_encoder_name": "helper2424/resnet10",
+        "freeze_vision_encoder": true,
+        "image_encoder_hidden_dim": 32,
+        "shared_encoder": true,
+        "num_discrete_actions": null,
+        "online_steps": 1000000,
+        "online_env_seed": 1000,
+        "online_buffer_capacity": 100000,
+        "offline_buffer_capacity": 100000,
+        "online_step_before_learning": 400,
+        "policy_update_freq": 1,
+        "discount": 0.95,
+        "temperature_init": 1.0,
+        "num_critics": 2,
+        "num_subsample_critics": null,
+        "critic_lr": 1e-3,
+        "actor_lr": 1e-3,
+        "temperature_lr": 1e-3,
+        "critic_target_update_weight": 0.005,
+        "utd_ratio": 1,
+        "state_encoder_hidden_dim": 256,
+        "latent_dim": 64,
+        "target_entropy": null,
+        "use_backup_entropy": true,
+        "grad_clip_norm": 10.0,
+        "actor_network_kwargs": {
+            "hidden_dims": [ 256, 256 ],
+            "activate_final": true
+        },
+        "critic_network_kwargs": {
+            "hidden_dims": [ 256, 256 ],
+            "activate_final": true,
+            "final_activation": null
+        },
+        "policy_kwargs": {
+            "use_tanh_squash": true,
+            "std_min": 1e-4,
+            "std_max": 2.0,
+            "init_final": 0.01
+        },
+        "warmup_model_path": "/home/lab/RL/lerobot/lerobot/scripts/rl/visual_mlp_network/transfer_mlp2actor/transferred_sac_model.safetensors",
+        "enable_warmup": true,
+        "warmup_freeze_loaded_params": false,
+        "warmup_strict_loading": false,
+        "use_torch_compile": true,
+        "actor_learner_config": {
+            "learner_host": "127.0.0.1",
+            "learner_port": 50051,
+            "policy_parameters_push_frequency": 1,
+            "queue_get_timeout": 2
+        },
+        "concurrency": {
+            "actor": "threads",
+            "learner": "threads"
+        }
+    },
+    "env": {
+        "type": "hil",
+        "wrapper": {
+            "control_time_s": 20.0,
+            "reset_time_s": 2.0,
+            "control_mode": "meta_vr",
+            "vel_smoothing_factor": 0.2,
+            "arm_smoothing_factor": 0.2,
+            "wbc_observation_enabled": false,
+            "display_cameras": false,
+            "add_joint_velocity_to_observation": false,
+            "add_ee_pose_to_observation": false,
+            "crop_params_dict": null,
+            "resize_size": null,
+            "fixed_reset_joint_positions": null,
+            "gripper_penalty": 0.0
+        },
+        "name": "rl_kuavo_MetaVR_env",
+        "mode": null,
+        "task": "RLKuavoMetaVR-v0",
+        "device": "cuda",
+        "fps": 10,
+        "use_viewer": true,
+        "use_gamepad": true,
+        "repo_id": null,
+        "dataset_root": null,
+        "num_episodes": 50,
+        "episode": 0,
+        "pretrained_policy_name_or_path": null,
+        "push_to_hub": true,
+        "features": {
+            "observation.images.front": {
+                "type": "VISUAL",
+                "shape": [
+                    3,
+                    224,
+                    224
+                ]
+            },
+            "observation.state": {
+                "type": "STATE",
+                "shape": [
+                    32
+                ]
+            },
+            "action": {
+                "type": "ACTION",
+                "shape": [
+                    6
+                ]
+            }
+        },
+        "features_map": {
+            "observation.images.front": "observation.images.front",
+            "observation.state": "observation.state",
+            "action": "action"
+        },
+        "reward_classifier_pretrained_path": null
+    }
+}

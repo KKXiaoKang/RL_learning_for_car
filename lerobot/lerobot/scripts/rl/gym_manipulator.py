@@ -2637,6 +2637,11 @@ def main(cfg: EnvConfig):
     policy = None
 
     if cfg.mode == "record":
+        # Set environment variable to enable feature visualization for record mode
+        # This allows gym_manipulator.py to publish vision features during recording
+        import os
+        os.environ['LEROBOT_PROCESS_TYPE'] = 'actor'
+        
         policy = None
         if cfg.pretrained_policy_name_or_path is not None:
             from lerobot.common.policies.sac.modeling_sac import SACPolicy
@@ -2660,6 +2665,11 @@ def main(cfg: EnvConfig):
         exit()
 
     if cfg.mode == "eval":
+        # Set environment variable to enable feature visualization for eval mode
+        # This allows gym_manipulator.py to publish vision features just like actor.py
+        import os
+        os.environ['LEROBOT_PROCESS_TYPE'] = 'actor'
+        
         policy = None
         if cfg.pretrained_policy_name_or_path is not None:
             from lerobot.common.policies.sac.modeling_sac import SACPolicy

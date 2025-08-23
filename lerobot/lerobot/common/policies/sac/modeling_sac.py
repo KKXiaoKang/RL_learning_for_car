@@ -634,7 +634,33 @@ class SACObservationEncoder(nn.Module):
 
     def _init_feature_visualization(self):
         """Initialize ROS publisher and utilities for feature visualization."""
-        self.enable_feature_viz = True
+        # Only enable feature visualization for actor processes, not learner
+        # Check if this is running in an actor context by looking for environment variables
+        # or process names that indicate actor usage
+        import os
+        import sys
+        
+        # Determine if this is an actor process
+        is_actor_process = False
+        
+        # Method 1: Check command line arguments
+        if 'actor.py' in ' '.join(sys.argv):
+            is_actor_process = True
+        
+        # Method 2: Check if environment variable is set (can be set by actor.py)
+        if os.environ.get('LEROBOT_PROCESS_TYPE') == 'actor':
+            is_actor_process = True
+            
+        # Method 3: Check process name/title
+        try:
+            import setproctitle
+            if 'actor' in setproctitle.getproctitle().lower():
+                is_actor_process = True
+        except ImportError:
+            pass
+        
+        # Only enable feature visualization for actor processes
+        self.enable_feature_viz = is_actor_process
 
         if self.enable_feature_viz and ROS_AVAILABLE and rospy is not None:
             try:

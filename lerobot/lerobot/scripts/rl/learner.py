@@ -111,6 +111,11 @@ DEBUG_PRINT_FLAG = False
 
 @parser.wrap()
 def train_cli(cfg: TrainRLServerPipelineConfig):
+    # Set environment variable to identify this as a learner process
+    # This will be used by the SACPolicy to disable feature visualization for learners
+    import os
+    os.environ['LEROBOT_PROCESS_TYPE'] = 'learner'
+    
     if not use_threads(cfg):
         import torch.multiprocessing as mp
 
