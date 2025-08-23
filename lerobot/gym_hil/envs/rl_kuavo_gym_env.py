@@ -650,6 +650,7 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         # Synchronized subscribers
         eef_left_sub = message_filters.Subscriber('/fk/eef_pose_left', PoseStamped)
         eef_right_sub = message_filters.Subscriber('/fk/eef_pose_right', PoseStamped)
+        # image_sub = message_filters.Subscriber('/camera/eval/image_raw', Image)
         image_sub = message_filters.Subscriber('/camera/rgb/image_raw', Image)
         sensors_sub = message_filters.Subscriber('/sensors_data_raw', sensorsData)
         box_real_sub = message_filters.Subscriber('/box_real_pose', PoseStamped)
