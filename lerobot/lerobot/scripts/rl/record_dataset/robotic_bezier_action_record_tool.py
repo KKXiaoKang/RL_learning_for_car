@@ -15,6 +15,12 @@ Also publishes trajectories as ROS messages for real-time execution.
 
     # 循环播放轨迹 + Actions
     python3 robotic_bezier_action_record_tool.py --mode play_actions --rate 10.0 --loop --debug
+    
+    # 使用当前机器人位置作为初始点来生成轨迹
+    python3 robotic_bezier_action_record_tool.py --mode actions --use-current-pose --debug
+    
+    # 播放轨迹时使用当前机器人位置作为起点
+    python3 robotic_bezier_action_record_tool.py --mode play_actions --use-current-pose --rate 10.0 --debug
 """
 
 import json
@@ -31,8 +37,9 @@ try:
     import rospy
     from kuavo_msgs.msg import twoArmHandPoseCmd, twoArmHandPose, ikSolveParam
     from visualization_msgs.msg import Marker, MarkerArray
-    from geometry_msgs.msg import Point
+    from geometry_msgs.msg import Point, PoseStamped
     from std_msgs.msg import ColorRGBA, Float64MultiArray, Bool
+    import threading
     ROS_AVAILABLE = True
 except ImportError:
     print("Warning: ROS packages not available. ROS functionality will be disabled.")
@@ -44,7 +51,8 @@ class BezierTrajectoryGenerator:
     Generates smooth Bézier trajectories for robotic end-effector motion.
     """
     
-    def __init__(self, key_points_file: str = "key_point.json", enable_ros: bool = True, debug: bool = False):
+    def __init__(self, key_points_file: str = "key_point.json", enable_ros: bool = True, debug: bool = False, 
+                 use_current_robot_pose: bool = False):
         """
         Initialize the Bézier trajectory generator.
         
@@ -52,11 +60,19 @@ class BezierTrajectoryGenerator:
             key_points_file: Path to the JSON file containing key-points
             enable_ros: Whether to enable ROS functionality
             debug: Whether to enable debug output
+            use_current_robot_pose: Whether to use current robot pose as initial key-point
         """
         self.key_points_file = key_points_file
-        self.key_points = self._load_key_points()
         self.enable_ros = enable_ros and ROS_AVAILABLE
         self.debug = debug
+        self.use_current_robot_pose = use_current_robot_pose
+        
+        # Current robot pose storage
+        self.latest_left_eef_pose = None
+        self.latest_right_eef_pose = None
+        self.left_eef_lock = threading.Lock()
+        self.right_eef_lock = threading.Lock()
+        self.poses_received = False
         
         # Trajectory control
         self.trajectory_paused = False
@@ -65,6 +81,9 @@ class BezierTrajectoryGenerator:
         # ROS setup
         if self.enable_ros:
             self._setup_ros()
+        
+        # Load key-points (after ROS setup if using current robot pose)
+        self.key_points = self._load_key_points()
     
     def _setup_ros(self):
         """Setup ROS node and publishers/subscribers."""
@@ -105,6 +124,18 @@ class BezierTrajectoryGenerator:
             # Create subscriber for trajectory pause/resume requests
             self.pause_sub = rospy.Subscriber("/sac/trajectory_pause_request", Bool, self._pause_callback)
             
+            # Create subscribers for current robot end-effector poses
+            if self.use_current_robot_pose:
+                self.left_eef_sub = rospy.Subscriber(
+                    "/fk/base_link_eef_left", PoseStamped, self._left_eef_pose_callback
+                )
+                self.right_eef_sub = rospy.Subscriber(
+                    "/fk/base_link_eef_right", PoseStamped, self._right_eef_pose_callback
+                )
+                print("Subscribed to current robot end-effector poses:")
+                print("  - /fk/base_link_eef_left")
+                print("  - /fk/base_link_eef_right")
+            
             # Wait for connections
             time.sleep(1.0)
             
@@ -128,15 +159,141 @@ class BezierTrajectoryGenerator:
         else:
             self.trajectory_paused = False
             print("[BEZIER DEBUG] Trajectory resumed!")
+    
+    def _left_eef_pose_callback(self, msg):
+        """Callback for left end-effector pose messages."""
+        with self.left_eef_lock:
+            self.latest_left_eef_pose = msg
+            if not self.poses_received and self.latest_right_eef_pose is not None:
+                self.poses_received = True
+                if self.debug:
+                    print("[BEZIER DEBUG] Received initial left end-effector pose")
+    
+    def _right_eef_pose_callback(self, msg):
+        """Callback for right end-effector pose messages."""
+        with self.right_eef_lock:
+            self.latest_right_eef_pose = msg
+            if not self.poses_received and self.latest_left_eef_pose is not None:
+                self.poses_received = True
+                if self.debug:
+                    print("[BEZIER DEBUG] Received initial right end-effector pose")
+    
+    def get_current_robot_poses(self, timeout: float = 5.0) -> Tuple[bool, Dict[str, Any]]:
+        """
+        Get current robot end-effector poses from ROS topics.
+        
+        Args:
+            timeout: Maximum time to wait for poses (seconds)
+            
+        Returns:
+            Tuple of (success, poses_dict) where poses_dict contains current poses
+        """
+        if not self.enable_ros or not self.use_current_robot_pose:
+            return False, {}
+        
+        print(f"Waiting for current robot end-effector poses (timeout: {timeout}s)...")
+        start_time = time.time()
+        
+        # Wait for poses to be received
+        while not self.poses_received and (time.time() - start_time) < timeout:
+            time.sleep(0.1)
+            if rospy.is_shutdown():
+                return False, {}
+        
+        if not self.poses_received:
+            print(f"Warning: Failed to receive robot poses within {timeout}s timeout")
+            return False, {}
+        
+        # Extract poses with thread safety
+        with self.left_eef_lock:
+            left_pose = self.latest_left_eef_pose
+        with self.right_eef_lock:
+            right_pose = self.latest_right_eef_pose
+            
+        if left_pose is None or right_pose is None:
+            print("Warning: One or both end-effector poses are None")
+            return False, {}
+        
+        # Convert PoseStamped to position and quaternion arrays
+        current_poses = {
+            'left_hand': {
+                'position': [
+                    left_pose.pose.position.x,
+                    left_pose.pose.position.y,
+                    left_pose.pose.position.z
+                ],
+                'quaternion': [
+                    left_pose.pose.orientation.x,
+                    left_pose.pose.orientation.y,
+                    left_pose.pose.orientation.z,
+                    left_pose.pose.orientation.w
+                ]
+            },
+            'right_hand': {
+                'position': [
+                    right_pose.pose.position.x,
+                    right_pose.pose.position.y,
+                    right_pose.pose.position.z
+                ],
+                'quaternion': [
+                    right_pose.pose.orientation.x,
+                    right_pose.pose.orientation.y,
+                    right_pose.pose.orientation.z,
+                    right_pose.pose.orientation.w
+                ]
+            }
+        }
+        
+        if self.debug:
+            print("[BEZIER DEBUG] Current robot poses:")
+            print(f"  Left hand: pos={current_poses['left_hand']['position']}, quat={current_poses['left_hand']['quaternion']}")
+            print(f"  Right hand: pos={current_poses['right_hand']['position']}, quat={current_poses['right_hand']['quaternion']}")
+        
+        return True, current_poses
         
     def _load_key_points(self) -> Dict[str, Any]:
-        """Load key-points from JSON file."""
+        """Load key-points from JSON file, optionally updating initial pose from robot."""
         script_dir = os.path.dirname(os.path.abspath(__file__))
         file_path = os.path.join(script_dir, self.key_points_file)
         
         with open(file_path, 'r') as f:
             data = json.load(f)
-        return data['key_points']
+        
+        key_points = data['key_points']
+        
+        # Update initial keyframe (frame_id: 0) with current robot pose if requested
+        if self.use_current_robot_pose and self.enable_ros:
+            success, current_poses = self.get_current_robot_poses(timeout=10.0)
+            
+            if success:
+                # Find frame_id 0 and update it
+                for i, keyframe in enumerate(key_points['keyframes']):
+                    if keyframe.get('frame_id', -1) == 0:
+                        print(f"[BEZIER INFO] Updating initial keyframe (frame_id: 0) with current robot pose")
+                        
+                        # Store original pose for reference
+                        if self.debug:
+                            print(f"  Original left hand: {keyframe['left_hand']}")
+                            print(f"  Original right hand: {keyframe['right_hand']}")
+                        
+                        # Update with current robot pose
+                        keyframe['left_hand']['position'] = current_poses['left_hand']['position']
+                        keyframe['left_hand']['quaternion'] = current_poses['left_hand']['quaternion']
+                        keyframe['right_hand']['position'] = current_poses['right_hand']['position']
+                        keyframe['right_hand']['quaternion'] = current_poses['right_hand']['quaternion']
+                        
+                        if self.debug:
+                            print(f"  Updated left hand: {keyframe['left_hand']}")
+                            print(f"  Updated right hand: {keyframe['right_hand']}")
+                        
+                        print(f"[BEZIER INFO] Successfully updated initial keyframe with current robot pose")
+                        break
+                else:
+                    print(f"[BEZIER WARNING] No keyframe with frame_id: 0 found, cannot update initial pose")
+            else:
+                print(f"[BEZIER WARNING] Failed to get current robot poses, using original keyframe data")
+        
+        return key_points
     
     def cubic_bezier(self, p0: np.ndarray, p1: np.ndarray, p2: np.ndarray, p3: np.ndarray, t: np.ndarray) -> np.ndarray:
         """
@@ -916,12 +1073,20 @@ def main():
                        help='Disable plot display (for visualization mode)')
     parser.add_argument('--debug', action='store_true', 
                        help='Enable debug output')
+    parser.add_argument('--use-current-pose', action='store_true',
+                       help='Use current robot pose as initial keyframe (frame_id: 0)')
+    parser.add_argument('--pose-timeout', type=float, default=5.0,
+                       help='Timeout for waiting current robot pose (seconds)')
     
     args = parser.parse_args()
     
     try:
         # Initialize the trajectory generator
-        generator = BezierTrajectoryGenerator(enable_ros=not args.no_ros, debug=args.debug)
+        generator = BezierTrajectoryGenerator(
+            enable_ros=not args.no_ros, 
+            debug=args.debug,
+            use_current_robot_pose=args.use_current_pose
+        )
         
         if args.mode == 'visualize':
             # Generate and visualize trajectories
@@ -1021,6 +1186,10 @@ def demo_usage():
             print("   python robotic_bezier_action_record_tool.py --mode rviz")
             print("   python robotic_bezier_action_record_tool.py --mode actions")
             print("   python robotic_bezier_action_record_tool.py --mode play_actions --rate 10.0")
+            print("\nNew Feature - Use Current Robot Pose:")
+            print("   python robotic_bezier_action_record_tool.py --mode actions --use-current-pose --debug")
+            print("   python robotic_bezier_action_record_tool.py --mode play_actions --use-current-pose --rate 10.0")
+            print("   python robotic_bezier_action_record_tool.py --mode visualize --use-current-pose --debug")
         else:
             print("\nNote: ROS packages not available. Install them to enable ROS functionality.")
             

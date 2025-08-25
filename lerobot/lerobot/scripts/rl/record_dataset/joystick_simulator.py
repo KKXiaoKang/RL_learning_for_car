@@ -245,7 +245,8 @@ class JoystickSimulator:
                 bezier_script, 
                 "--mode", "play_actions", 
                 "--rate", "15.0", 
-                "--debug"
+                "--debug",
+                "--use-current-pose"
             ]
             
             self.bezier_process = subprocess.Popen(

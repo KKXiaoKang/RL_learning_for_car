@@ -423,6 +423,80 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         except rospy.ROSException:
             rospy.logerr(f"Service {mobile_manipulator_service_name} not available")
 
+    def _compute_symmetry_constraint(self, left_pos: np.ndarray, right_pos: np.ndarray, box_pos: np.ndarray) -> float:
+        """
+        计算双臂对称性约束奖励。
+        
+        对称性约束包括：
+        1. 双手相对于箱子的对称性（镜像对称）
+        2. 双手高度的一致性  
+        3. 双手到箱子距离的均衡性
+        4. 双手Y坐标相对于箱子中心的对称性
+        
+        Args:
+            left_pos: 左手世界坐标位置 [x, y, z]
+            right_pos: 右手世界坐标位置 [x, y, z]
+            box_pos: 箱子世界坐标位置 [x, y, z]
+            
+        Returns:
+            symmetry_reward: 对称性奖励，值越大表示越对称
+        """
+        # 计算箱子中心作为对称轴
+        box_center_x = box_pos[0]
+        box_center_y = box_pos[1]
+        box_center_z = box_pos[2]
+        
+        # 1. Y坐标对称性（相对于箱子Y坐标的镜像对称）
+        left_y_offset = left_pos[1] - box_center_y   # 左手相对箱子的Y偏移
+        right_y_offset = right_pos[1] - box_center_y  # 右手相对箱子的Y偏移
+        
+        # 理想情况下：left_y_offset = -right_y_offset (镜像对称)
+        y_symmetry_error = np.abs(left_y_offset + right_y_offset)
+        y_symmetry_reward = np.exp(-5.0 * y_symmetry_error)  # 指数衰减，越对称奖励越大
+        
+        # 2. X坐标一致性（双手应该在相似的X位置）
+        x_consistency_error = np.abs(left_pos[0] - right_pos[0])
+        x_consistency_reward = np.exp(-3.0 * x_consistency_error)
+        
+        # 3. Z坐标一致性（双手高度应该相似）
+        z_consistency_error = np.abs(left_pos[2] - right_pos[2])
+        z_consistency_reward = np.exp(-5.0 * z_consistency_error)
+        
+        # 4. 双手到箱子距离的均衡性
+        left_to_box_dist = np.linalg.norm(left_pos - box_pos)
+        right_to_box_dist = np.linalg.norm(right_pos - box_pos)
+        distance_balance_error = np.abs(left_to_box_dist - right_to_box_dist)
+        distance_balance_reward = np.exp(-3.0 * distance_balance_error)
+        
+        # 5. 双手间距约束（防止双手过近或过远）
+        hand_distance = np.linalg.norm(left_pos - right_pos)
+        ideal_hand_distance = 0.4  # 理想双手间距40cm
+        hand_distance_error = np.abs(hand_distance - ideal_hand_distance)
+        hand_distance_reward = np.exp(-2.0 * hand_distance_error)
+        
+        # 组合对称性奖励（加权平均）
+        symmetry_reward = (
+            0.3 * y_symmetry_reward +      # Y轴对称性最重要
+            0.2 * x_consistency_reward +    # X坐标一致性
+            0.2 * z_consistency_reward +    # Z坐标一致性  
+            0.2 * distance_balance_reward +  # 距离均衡性
+            0.1 * hand_distance_reward      # 双手间距
+        )
+        
+        # 转换为负奖励形式（与其他MSE奖励保持一致）
+        symmetry_penalty = -(1.0 - symmetry_reward)  # 将[0,1]转换为[-1,0]
+        
+        # Debug信息
+        if self.debug and self.episode_step_count % 20 == 0:
+            print(f"[SYMMETRY DEBUG] Y-symmetry error: {y_symmetry_error:.4f}, reward: {y_symmetry_reward:.4f}")
+            print(f"[SYMMETRY DEBUG] X-consistency error: {x_consistency_error:.4f}, reward: {x_consistency_reward:.4f}")
+            print(f"[SYMMETRY DEBUG] Z-consistency error: {z_consistency_error:.4f}, reward: {z_consistency_reward:.4f}")
+            print(f"[SYMMETRY DEBUG] Distance balance error: {distance_balance_error:.4f}, reward: {distance_balance_reward:.4f}")
+            print(f"[SYMMETRY DEBUG] Hand distance: {hand_distance:.4f}m (ideal: {ideal_hand_distance:.4f}m)")
+            print(f"[SYMMETRY DEBUG] Total symmetry reward: {symmetry_penalty:.4f}")
+        
+        return symmetry_penalty
+
     def _generate_random_initial_positions(self):
         """
         生成随机的初始手臂位置
@@ -1270,17 +1344,30 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             mse_right_eef = np.mean((current_right_eef_pos_world - target_right_eef_pos_world) ** 2)
             mse_eef = -(mse_left_eef + mse_right_eef)  # 负MSE，越小越好
             
+            # ========== 手臂对称性软约束 ==========
+            current_left_eef_pos_world = agent_state[0:3]   # world坐标系左手位置
+            current_right_eef_pos_world = agent_state[3:6]  # world坐标系右手位置
+            
+            # 计算对称性奖励
+            symmetry_reward = self._compute_symmetry_constraint(
+                current_left_eef_pos_world, 
+                current_right_eef_pos_world, 
+                current_box_pos_world
+            )
+            
             # 应用权重：让箱子移动奖励更大
             weighted_hand_reward = self.hand_reward_weight * mse_eef
             weighted_box_reward = self.box_reward_weight * mse_box
+            weighted_symmetry_reward = 0.5 * symmetry_reward  # 对称性权重，可调节
             
             # 使用加权的MSE，让agent优先考虑箱子移动
-            reward = weighted_hand_reward + weighted_box_reward + box_down_fail
+            reward = weighted_hand_reward + weighted_box_reward + weighted_symmetry_reward + box_down_fail
             
             # Debug信息 - 显示权重应用效果
             if self.debug and self.episode_step_count % 20 == 0:  # 每20步打印一次
                 print(f"[REWARD DEBUG] Hand MSE: {-mse_eef:.6f}, Box MSE: {-mse_box:.6f}")
                 print(f"[REWARD DEBUG] Weighted Hand: {weighted_hand_reward:.6f}, Weighted Box: {weighted_box_reward:.6f}")
+                print(f"[REWARD DEBUG] Weighted Symmetry: {weighted_symmetry_reward:.6f}")
                 print(f"[REWARD DEBUG] Hand weight: {self.hand_reward_weight}, Box weight: {self.box_reward_weight}")
                 print(f"[REWARD DEBUG] Total reward (before scale): {reward:.6f}")
             
