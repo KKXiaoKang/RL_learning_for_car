@@ -266,6 +266,8 @@ class HILEnvConfig(EnvConfig):
     pretrained_policy_name_or_path: Optional[str] = None
     # For the reward classifier, to record more positive examples after a success
     number_of_steps_after_success: int = 0
+    # Enable feature visualization for vision encoders
+    enable_feature_visualization: bool = False
     ############################
 
     @property

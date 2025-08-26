@@ -55,5 +55,6 @@
         "observation.state": "observation.state",
         "action": "action"
     },
-    "reward_classifier_pretrained_path": null
+    "reward_classifier_pretrained_path": null,
+    "enable_feature_visualization": true
 }

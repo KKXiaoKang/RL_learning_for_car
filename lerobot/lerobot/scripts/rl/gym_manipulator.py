@@ -2647,6 +2647,14 @@ def main(cfg: EnvConfig):
             from lerobot.common.policies.sac.modeling_sac import SACPolicy
 
             policy = SACPolicy.from_pretrained(cfg.pretrained_policy_name_or_path)
+            
+            # Update policy config with environment's feature visualization setting
+            if hasattr(cfg, 'enable_feature_visualization'):
+                policy.config.enable_feature_visualization = cfg.enable_feature_visualization
+                # Re-initialize feature visualization with the new setting
+                if hasattr(policy.actor, 'encoder') and hasattr(policy.actor.encoder, '_init_feature_visualization'):
+                    policy.actor.encoder._init_feature_visualization()
+            
             policy.to(cfg.device)
             policy.eval()
 
@@ -2675,8 +2683,22 @@ def main(cfg: EnvConfig):
             from lerobot.common.policies.sac.modeling_sac import SACPolicy
             print(f"cfg.pretrained_policy_name_or_path: {cfg.pretrained_policy_name_or_path}")
             policy = SACPolicy.from_pretrained(cfg.pretrained_policy_name_or_path)
+            
+            # Update policy config with environment's feature visualization setting
+            if hasattr(cfg, 'enable_feature_visualization'):
+                policy.config.enable_feature_visualization = cfg.enable_feature_visualization
+                # Re-initialize feature visualization with the new setting
+                if hasattr(policy.actor, 'encoder') and hasattr(policy.actor.encoder, '_init_feature_visualization'):
+                    policy.actor.encoder._init_feature_visualization()
+            
             policy.to(cfg.device)
             policy.eval()
+    
+    # For inference/evaluation without explicit mode setting, also enable feature visualization
+    # This handles cases where gym_manipulator.py is used for policy evaluation
+    if policy is not None and not hasattr(cfg, 'mode'):
+        import os
+        os.environ['LEROBOT_PROCESS_TYPE'] = 'actor'
 
     obs, _ = env.reset()
 

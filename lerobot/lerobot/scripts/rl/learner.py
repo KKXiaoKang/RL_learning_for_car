@@ -115,6 +115,7 @@ def train_cli(cfg: TrainRLServerPipelineConfig):
     # This will be used by the SACPolicy to disable feature visualization for learners
     import os
     os.environ['LEROBOT_PROCESS_TYPE'] = 'learner'
+    os.environ['LEROBOT_IS_LEARNER'] = 'true'
     
     if not use_threads(cfg):
         import torch.multiprocessing as mp

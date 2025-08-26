@@ -638,35 +638,48 @@ class SACObservationEncoder(nn.Module):
         if not getattr(self.config, 'enable_feature_visualization', False):
             self.enable_feature_viz = False
             self.feature_viz_enabled = False
+            rospy.loginfo("-- Feature visualization disabled in config -- enable_feature_visualization: False")
             return
             
-        # Only enable feature visualization for actor processes, not learner
-        # Check if this is running in an actor context by looking for environment variables
-        # or process names that indicate actor usage
+        # Determine which processes should enable feature visualization
         import os
         import sys
         
-        # Determine if this is an actor process
-        is_actor_process = False
+        # Determine if this should enable feature visualization
+        should_enable_viz = False
         
-        # Method 1: Check command line arguments
-        if 'actor.py' in ' '.join(sys.argv):
-            is_actor_process = True
+        # Method 1: Check command line arguments for inference scripts
+        cmd_line = ' '.join(sys.argv)
+        if 'gym_manipulator.py' in cmd_line or 'actor.py' in cmd_line:
+            should_enable_viz = True
         
-        # Method 2: Check if environment variable is set (can be set by actor.py)
-        if os.environ.get('LEROBOT_PROCESS_TYPE') == 'actor':
-            is_actor_process = True
+        # Method 2: Check if environment variable is set (can be set by actor.py or gym_manipulator.py)
+        process_type = os.environ.get('LEROBOT_PROCESS_TYPE')
+        if process_type == 'actor':
+            should_enable_viz = True
             
         # Method 3: Check process name/title
         try:
             import setproctitle
-            if 'actor' in setproctitle.getproctitle().lower():
-                is_actor_process = True
+            proc_title = setproctitle.getproctitle().lower()
+            if 'actor' in proc_title or 'gym_manipulator' in proc_title:
+                should_enable_viz = True
         except ImportError:
             pass
         
-        # Only enable feature visualization for actor processes and when config allows it
-        self.enable_feature_viz = is_actor_process
+        # Method 4: Check if this is an inference/evaluation context
+        # If we're loading a pretrained model and not in a learner context, enable visualization
+        if not should_enable_viz:
+            # Check if we're in a learner process (learners typically don't need visualization)
+            is_learner = ('learner.py' in cmd_line or 
+                         process_type == 'learner' or
+                         os.environ.get('LEROBOT_IS_LEARNER') == 'true')
+            
+            if not is_learner:
+                # This is likely an inference/evaluation context
+                should_enable_viz = True
+        
+        self.enable_feature_viz = should_enable_viz
 
         if self.enable_feature_viz and ROS_AVAILABLE and rospy is not None:
             try:
@@ -679,6 +692,7 @@ class SACObservationEncoder(nn.Module):
                 self.feature_viz_enabled = False
         else:
             self.feature_viz_enabled = False
+            rospy.loginfo("-- Feature visualization disabled -- [if self.enable_feature_viz and ROS_AVAILABLE and rospy is not None] ")
 
     def _visualize_features(self, features: Tensor, image_key: str = "observation.image.front"):
         """
