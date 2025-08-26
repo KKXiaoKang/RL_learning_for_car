@@ -245,6 +245,23 @@ conda activate lerobot_rl
 python3 lerobot/scripts/rl/gym_manipulator.py --config_path config/Isaac_lab_kuavo_env/gym_env/eef_gym_hil_env_meta_obs_32_action_06_record.json
 ```
 
+### 4）录制的数据可视化
+* ![rerun-sdk-web-server](./IMG/rerun_web_server.jpg)
+```bash
+Python脚本 → gRPC连接 → Rerun Web Viewer服务器 → Web浏览器
+     ↓              ↓              ↓              ↓
+  数据集数据    rerun+http://    端口9095      端口9090
+             127.0.0.1:9095/proxy
+
+# local可视化 - 本地grpc服务器
+python3 lerobot/scripts/visualize_dataset.py --repo-id /root/RL_learning_for_car/lerobot_data/rl_graspbox_increase_0818_vision_random --episode-index 25
+
+# 在远程服务器当中创建web-socket通信，通过本机端口查看web可视化
+rerun --web-viewer --port 9095  # Rerun Web Viewer 服务器 | grpc服务器监听端口 9095，等待 gRPC 连接 | 同时启动一个 Web 服务器在端口 9090，提供浏览器访问界面
+
+python3 lerobot/scripts/visualize_dataset_web_server.py --repo-id /root/RL_learning_for_car/lerobot_data/rl_graspbox_increase_0818_vision_random --episode-index 25 # 通过 gRPC 协议连接到第一步启动的 Web Viewer 服务器 | 建立数据流通道
+```
+
 ## on-line learning阶段
 ### 1）启动机器人env环境
 * 和上一步一样省略
