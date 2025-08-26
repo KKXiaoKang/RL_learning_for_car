@@ -129,6 +129,8 @@ class SACConfig(PreTrainedConfig):
     freeze_vision_encoder: bool = True
     # Whether to disable vision features entirely (useful for debugging or ablation studies)
     disable_vision_features: bool = False
+    # Whether to enable ResNet feature visualization (publishes features to ROS topic)
+    enable_feature_visualization: bool = False
     # Hidden dimension size for the image encoder
     image_encoder_hidden_dim: int = 32
     # Whether to use a shared encoder for actor and critic

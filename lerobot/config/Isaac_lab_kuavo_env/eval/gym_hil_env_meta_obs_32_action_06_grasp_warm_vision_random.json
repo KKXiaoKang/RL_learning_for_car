@@ -26,7 +26,7 @@
     "dataset_root": null,
     "num_episodes": 11,
     "episode": 0,
-    "pretrained_policy_name_or_path": "/home/lab/RL/lerobot/outputs/train/2025-08-22/18-56-12_20_warm_up_grasp_box_kuavo_reward_mse_demo01_action_06_yes_dataset_temp01_discount095_fps10_seed1000s/checkpoints/last/pretrained_model",
+    "pretrained_policy_name_or_path": "/home/lab/RL/lerobot/outputs/train/2025-08-25/13-46-32_21_vision_random_eef_pose_warm_up_grasp_box_kuavo_reward_mse_demo01_action_06_yes_dataset/checkpoints/last/pretrained_model",
     "push_to_hub": true,
     "features": {
         "observation.images.front": {

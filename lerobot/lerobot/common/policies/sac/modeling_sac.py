@@ -634,6 +634,12 @@ class SACObservationEncoder(nn.Module):
 
     def _init_feature_visualization(self):
         """Initialize ROS publisher and utilities for feature visualization."""
+        # Check if feature visualization is enabled in config
+        if not getattr(self.config, 'enable_feature_visualization', False):
+            self.enable_feature_viz = False
+            self.feature_viz_enabled = False
+            return
+            
         # Only enable feature visualization for actor processes, not learner
         # Check if this is running in an actor context by looking for environment variables
         # or process names that indicate actor usage
@@ -659,7 +665,7 @@ class SACObservationEncoder(nn.Module):
         except ImportError:
             pass
         
-        # Only enable feature visualization for actor processes
+        # Only enable feature visualization for actor processes and when config allows it
         self.enable_feature_viz = is_actor_process
 
         if self.enable_feature_viz and ROS_AVAILABLE and rospy is not None:
