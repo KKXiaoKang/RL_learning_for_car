@@ -15,6 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import math
 from dataclasses import asdict
 from typing import Callable, Literal
@@ -217,10 +218,16 @@ class SACPolicy(
             )
             return {"loss_discrete_critic": loss_discrete_critic}
         if model == "actor":
+            # 提取专家动作（如果可用）和训练步数
+            expert_actions = batch.get("expert_action")
+            training_step = batch.get("training_step", 0)
+            
             return {
                 "loss_actor": self.compute_loss_actor(
                     observations=observations,
                     observation_features=observation_features,
+                    expert_actions=expert_actions,
+                    training_step=training_step,
                 )
             }
 
@@ -394,7 +401,21 @@ class SACPolicy(
         self,
         observations,
         observation_features: Tensor | None = None,
+        expert_actions: Tensor | None = None,
+        training_step: int = 0,
     ) -> Tensor:
+        """
+        计算Actor损失，包含SAC损失和可选的BC损失
+        
+        Args:
+            observations: 观测数据
+            observation_features: 预计算的观测特征
+            expert_actions: 专家动作（来自离线数据集），用于计算BC损失
+            training_step: 当前训练步数，用于动态权重计算
+            
+        Returns:
+            Actor总损失
+        """
         actions_pi, log_probs, _ = self.actor(observations, observation_features)
 
         q_preds = self.critic_forward(
@@ -405,11 +426,112 @@ class SACPolicy(
         )
         min_q_preds = q_preds.min(dim=0)[0]
 
-        # TODO
-        dynamic_weight_bc_mse_loss = 1.0 # 动态权重，用于平衡BC的MSE损失和SAC的损失 | 需要从一个占比比较大后期根据熵温度自行调整小
-        bc_mse_loss = 0 # 需要替换为BC的MSE损失，BC参考state-action专家数据动作对，计算MSE损失 | 
-        actor_loss = ((self.temperature * log_probs) - min_q_preds).mean() + dynamic_weight_bc_mse_loss * bc_mse_loss
+        # 计算标准SAC Actor损失
+        sac_actor_loss = ((self.temperature * log_probs) - min_q_preds).mean()
+        
+        # 如果有专家动作，计算BC损失
+        if expert_actions is not None:
+            bc_mse_loss = self._compute_bc_loss(
+                predicted_actions=actions_pi,
+                expert_actions=expert_actions
+            )
+            
+            # 计算动态权重（随训练步数衰减）
+            bc_weight = self._compute_dynamic_bc_weight(training_step)
+            sac_weight = 1.0 - bc_weight
+            
+            # 混合损失
+            actor_loss = sac_weight * sac_actor_loss + bc_weight * bc_mse_loss
+            
+            # 存储损失组件用于日志记录
+            self._last_bc_loss = bc_mse_loss.detach().clone()
+            self._last_bc_weight = bc_weight
+            self._last_sac_actor_loss = sac_actor_loss.detach().clone()
+        else:
+            # 纯SAC损失
+            actor_loss = sac_actor_loss
+            self._last_bc_loss = None
+            self._last_bc_weight = 0.0
+            self._last_sac_actor_loss = sac_actor_loss.detach().clone()
+            
         return actor_loss
+    
+    def _compute_bc_loss(self, predicted_actions: Tensor, expert_actions: Tensor) -> Tensor:
+        """
+        计算行为克隆的MSE损失
+        
+        Args:
+            predicted_actions: 策略网络预测的动作
+            expert_actions: 专家演示的动作
+            
+        Returns:
+            BC MSE损失
+        """
+        # 记录原始形状用于调试
+        orig_pred_shape = predicted_actions.shape
+        orig_expert_shape = expert_actions.shape
+        
+        # 首先处理动作维度不匹配的问题
+        if predicted_actions.shape[1] != expert_actions.shape[1]:
+            # 如果有离散动作维度，只使用连续部分
+            if self.config.num_discrete_actions is not None:
+                expert_actions = expert_actions[:, :predicted_actions.shape[1]]
+                logging.debug(f"BC: Adjusted expert action dims for discrete actions: {orig_expert_shape} -> {expert_actions.shape}")
+            else:
+                raise ValueError(f"Action dimension mismatch: predicted {predicted_actions.shape[1]} dims, expert {expert_actions.shape[1]} dims")
+        
+        # 处理批次大小不匹配的问题
+        if predicted_actions.shape[0] != expert_actions.shape[0]:
+            pred_batch_size = predicted_actions.shape[0]
+            expert_batch_size = expert_actions.shape[0]
+            
+            if expert_batch_size < pred_batch_size:
+                # 重复专家动作以匹配预测批次大小
+                repeat_times = (pred_batch_size + expert_batch_size - 1) // expert_batch_size
+                expert_actions = expert_actions.repeat(repeat_times, 1)[:pred_batch_size]
+                logging.debug(f"BC: Repeated expert actions: {orig_expert_shape} -> {expert_actions.shape}")
+            elif expert_batch_size > pred_batch_size:
+                # 截断专家动作以匹配预测批次大小
+                expert_actions = expert_actions[:pred_batch_size]
+                logging.debug(f"BC: Truncated expert actions: {orig_expert_shape} -> {expert_actions.shape}")
+        
+        # 最终检查形状是否匹配
+        if predicted_actions.shape != expert_actions.shape:
+            raise ValueError(f"Final shape mismatch after adjustments: predicted {predicted_actions.shape}, expert {expert_actions.shape}")
+        
+        # 计算MSE损失
+        bc_loss = F.mse_loss(predicted_actions, expert_actions)
+        return bc_loss
+    
+    def _compute_dynamic_bc_weight(self, training_step: int) -> float:
+        """
+        计算动态BC权重，随训练步数衰减
+        
+        策略：
+        - 初始权重：0.5（BC和SAC各占一半）
+        - 衰减方式：指数衰减
+        - 最终权重：0.01（保持少量BC正则化）
+        - 衰减步数：根据配置设定
+        
+        Args:
+            training_step: 当前训练步数
+            
+        Returns:
+            BC权重（0-1之间）
+        """
+        # 从配置中获取衰减参数，如果没有则使用默认值
+        initial_bc_weight = getattr(self.config, 'bc_initial_weight', 0.5)
+        final_bc_weight = getattr(self.config, 'bc_final_weight', 0.01)
+        bc_decay_steps = getattr(self.config, 'bc_decay_steps', 50000)
+        
+        if training_step >= bc_decay_steps:
+            return final_bc_weight
+        
+        # 指数衰减
+        decay_ratio = training_step / bc_decay_steps
+        weight = initial_bc_weight * (final_bc_weight / initial_bc_weight) ** decay_ratio
+        
+        return max(weight, final_bc_weight)
 
     def _init_normalization(self, dataset_stats):
         """Initialize input/output normalization modules."""

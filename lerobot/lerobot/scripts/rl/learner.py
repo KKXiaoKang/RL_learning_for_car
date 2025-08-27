@@ -552,6 +552,7 @@ def add_actor_information_and_train(
         batch = next(online_iterator)
 
         # 如果有离线数据集，则同时采样离线数据
+        batch_offline = None
         if dataset_repo_id is not None:
             batch_offline = next(offline_iterator)
             # 将在线和离线批次数据连接起来
@@ -586,7 +587,41 @@ def add_actor_information_and_train(
             "done": done,  # 完成标志
             "observation_feature": observation_features,  # 观测特征
             "next_observation_feature": next_observation_features,  # 下一观测特征
+            "training_step": optimization_step,  # 当前训练步数，用于BC权重衰减
         }
+        
+        # 如果批次包含离线数据，则添加expert_action用于BC损失计算
+        if dataset_repo_id is not None and batch_offline is not None:
+            total_batch_size = actions.shape[0]
+            offline_batch_size = batch_offline["action"].shape[0]
+            
+            if offline_batch_size > 0:
+                # concatenate_batch_transitions将数据按以下方式连接：
+                # [在线数据(batch_size), 离线数据(batch_size)]
+                # 因此，离线数据（专家动作）位于后半部分
+                if total_batch_size == offline_batch_size * 2:
+                    # 标准情况：总批次大小 = 在线批次大小 + 离线批次大小
+                    # 提取后半部分作为专家动作
+                    expert_actions_from_batch = actions[offline_batch_size:]
+                    forward_batch["expert_action"] = expert_actions_from_batch
+                    logging.debug(f"BC: Using expert actions from mixed batch - shape: {expert_actions_from_batch.shape}")
+                else:
+                    # 异常情况处理：批次大小不匹配时的fallback
+                    logging.warning(f"Batch size mismatch: total={total_batch_size}, offline={offline_batch_size}")
+                    # 使用原始离线批次，重复填充到匹配总批次大小
+                    expert_actions = batch_offline["action"]
+                    if expert_actions.shape[0] < total_batch_size:
+                        # 重复专家动作以匹配batch size
+                        repeat_times = (total_batch_size + expert_actions.shape[0] - 1) // expert_actions.shape[0]
+                        expert_actions = expert_actions.repeat(repeat_times, 1)[:total_batch_size]
+                        logging.debug(f"BC: Repeated expert actions to match batch size - shape: {expert_actions.shape}")
+                    elif expert_actions.shape[0] > total_batch_size:
+                        # 截断专家动作以匹配batch size
+                        expert_actions = expert_actions[:total_batch_size]
+                        logging.debug(f"BC: Truncated expert actions to match batch size - shape: {expert_actions.shape}")
+                    forward_batch["expert_action"] = expert_actions
+            else:
+                logging.debug("BC: No offline data available for BC loss calculation")
 
         # 计算评论家输出
         critic_output = policy.forward(forward_batch, model="critic")
@@ -648,6 +683,12 @@ def add_actor_information_and_train(
                 # 将Actor信息添加到训练信息中
                 training_infos["loss_actor"] = loss_actor.item()  # Actor损失
                 training_infos["actor_grad_norm"] = actor_grad_norm  # Actor梯度范数
+                
+                # 添加BC相关的训练信息（如果可用）
+                if hasattr(policy, '_last_bc_loss') and policy._last_bc_loss is not None:
+                    training_infos["bc_loss"] = policy._last_bc_loss.item()
+                    training_infos["bc_weight"] = policy._last_bc_weight
+                    training_infos["sac_actor_loss"] = policy._last_sac_actor_loss.item()
 
                 # 温度优化
                 temperature_output = policy.forward(forward_batch, model="temperature")  # 计算温度输出

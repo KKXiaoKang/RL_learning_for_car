@@ -210,6 +210,14 @@ class SACConfig(PreTrainedConfig):
     # Whether to require strict parameter matching during warm-up loading
     warmup_strict_loading: bool = False
 
+    # Behavior Cloning (BC) hybrid loss configuration
+    # Initial weight for BC loss in hybrid BC+SAC loss (0.0-1.0)
+    bc_initial_weight: float = 0.5
+    # Final weight for BC loss after decay (0.0-1.0)  
+    bc_final_weight: float = 0.01
+    # Number of training steps over which to decay BC weight
+    bc_decay_steps: int = 50000
+
     # Optimizations
     use_torch_compile: bool = True
 
