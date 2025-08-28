@@ -342,6 +342,8 @@ class LeRobotDataset(torch.utils.data.Dataset):
         force_cache_sync: bool = False,
         download_videos: bool = True,
         video_backend: str | None = None,
+        reward_start_pct: float | None = 0.05,
+        reward_end_pct: float | None = 0.95,
     ):
         """
         2 modes are available for instantiating this class, depending on 2 different use cases:
@@ -454,6 +456,10 @@ class LeRobotDataset(torch.utils.data.Dataset):
         self.revision = revision if revision else CODEBASE_VERSION
         self.video_backend = video_backend if video_backend else get_safe_default_codec()
         self.delta_indices = None
+
+        # New params for implicit reward modelling
+        self.reward_start_pct = reward_start_pct
+        self.reward_end_pct = reward_end_pct
 
         # Unused attributes
         self.image_writer = None
@@ -726,6 +732,28 @@ class LeRobotDataset(torch.utils.data.Dataset):
         task_idx = item["task_index"].item()
         item["task"] = self.meta.tasks[task_idx]
 
+        # Calculate reward based on linear interpolation within episode
+        if self.reward_start_pct is not None and self.reward_end_pct is not None:
+            episode_length = self.meta.episodes[ep_idx]["length"]
+            ep_start = self.episode_data_index["from"][ep_idx]
+            frame_index_in_episode = idx - ep_start.item()
+
+            # Calculate progress as a fraction of the episode (0.0 to 1.0)
+            progress = frame_index_in_episode / (episode_length - 1) if episode_length > 1 else 0.0
+
+            if progress <= self.reward_start_pct:
+                reward = 0.0
+            elif progress >= self.reward_end_pct:
+                reward = 1.0
+            else:
+                # Linear interpolation between start and end percentages
+                interpolation_progress = (progress - self.reward_start_pct) / (
+                    self.reward_end_pct - self.reward_start_pct
+                )
+                reward = interpolation_progress
+
+            item["reward"] = torch.tensor(reward, dtype=torch.float32)
+
         return item
 
     def __repr__(self):
@@ -972,6 +1000,8 @@ class LeRobotDataset(torch.utils.data.Dataset):
         image_writer_processes: int = 0,
         image_writer_threads: int = 0,
         video_backend: str | None = None,
+        reward_start_pct: float | None = None,
+        reward_end_pct: float | None = None,
     ) -> "LeRobotDataset":
         """Create a LeRobot Dataset from scratch in order to record data."""
         obj = cls.__new__(cls)
@@ -989,6 +1019,9 @@ class LeRobotDataset(torch.utils.data.Dataset):
         obj.tolerance_s = tolerance_s
         obj.image_writer = None
 
+        obj.reward_start_pct = reward_start_pct
+        obj.reward_end_pct = reward_end_pct
+        
         if image_writer_processes or image_writer_threads:
             obj.start_image_writer(image_writer_processes, image_writer_threads)
 

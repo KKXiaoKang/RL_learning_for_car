@@ -128,6 +128,21 @@ class ACTConfig(PreTrainedConfig):
     # Note: the value used in ACT when temporal ensembling is enabled is 0.01.
     temporal_ensemble_coeff: float | None = None
 
+    # Reward prediction head
+    use_reward_head: bool = True
+    reward_loss_weight: float = 2.0
+    
+    # Multi-head action prediction
+    use_multi_action_heads: bool = True
+    action_arm_dim: int = 14  # arm joint dimensions (0-13)
+    action_torso_dim: int = 6  # base pose dimensions (14-19)
+    action_hand_dim: int = 12  # hand wrench dimensions (20-31)
+    
+    # Loss weights for different action heads
+    arm_loss_weight: float = 1.0
+    torso_loss_weight: float = 1.0
+    hand_loss_weight: float = 1.0
+
     # Training and loss computation.
     dropout: float = 0.1
     kl_weight: float = 10.0

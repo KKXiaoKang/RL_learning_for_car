@@ -176,11 +176,16 @@ class SACPolicy(
             The computed loss tensor
         """
         # Extract common components from batch
-        actions: Tensor = batch["action"]
-        observations: dict[str, Tensor] = batch["state"]
+        # 注意：对于序列ACT Actor的情况，action可能不存在
+        actions: Tensor = batch.get("action")  # 对于序列ACT可能为None
+        observations: dict[str, Tensor] | list[dict[str, Tensor]] = batch["state"]  # 可能是序列
         observation_features: Tensor = batch.get("observation_feature")
 
         if model == "critic":
+            # Critic需要actions，确保它存在
+            if actions is None:
+                raise ValueError("Critic loss computation requires 'action' in batch")
+            
             # Extract critic-specific components
             rewards: Tensor = batch["reward"]
             next_observations: dict[str, Tensor] = batch["next_state"]
@@ -200,6 +205,10 @@ class SACPolicy(
             return {"loss_critic": loss_critic}
 
         if model == "discrete_critic" and self.config.num_discrete_actions is not None:
+            # Discrete critic也需要actions
+            if actions is None:
+                raise ValueError("Discrete critic loss computation requires 'action' in batch")
+            
             # Extract critic-specific components
             rewards: Tensor = batch["reward"]
             next_observations: dict[str, Tensor] = batch["next_state"]
@@ -220,6 +229,7 @@ class SACPolicy(
         if model == "actor":
             # 提取专家动作（如果可用）和训练步数
             expert_actions = batch.get("expert_action")
+            expert_action_sequences = batch.get("expert_action_sequences")
             training_step = batch.get("training_step", 0)
             
             return {
@@ -227,6 +237,7 @@ class SACPolicy(
                     observations=observations,
                     observation_features=observation_features,
                     expert_actions=expert_actions,
+                    expert_action_sequences=expert_action_sequences,
                     training_step=training_step,
                 )
             }
@@ -275,6 +286,7 @@ class SACPolicy(
         done,
         observation_features: Tensor | None = None,
         next_observation_features: Tensor | None = None,
+        use_n_step_backup: bool = False,  # Q-chunking的n-step backup选项
     ) -> Tensor:
         with torch.no_grad():
             next_action_preds, next_log_probs, _ = self.actor(next_observations, next_observation_features)
@@ -299,7 +311,24 @@ class SACPolicy(
             if self.config.use_backup_entropy:
                 min_q = min_q - (self.temperature * next_log_probs)
 
-            td_target = rewards + (1 - done) * self.config.discount * min_q
+            # Q-chunking可选：使用n-step backup进行更稳定的TD学习
+            if use_n_step_backup and hasattr(self.actor, 'compute_n_step_returns'):
+                # 如果使用序列ACT Actor，可以利用其n-step return计算
+                try:
+                    n_step_returns = self.actor.compute_n_step_returns(
+                        rewards=rewards,
+                        next_observations=next_observations,
+                        done=done,
+                        gamma=self.config.discount,
+                        observation_features=next_observation_features
+                    )
+                    td_target = n_step_returns + (1 - done) * (self.config.discount ** self.actor.chunk_size) * min_q
+                except Exception as e:
+                    logging.warning(f"Failed to compute n-step returns, falling back to 1-step: {e}")
+                    td_target = rewards + (1 - done) * self.config.discount * min_q
+            else:
+                # 标准1-step TD target
+                td_target = rewards + (1 - done) * self.config.discount * min_q
 
             # Store td_target for wandb logging (detach to avoid affecting gradients)
             self.last_td_target = td_target.detach().clone()
@@ -402,22 +431,45 @@ class SACPolicy(
         observations,
         observation_features: Tensor | None = None,
         expert_actions: Tensor | None = None,
+        expert_action_sequences: Tensor | None = None,  # 专家动作序列用于序列ACT
         training_step: int = 0,
     ) -> Tensor:
         """
         计算Actor损失，包含SAC损失和可选的BC损失
         
+        支持传统MLP Actor、基础ACT Actor和序列ACT Actor三种架构
+        
         Args:
             observations: 观测数据
             observation_features: 预计算的观测特征
-            expert_actions: 专家动作（来自离线数据集），用于计算BC损失
+            expert_actions: 专家动作（来自离线数据集），用于计算单步BC损失
+            expert_action_sequences: 专家动作序列，用于序列ACT的BC损失
             training_step: 当前训练步数，用于动态权重计算
             
         Returns:
             Actor总损失
         """
-        actions_pi, log_probs, _ = self.actor(observations, observation_features)
+        # 检查Actor类型
+        use_act_actor = getattr(self.config, 'use_act_actor', False)
+        use_sequence_act_actor = getattr(self.config, 'use_sequence_act_actor', False)
+        
+        if use_act_actor and use_sequence_act_actor:
+            # 序列ACT Actor - 支持动作序列预测
+            return self._compute_sequence_actor_loss(
+                observations=observations,
+                observation_features=observation_features,
+                expert_actions=expert_actions,
+                expert_action_sequences=expert_action_sequences,
+                training_step=training_step
+            )
+        elif use_act_actor:
+            # 基础ACT Actor - 单步预测
+            actions_pi, log_probs, means = self.actor(observations, observation_features)
+        else:
+            # 传统MLP Actor
+            actions_pi, log_probs, _ = self.actor(observations, observation_features)
 
+        # 传统单步损失计算
         q_preds = self.critic_forward(
             observations=observations,
             actions=actions_pi,
@@ -431,10 +483,18 @@ class SACPolicy(
         
         # 如果有专家动作，计算BC损失
         if expert_actions is not None:
-            bc_mse_loss = self._compute_bc_loss(
-                predicted_actions=actions_pi,
-                expert_actions=expert_actions
-            )
+            if use_act_actor:
+                # 对于ACT Actor，使用确定性动作（means）计算BC损失
+                bc_mse_loss = self._compute_bc_loss_act(
+                    predicted_actions=means,  # 使用确定性输出
+                    expert_actions=expert_actions
+                )
+            else:
+                # 对于传统Actor，使用采样动作计算BC损失
+                bc_mse_loss = self._compute_bc_loss(
+                    predicted_actions=actions_pi,
+                    expert_actions=expert_actions
+                )
             
             # 计算动态权重（随训练步数衰减）
             bc_weight = self._compute_dynamic_bc_weight(training_step)
@@ -532,6 +592,196 @@ class SACPolicy(
         weight = initial_bc_weight * (final_bc_weight / initial_bc_weight) ** decay_ratio
         
         return max(weight, final_bc_weight)
+    
+    def _compute_bc_loss_act(self, predicted_actions: Tensor, expert_actions: Tensor) -> Tensor:
+        """
+        计算ACT Actor的行为克隆MSE损失
+        
+        Args:
+            predicted_actions: ACT Actor预测的确定性动作（means）
+            expert_actions: 专家演示的动作
+            
+        Returns:
+            BC MSE损失
+        """
+        # 记录原始形状用于调试
+        orig_pred_shape = predicted_actions.shape
+        orig_expert_shape = expert_actions.shape
+        
+        # 首先处理动作维度不匹配的问题
+        if predicted_actions.shape[1] != expert_actions.shape[1]:
+            # 如果有离散动作维度，只使用连续部分
+            if self.config.num_discrete_actions is not None:
+                expert_actions = expert_actions[:, :predicted_actions.shape[1]]
+                logging.debug(f"ACT BC: Adjusted expert action dims for discrete actions: {orig_expert_shape} -> {expert_actions.shape}")
+            else:
+                raise ValueError(f"Action dimension mismatch: predicted {predicted_actions.shape[1]} dims, expert {expert_actions.shape[1]} dims")
+        
+        # 处理批次大小不匹配的问题
+        if predicted_actions.shape[0] != expert_actions.shape[0]:
+            pred_batch_size = predicted_actions.shape[0]
+            expert_batch_size = expert_actions.shape[0]
+            
+            if expert_batch_size < pred_batch_size:
+                # 重复专家动作以匹配预测批次大小
+                repeat_times = (pred_batch_size + expert_batch_size - 1) // expert_batch_size
+                expert_actions = expert_actions.repeat(repeat_times, 1)[:pred_batch_size]
+                logging.debug(f"ACT BC: Repeated expert actions: {orig_expert_shape} -> {expert_actions.shape}")
+            elif expert_batch_size > pred_batch_size:
+                # 截断专家动作以匹配预测批次大小
+                expert_actions = expert_actions[:pred_batch_size]
+                logging.debug(f"ACT BC: Truncated expert actions: {orig_expert_shape} -> {expert_actions.shape}")
+        
+        # 最终检查形状是否匹配
+        if predicted_actions.shape != expert_actions.shape:
+            raise ValueError(f"Final shape mismatch after adjustments: predicted {predicted_actions.shape}, expert {expert_actions.shape}")
+        
+        # 计算MSE损失
+        bc_loss = F.mse_loss(predicted_actions, expert_actions)
+        return bc_loss
+    
+    def _compute_sequence_actor_loss(
+        self,
+        observations,
+        observation_features: Tensor | None = None,
+        expert_actions: Tensor | None = None,
+        expert_action_sequences: Tensor | None = None,
+        training_step: int = 0,
+    ) -> Tensor:
+        """
+        计算序列ACT Actor的损失
+        
+        这个方法实现了真正的动作序列联合概率损失计算
+        
+        Args:
+            observations: 观测数据
+            observation_features: 预计算的观测特征
+            expert_actions: 单步专家动作
+            expert_action_sequences: 专家动作序列 (batch, chunk_size, action_dim)
+            training_step: 当前训练步数
+            
+        Returns:
+            序列Actor总损失
+        """
+        # 1. 获取动作序列预测（联合概率）
+        action_sequence, log_probs_joint, means_sequence = self.actor(
+            observations, 
+            observation_features, 
+            return_sequence=True
+        )
+        
+        # 2. 获取第一个动作用于SAC损失计算
+        first_action = action_sequence[:, 0, :]  # (batch, action_dim)
+        
+        # 3. 获取当前观测（用于Q值计算）
+        # 如果observations是序列，取最后一个（当前观测）
+        if isinstance(observations, list):
+            current_obs = observations[-1]  # 取序列的最后一个观测作为当前观测
+        else:
+            current_obs = observations
+        
+        # 计算Q值（只针对第一个动作，因为SAC是单步的）
+        q_preds = self.critic_forward(
+            observations=current_obs,
+            actions=first_action,
+            use_target=False,
+            observation_features=observation_features,
+        )
+        min_q_preds = q_preds.min(dim=0)[0]
+        
+        # 3. 计算SAC损失（Q-chunking风格）
+        # 🔥 Q-chunking核心创新：SAC损失使用整个动作序列的联合概率
+        # 这确保策略优化时考虑动作序列的时间一致性和长期规划
+        # 
+        # 相比传统SAC只考虑单步动作，Q-chunking考虑的是：
+        # loss = E[α * log π(a₁:ₜ|s₁:ₜ) - Q(s₁, a₁)]
+        # 其中 a₁:ₜ 是动作序列，π(a₁:ₜ|s₁:ₜ) 是联合动作概率
+        sac_actor_loss = ((self.temperature * log_probs_joint) - min_q_preds).mean()
+        
+        # 4. 计算序列BC损失
+        bc_sequence_loss = None
+        if expert_action_sequences is not None:
+            # 使用完整的动作序列计算BC损失
+            bc_sequence_loss = self._compute_sequence_bc_loss(
+                predicted_sequence=means_sequence,  # 使用确定性预测
+                expert_sequence=expert_action_sequences
+            )
+        elif expert_actions is not None:
+            # 如果只有单步专家动作，使用第一个预测动作计算BC损失
+            bc_sequence_loss = self._compute_bc_loss_act(
+                predicted_actions=means_sequence[:, 0, :],  # 只使用第一个动作
+                expert_actions=expert_actions
+            )
+        
+        # 5. 混合损失计算
+        if bc_sequence_loss is not None:
+            bc_weight = self._compute_dynamic_bc_weight(training_step)
+            sac_weight = 1.0 - bc_weight
+            
+            # 混合损失
+            actor_loss = sac_weight * sac_actor_loss + bc_weight * bc_sequence_loss
+            
+            # 存储损失组件
+            self._last_bc_loss = bc_sequence_loss.detach().clone()
+            self._last_bc_weight = bc_weight
+            self._last_sac_actor_loss = sac_actor_loss.detach().clone()
+            
+            # 序列特有的损失信息
+            self._last_sequence_length = action_sequence.shape[1]
+            self._last_joint_log_prob = log_probs_joint.mean().detach().clone()
+            
+            logging.debug(f"Sequence Actor Loss - SAC: {sac_actor_loss.item():.4f}, "
+                         f"BC: {bc_sequence_loss.item():.4f}, "
+                         f"Weight: {bc_weight:.3f}, "
+                         f"Sequence Length: {self._last_sequence_length}")
+        else:
+            # 纯SAC损失
+            actor_loss = sac_actor_loss
+            self._last_bc_loss = None
+            self._last_bc_weight = 0.0
+            self._last_sac_actor_loss = sac_actor_loss.detach().clone()
+            self._last_sequence_length = action_sequence.shape[1]
+            self._last_joint_log_prob = log_probs_joint.mean().detach().clone()
+        
+        return actor_loss
+    
+    def _compute_sequence_bc_loss(self, predicted_sequence: Tensor, expert_sequence: Tensor) -> Tensor:
+        """
+        计算动作序列的BC损失
+        
+        Args:
+            predicted_sequence: 预测的动作序列 (batch, chunk_size, action_dim)
+            expert_sequence: 专家动作序列 (batch, chunk_size, action_dim)
+            
+        Returns:
+            序列BC损失
+        """
+        # 确保形状匹配
+        if predicted_sequence.shape != expert_sequence.shape:
+            # 如果序列长度不匹配，截取或填充
+            pred_len = predicted_sequence.shape[1]
+            expert_len = expert_sequence.shape[1]
+            
+            if expert_len < pred_len:
+                # 重复最后一个专家动作
+                last_action = expert_sequence[:, -1:, :].expand(-1, pred_len - expert_len, -1)
+                expert_sequence = torch.cat([expert_sequence, last_action], dim=1)
+                logging.debug(f"Sequence BC: Padded expert sequence from {expert_len} to {pred_len}")
+            elif expert_len > pred_len:
+                # 截取专家序列
+                expert_sequence = expert_sequence[:, :pred_len, :]
+                logging.debug(f"Sequence BC: Truncated expert sequence from {expert_len} to {pred_len}")
+        
+        # 计算序列MSE损失
+        # 选项1：平均所有时间步的损失
+        sequence_mse = F.mse_loss(predicted_sequence, expert_sequence)
+        
+        # 选项2：加权损失（可选）- 给近期动作更高权重
+        # weights = torch.exp(-0.1 * torch.arange(predicted_sequence.shape[1], device=predicted_sequence.device))
+        # weights = weights / weights.sum()
+        # weighted_mse = (weights.view(1, -1, 1) * (predicted_sequence - expert_sequence) ** 2).mean()
+        
+        return sequence_mse
 
     def _init_normalization(self, dataset_stats):
         """Initialize input/output normalization modules."""
@@ -655,32 +905,92 @@ class SACPolicy(
         """初始化策略Actor网络和默认目标熵值。
         
         Actor网络架构说明：
-        1. 观测编码器 (SACObservationEncoder): 将原始观测转换为特征向量
-        2. 主干网络 (MLP): 多层感知机，处理编码后的观测特征
-        3. 均值层 (mean_layer): 输出动作的均值
-        4. 标准差层 (std_layer): 输出动作的标准差（用于探索）
+        支持两种架构：
+        1. 传统MLP Actor (use_act_actor=False)
+        2. ACT Transformer Actor (use_act_actor=True)
         
-        网络流程：
-        观测输入 → SACObservationEncoder → 观测编码 (256维)
+        ACT Actor架构：
+        观测输入 → SACObservationEncoder → 观测编码 
                                         ↓
-                                    MLP主干网络 (256→256→256)
+                                    ACT Transformer Encoder-Decoder
                                         ↓
-                                    均值层 (256→action_dim) → 动作均值
-                                    标准差层 (256→action_dim) → 动作标准差
+                                    均值层 (dim_model→action_dim) → 动作均值
+                                    标准差层 (dim_model→action_dim) → 动作标准差
                                         ↓
                                     TanhMultivariateNormalDiag → 采样动作
         """
-        # 注意：Actor只选择连续动作部分，离散动作由离散Critic处理
-        self.actor = Policy(
-            encoder=self.encoder_actor,  # 观测编码器，将原始观测转换为特征向量
-            network=MLP(  # 主干网络：多层感知机
-                input_dim=self.encoder_actor.output_dim,  # 输入维度：观测编码的维度
-                **asdict(self.config.actor_network_kwargs),  # 网络配置参数（隐藏层维度、激活函数等）
-            ),
-            action_dim=continuous_action_dim,  # 动作维度：连续动作的维度
-            encoder_is_shared=self.shared_encoder,  # 编码器是否在Actor和Critic之间共享
-            **asdict(self.config.policy_kwargs),  # 策略配置参数（标准差范围、是否使用tanh等）
-        )
+        # 检查是否使用ACT Actor
+        use_act_actor = getattr(self.config, 'use_act_actor', False)
+        
+        if use_act_actor:
+            # 检查是否使用序列版本
+            use_sequence_actor = getattr(self.config, 'use_sequence_act_actor', False)
+            
+            if use_sequence_actor:
+                # 使用真正的序列ACT Actor (延迟导入以避免循环依赖)
+                from lerobot.common.policies.sac.modeling_sac_sequence_act_actor import SequenceACTSACActorV2
+                
+                logging.info("🚀 Initializing Sequence ACT-SAC Actor V2")
+                
+                self.actor = SequenceACTSACActorV2(
+                    encoder=self.encoder_actor,
+                    action_dim=continuous_action_dim,
+                    # 序列参数
+                    chunk_size=getattr(self.config, 'act_chunk_size', 8),
+                    obs_history_length=getattr(self.config, 'obs_history_length', 5),
+                    # ACT Transformer参数
+                    dim_model=getattr(self.config, 'act_dim_model', 512),
+                    n_heads=getattr(self.config, 'act_n_heads', 8),
+                    dim_feedforward=getattr(self.config, 'act_dim_feedforward', 3200),
+                    n_encoder_layers=getattr(self.config, 'act_n_encoder_layers', 4),
+                    n_decoder_layers=getattr(self.config, 'act_n_decoder_layers', 4),
+                    dropout=getattr(self.config, 'act_dropout', 0.1),
+                    feedforward_activation=getattr(self.config, 'act_feedforward_activation', 'relu'),
+                    pre_norm=getattr(self.config, 'act_pre_norm', False),
+                    # SAC策略参数
+                    encoder_is_shared=self.shared_encoder,
+                    use_tanh_squash=getattr(self.config.policy_kwargs, 'use_tanh_squash', True),
+                )
+                logging.info("✅ Using Sequence ACT-SAC Actor with history length: {}".format(
+                    getattr(self.config, 'obs_history_length', 5)))
+            else:
+                # 使用基础ACT Actor (延迟导入以避免循环依赖)
+                from lerobot.common.policies.sac.modeling_sac_act_actor import ACTSACActor
+                
+                logging.info("🤖 Initializing ACT-SAC Hybrid Actor")
+                
+                self.actor = ACTSACActor(
+                    encoder=self.encoder_actor,
+                    action_dim=continuous_action_dim,
+                    # ACT Transformer参数
+                    dim_model=getattr(self.config, 'act_dim_model', 512),
+                    n_heads=getattr(self.config, 'act_n_heads', 8),
+                    dim_feedforward=getattr(self.config, 'act_dim_feedforward', 3200),
+                    n_encoder_layers=getattr(self.config, 'act_n_encoder_layers', 4),
+                    n_decoder_layers=getattr(self.config, 'act_n_decoder_layers', 1),
+                    dropout=getattr(self.config, 'act_dropout', 0.1),
+                    feedforward_activation=getattr(self.config, 'act_feedforward_activation', 'relu'),
+                    pre_norm=getattr(self.config, 'act_pre_norm', False),
+                    # SAC策略参数
+                    encoder_is_shared=self.shared_encoder,
+                    **asdict(self.config.policy_kwargs),
+                    # 序列参数
+                    max_seq_length=getattr(self.config, 'act_max_seq_length', 10),
+                )
+                logging.info("✅ Using ACT-SAC Actor")
+        else:
+            # 使用传统MLP Actor
+            logging.info("🔧 Using traditional MLP Actor")
+            self.actor = Policy(
+                encoder=self.encoder_actor,  # 观测编码器，将原始观测转换为特征向量
+                network=MLP(  # 主干网络：多层感知机
+                    input_dim=self.encoder_actor.output_dim,  # 输入维度：观测编码的维度
+                    **asdict(self.config.actor_network_kwargs),  # 网络配置参数（隐藏层维度、激活函数等）
+                ),
+                action_dim=continuous_action_dim,  # 动作维度：连续动作的维度
+                encoder_is_shared=self.shared_encoder,  # 编码器是否在Actor和Critic之间共享
+                **asdict(self.config.policy_kwargs),  # 策略配置参数（标准差范围、是否使用tanh等）
+            )
 
         # 设置目标熵值，用于温度参数的自动调节
         self.target_entropy = self.config.target_entropy

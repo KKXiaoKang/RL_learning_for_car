@@ -218,6 +218,36 @@ class SACConfig(PreTrainedConfig):
     # Number of training steps over which to decay BC weight
     bc_decay_steps: int = 50000
 
+    # ACT Actor Configuration
+    # Whether to use ACT Transformer Actor instead of MLP Actor
+    use_act_actor: bool = False
+    # Whether to use sequence version of ACT Actor (processes observation history)
+    use_sequence_act_actor: bool = False
+    # Observation history length for sequence ACT Actor
+    obs_history_length: int = 5
+    # Action sequence length (chunk size) for sequence ACT Actor
+    act_chunk_size: int = 8
+    
+    # ACT Transformer architecture parameters
+    # Hidden dimension of ACT Transformer
+    act_dim_model: int = 512
+    # Number of attention heads in ACT Transformer
+    act_n_heads: int = 8
+    # Feedforward dimension in ACT Transformer
+    act_dim_feedforward: int = 3200
+    # Number of encoder layers in ACT Transformer
+    act_n_encoder_layers: int = 4
+    # Number of decoder layers in ACT Transformer
+    act_n_decoder_layers: int = 4  # 序列ACT需要更多decoder层
+    # Dropout rate in ACT Transformer
+    act_dropout: float = 0.1
+    # Feedforward activation function in ACT Transformer
+    act_feedforward_activation: str = "relu"
+    # Whether to use pre-normalization in ACT Transformer
+    act_pre_norm: bool = False
+    # Maximum sequence length for positional encoding
+    act_max_seq_length: int = 10
+
     # Optimizations
     use_torch_compile: bool = True
 
