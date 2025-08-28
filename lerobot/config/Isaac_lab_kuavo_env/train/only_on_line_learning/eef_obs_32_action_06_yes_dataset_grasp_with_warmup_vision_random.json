@@ -1,6 +1,6 @@
 {
     "output_dir": null,
-    "job_name": "23_vision_random_eef_pose_warm_up_grasp_box_kuavo_reward_mse_demo01_action_06_yes_dataset",
+    "job_name": "24_vision_random_eef_pose_warm_up_grasp_box_kuavo_reward_mse_demo01_action_06_yes_dataset",
     "resume": false,
     "seed": 3407,
     "num_workers": 4,
@@ -113,7 +113,7 @@
         "warmup_strict_loading": false,
         "bc_initial_weight": 0.9,
         "bc_final_weight": 0.01,
-        "bc_decay_steps": 50000,
+        "bc_decay_steps": 100000,
         "use_torch_compile": true,
         "actor_learner_config": {
             "learner_host": "127.0.0.1",
