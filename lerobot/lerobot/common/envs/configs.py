@@ -191,6 +191,7 @@ class EnvTransformConfig:
     vel_smoothing_factor: float = 0.3
     arm_smoothing_factor: float = 0.4
     wbc_observation_enabled: bool = True
+    auto_record_tool_enable: bool = False
 
 
 @EnvConfig.register_subclass(name="gym_manipulator")
@@ -265,6 +266,8 @@ class HILEnvConfig(EnvConfig):
     pretrained_policy_name_or_path: Optional[str] = None
     # For the reward classifier, to record more positive examples after a success
     number_of_steps_after_success: int = 0
+    # Enable feature visualization for vision encoders
+    enable_feature_visualization: bool = False
     ############################
 
     @property

@@ -942,13 +942,12 @@ def plot_episode_rewards(rewards: List[float], save_path: str = "episode_rewards
         
         # 3. 成功率饼图
         if success_count is not None and total_episodes is not None:
-            # 使用传入的准确成功计数
+            # 使用传入的准确成功计数（基于episode_outcomes）
             failure_count = total_episodes - success_count
         else:
-            # 回退到旧的阈值计算方式（向后兼容）
-            success_threshold = 0.9  # 考虑浮点数精度，将接近1.0的值视为成功
-            success_count = sum(1 for r in rewards if r >= success_threshold)
-            failure_count = len(rewards) - success_count
+            # 没有episode_outcomes数据时的默认值
+            success_count = 0
+            failure_count = len(rewards)
         
         if success_count > 0 or failure_count > 0:
             labels = ['Success', 'Failure']
@@ -980,7 +979,7 @@ def plot_episode_rewards(rewards: List[float], save_path: str = "episode_rewards
         if success_count is not None and total_episodes is not None:
             success_rate = (success_count / total_episodes * 100) if total_episodes > 0 else 0
         else:
-            success_rate = (success_count / len(rewards) * 100) if rewards else 0
+            success_rate = 0.0
         std_reward = np.std(rewards) if len(rewards) > 1 else 0
         
         stats_data = [
@@ -1043,7 +1042,7 @@ def print_rewards_summary(rewards: List[float], success_count: int = None, total
     
     Args:
         rewards: 每个回合的奖励列表
-        success_count: 真正成功的episode数量（如果为None则使用旧的阈值计算）
+        success_count: 真正成功的episode数量（基于episode_outcomes统计）
         total_episodes: 总episode数量
     """
     if not rewards:
@@ -1055,16 +1054,16 @@ def print_rewards_summary(rewards: List[float], success_count: int = None, total
     print("="*60)
     
     if success_count is not None and total_episodes is not None:
-        # 使用传入的准确成功计数
+        # 使用传入的准确成功计数（基于episode_outcomes）
         success_rate = (success_count / total_episodes * 100) if total_episodes > 0 else 0
     else:
-        # 回退到旧的阈值计算方式（向后兼容）
-        success_count = sum(1 for r in rewards if r >= 0.9)
-        success_rate = (success_count / len(rewards) * 100) if rewards else 0
+        # 没有episode_outcomes数据时的默认值
+        success_count = 0
+        success_rate = 0.0
     
     print(f"Basic Statistics:")
     print(f"  • Total Episodes: {len(rewards)}")
-    print(f"  • Success Episodes: {success_count}")
+    print(f"  • Success Episodes: {success_count} (based on outcome analysis)")
     print(f"  • Success Rate: {success_rate:.1f}%")
     print(f"  • Mean Reward: {np.mean(rewards):.4f}")
     print(f"  • Std Deviation: {np.std(rewards):.4f}")
@@ -2138,6 +2137,7 @@ def make_robot_env(cfg: EnvConfig) -> gym.Env:
                 vel_smoothing_factor = getattr(cfg.wrapper, 'vel_smoothing_factor', 0.3)
                 arm_smoothing_factor = getattr(cfg.wrapper, 'arm_smoothing_factor', 0.4)
                 wbc_observation_enabled = getattr(cfg.wrapper, 'wbc_observation_enabled', True)
+                auto_record_tool_enable = getattr(cfg.wrapper, 'auto_record_tool_enable', False)
             # Extract action_dim from features if available
             if hasattr(cfg, 'features') and 'action' in cfg.features:
                 action_dim = cfg.features['action'].shape[0]
@@ -2150,7 +2150,8 @@ def make_robot_env(cfg: EnvConfig) -> gym.Env:
                           vel_smoothing_factor=vel_smoothing_factor,
                           arm_smoothing_factor=arm_smoothing_factor,
                           wbc_observation_enabled=wbc_observation_enabled,
-                          action_dim=action_dim)
+                          action_dim=action_dim,
+                          auto_record_tool_enable=auto_record_tool_enable)
             # First process observations to LeRobot format
             env = GymHilObservationProcessorWrapper(env=env)
             
@@ -2408,6 +2409,7 @@ def record_dataset(env, policy, cfg):
     episode_index = 0
     recorded_action = None
     episode_rewards = []  # 记录每个回合的奖励
+    episode_success_count = 0  # 记录真正成功的回合数
     while episode_index < cfg.num_episodes:
         obs, _ = env.reset()
         start_episode_t = time.perf_counter()
@@ -2493,6 +2495,18 @@ def record_dataset(env, policy, cfg):
 
         dataset.save_episode()
         episode_rewards.append(episode_total_reward)  # 记录当前回合的总奖励
+        
+        # 判断该episode是否真正成功（优先使用环境的success flag）
+        if info.get("success", False):
+            episode_success_count += 1
+            print(f"[RECORDING SUCCESS] Episode {episode_index + 1}: Environment success flag detected, reward: {episode_total_reward:.2f}")
+        elif "RLKuavo" in cfg.task and episode_total_reward > 200:
+            episode_success_count += 1
+            print(f"[RECORDING SUCCESS] Episode {episode_index + 1}: High reward success for RLKuavo, reward: {episode_total_reward:.2f}")
+        elif reward == 1.0 or episode_total_reward > 50:  # 其他环境的成功标准
+            episode_success_count += 1
+            print(f"[RECORDING SUCCESS] Episode {episode_index + 1}: General success criteria met, reward: {episode_total_reward:.2f}")
+            
         episode_index += 1
 
     # Finalize dataset
@@ -2503,15 +2517,18 @@ def record_dataset(env, policy, cfg):
     # 生成数据录制过程中的奖励统计分析报告
     if episode_rewards:
         print("\nGenerating recording process reward statistics analysis report...")
+        print(f"Recording completed: {episode_success_count}/{len(episode_rewards)} episodes were truly successful")
         
         # 打印文字统计摘要
-        print_rewards_summary(episode_rewards)
+        print_rewards_summary(episode_rewards, success_count=episode_success_count, total_episodes=len(episode_rewards))
         
         # 生成可视化图表
         plot_save_path = f"recording_rewards_analysis_{cfg.task}_{len(episode_rewards)}eps.png"
-        saved_plot_path = plot_episode_rewards(episode_rewards, save_path=plot_save_path, show_plot=False)
+        saved_plot_path = plot_episode_rewards(episode_rewards, save_path=plot_save_path, show_plot=False, 
+                                             success_count=episode_success_count, total_episodes=len(episode_rewards))
         print(f"\nRecording process reward analysis chart saved to: {saved_plot_path}")
         print("Recording process reward statistics analysis completed!")
+        print(f"CORRECT Recording Success Rate: {(episode_success_count/len(episode_rewards)*100):.1f}%")
     else:
         print("\nWARNING: No reward data collected during recording, skipping analysis")
 
@@ -2540,6 +2557,7 @@ def replay_episode(env, cfg):
     # 记录回放过程中的奖励
     replay_rewards = []
     episode_total_reward = 0.0
+    replay_success_count = 0
 
     for idx in range(dataset.num_frames):
         start_episode_t = time.perf_counter()
@@ -2553,6 +2571,18 @@ def replay_episode(env, cfg):
         # 如果回合结束，记录总奖励并重置
         if terminated or truncated:
             replay_rewards.append(episode_total_reward)
+            
+            # 判断是否成功（优先使用环境的success flag）
+            if info.get("success", False):
+                replay_success_count += 1
+                print(f"[REPLAY SUCCESS] Episode: Environment success flag detected, reward: {episode_total_reward:.2f}")
+            elif "RLKuavo" in cfg.task and episode_total_reward > 200:
+                replay_success_count += 1
+                print(f"[REPLAY SUCCESS] Episode: High reward success for RLKuavo, reward: {episode_total_reward:.2f}")
+            elif reward == 1.0 or episode_total_reward > 50:
+                replay_success_count += 1
+                print(f"[REPLAY SUCCESS] Episode: General success criteria met, reward: {episode_total_reward:.2f}")
+                
             episode_total_reward = 0.0
             env.reset()
 
@@ -2562,19 +2592,32 @@ def replay_episode(env, cfg):
     # 如果最后一个回合没有正常结束，也记录其奖励
     if episode_total_reward != 0.0:
         replay_rewards.append(episode_total_reward)
+        # 判断最后一个episode是否成功（优先使用环境的success flag）
+        if info.get("success", False):
+            replay_success_count += 1
+            print(f"[REPLAY SUCCESS] Final Episode: Environment success flag detected, reward: {episode_total_reward:.2f}")
+        elif "RLKuavo" in cfg.task and episode_total_reward > 200:
+            replay_success_count += 1
+            print(f"[REPLAY SUCCESS] Final Episode: High reward success for RLKuavo, reward: {episode_total_reward:.2f}")
+        elif episode_total_reward > 50:
+            replay_success_count += 1
+            print(f"[REPLAY SUCCESS] Final Episode: General success criteria met, reward: {episode_total_reward:.2f}")
     
     # 生成回放过程的奖励统计分析报告
     if replay_rewards:
         print("\nGenerating replay process reward statistics analysis report...")
+        print(f"Replay completed: {replay_success_count}/{len(replay_rewards)} episodes were truly successful")
         
         # 打印文字统计摘要
-        print_rewards_summary(replay_rewards)
+        print_rewards_summary(replay_rewards, success_count=replay_success_count, total_episodes=len(replay_rewards))
         
         # 生成可视化图表
         plot_save_path = f"replay_rewards_analysis_{cfg.task}_ep{cfg.episode}.png"
-        saved_plot_path = plot_episode_rewards(replay_rewards, save_path=plot_save_path, show_plot=False)
+        saved_plot_path = plot_episode_rewards(replay_rewards, save_path=plot_save_path, show_plot=False,
+                                             success_count=replay_success_count, total_episodes=len(replay_rewards))
         print(f"\nReplay process reward analysis chart saved to: {saved_plot_path}")
         print("Replay process reward statistics analysis completed!")
+        print(f"CORRECT Replay Success Rate: {(replay_success_count/len(replay_rewards)*100):.1f}%")
     else:
         print("\nWARNING: No reward data collected during replay, skipping analysis")
 
@@ -2594,11 +2637,24 @@ def main(cfg: EnvConfig):
     policy = None
 
     if cfg.mode == "record":
+        # Set environment variable to enable feature visualization for record mode
+        # This allows gym_manipulator.py to publish vision features during recording
+        import os
+        os.environ['LEROBOT_PROCESS_TYPE'] = 'actor'
+        
         policy = None
         if cfg.pretrained_policy_name_or_path is not None:
             from lerobot.common.policies.sac.modeling_sac import SACPolicy
 
             policy = SACPolicy.from_pretrained(cfg.pretrained_policy_name_or_path)
+            
+            # Update policy config with environment's feature visualization setting
+            if hasattr(cfg, 'enable_feature_visualization'):
+                policy.config.enable_feature_visualization = cfg.enable_feature_visualization
+                # Re-initialize feature visualization with the new setting
+                if hasattr(policy.actor, 'encoder') and hasattr(policy.actor.encoder, '_init_feature_visualization'):
+                    policy.actor.encoder._init_feature_visualization()
+            
             policy.to(cfg.device)
             policy.eval()
 
@@ -2617,13 +2673,32 @@ def main(cfg: EnvConfig):
         exit()
 
     if cfg.mode == "eval":
+        # Set environment variable to enable feature visualization for eval mode
+        # This allows gym_manipulator.py to publish vision features just like actor.py
+        import os
+        os.environ['LEROBOT_PROCESS_TYPE'] = 'actor'
+        
         policy = None
         if cfg.pretrained_policy_name_or_path is not None:
             from lerobot.common.policies.sac.modeling_sac import SACPolicy
             print(f"cfg.pretrained_policy_name_or_path: {cfg.pretrained_policy_name_or_path}")
             policy = SACPolicy.from_pretrained(cfg.pretrained_policy_name_or_path)
+            
+            # Update policy config with environment's feature visualization setting
+            if hasattr(cfg, 'enable_feature_visualization'):
+                policy.config.enable_feature_visualization = cfg.enable_feature_visualization
+                # Re-initialize feature visualization with the new setting
+                if hasattr(policy.actor, 'encoder') and hasattr(policy.actor.encoder, '_init_feature_visualization'):
+                    policy.actor.encoder._init_feature_visualization()
+            
             policy.to(cfg.device)
             policy.eval()
+    
+    # For inference/evaluation without explicit mode setting, also enable feature visualization
+    # This handles cases where gym_manipulator.py is used for policy evaluation
+    if policy is not None and not hasattr(cfg, 'mode'):
+        import os
+        os.environ['LEROBOT_PROCESS_TYPE'] = 'actor'
 
     obs, _ = env.reset()
 
@@ -2659,28 +2734,20 @@ def main(cfg: EnvConfig):
             # Determine the episode outcome based on termination reason
             episode_outcome = "unknown"
             
-            # Check for box fallen (failure) - highest priority failure
-            if info.get("box_fallen", False):
+            # Priority 1: Check explicit success flag first (highest priority)
+            if info.get("success", False):
+                episode_outcome = "success"
+                episode_reward = episode_total_reward
+                print(f"[SUCCESS DETECTED] Episode {num_episode + 1}: Explicit success flag set, reward: {episode_total_reward:.2f}")
+            # Priority 2: Check for box fallen (failure)
+            elif info.get("box_fallen", False):
                 episode_outcome = "box_fallen"
                 episode_reward = episode_total_reward  # Keep exploration value (already includes -50 penalty)
-            # Check for timeout without success - failure
+            # Priority 3: Check for timeout without success - failure
             elif truncated and not terminated:
                 episode_outcome = "timeout"
                 episode_reward = episode_total_reward  # Keep accumulated reward from exploration
-            # Check for true success - only if no failures occurred
-            elif terminated and not info.get("box_fallen", False):
-                # Use reward threshold to determine success since environments may not set succeed flag correctly
-                if episode_total_reward > 50:  # High reward indicates successful task completion
-                    episode_outcome = "success"
-                    episode_reward = episode_total_reward
-                else:
-                    episode_outcome = "low_reward_termination"  # Terminated but low reward = failure
-                    episode_reward = episode_total_reward
-            # Explicit success flag check as backup
-            elif info.get("succeed", False) and not info.get("box_fallen", False):
-                episode_outcome = "success"
-                episode_reward = episode_total_reward
-            # Other termination cases (failures)
+            # Priority 4: Other termination cases (failures)
             else:
                 episode_outcome = "other_failure"
                 episode_reward = episode_total_reward
@@ -2706,13 +2773,12 @@ def main(cfg: EnvConfig):
         success_count = episode_outcomes.count("success")
         box_fall_count = episode_outcomes.count("box_fallen")
         timeout_count = episode_outcomes.count("timeout")
-        low_reward_count = episode_outcomes.count("low_reward_termination")
         other_failure_count = episode_outcomes.count("other_failure")
         unknown_count = episode_outcomes.count("unknown")
         
         # Calculate success rate (only true successes count)
         success_rate = success_count / len(successes)
-        total_failures = box_fall_count + timeout_count + low_reward_count + other_failure_count + unknown_count
+        total_failures = box_fall_count + timeout_count + other_failure_count + unknown_count
         
         print(f"\n=== CORRECTED Episode Analysis ===")
         print(f"📊 OVERALL PERFORMANCE:")
@@ -2723,7 +2789,6 @@ def main(cfg: EnvConfig):
         print(f"📋 FAILURE BREAKDOWN:")
         print(f"   • Box Dropped: {box_fall_count} ({box_fall_count/cfg.num_episodes:.1%})")
         print(f"   • Timeout: {timeout_count} ({timeout_count/cfg.num_episodes:.1%})")
-        print(f"   • Low Reward Termination: {low_reward_count} ({low_reward_count/cfg.num_episodes:.1%})")
         print(f"   • Other Failures: {other_failure_count} ({other_failure_count/cfg.num_episodes:.1%})")
         if unknown_count > 0:
             print(f"   • Unknown Outcomes: {unknown_count} ({unknown_count/cfg.num_episodes:.1%})")
@@ -2735,7 +2800,7 @@ def main(cfg: EnvConfig):
         success_rewards = [successes[i] for i, outcome in enumerate(episode_outcomes) if outcome == "success"]
         box_fall_rewards = [successes[i] for i, outcome in enumerate(episode_outcomes) if outcome == "box_fallen"]
         timeout_rewards = [successes[i] for i, outcome in enumerate(episode_outcomes) if outcome == "timeout"]
-        low_reward_rewards = [successes[i] for i, outcome in enumerate(episode_outcomes) if outcome == "low_reward_termination"]
+        other_failure_rewards = [successes[i] for i, outcome in enumerate(episode_outcomes) if outcome == "other_failure"]
         
         overall_average = sum(successes) / len(successes)
         print(f"   • Overall Average Reward: {overall_average:.2f}")
@@ -2755,12 +2820,12 @@ def main(cfg: EnvConfig):
             avg_timeout_reward = sum(timeout_rewards) / len(timeout_rewards)
             print(f"   • Timeout Episodes Avg: {avg_timeout_reward:.1f} (exploration value preserved)")
         
-        if low_reward_count > 0:
-            avg_low_reward = sum(low_reward_rewards) / len(low_reward_rewards)
-            print(f"   • Low Reward Episodes Avg: {avg_low_reward:.1f}")
+        if other_failure_count > 0:
+            avg_other_failure_reward = sum(other_failure_rewards) / len(other_failure_rewards)
+            print(f"   • Other Failure Episodes Avg: {avg_other_failure_reward:.1f}")
         
         print(f"")
-        print(f"📝 NOTE: Box_fallen and timeout are failures, but rewards include exploration value for learning.")
+        print(f"📝 NOTE: Failed episodes retain exploration rewards to help with learning.")
         
         # Debug: Show episode outcomes for verification
         if cfg.num_episodes <= 20:  # Only for small test runs

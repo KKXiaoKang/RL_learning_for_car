@@ -137,7 +137,10 @@ class WandBLogger:
                 self._wandb.define_metric(new_custom_key, hidden=True)
 
         for k, v in d.items():
-            if not isinstance(v, (int, float, str)):
+            # Convert boolean values to integers for WandB compatibility
+            if isinstance(v, bool):
+                v = int(v)
+            elif not isinstance(v, (int, float, str)):
                 logging.warning(
                     f'WandB logging of key "{k}" was ignored as its type "{type(v)}" is not handled by this wrapper.'
                 )

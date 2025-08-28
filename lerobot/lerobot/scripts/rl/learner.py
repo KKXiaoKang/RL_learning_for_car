@@ -107,9 +107,16 @@ LOG_PREFIX = "[LEARNER]"
 # MAIN ENTRY POINTS AND CORE ALGORITHM FUNCTIONS #
 #################################################
 
+DEBUG_PRINT_FLAG = False
 
 @parser.wrap()
 def train_cli(cfg: TrainRLServerPipelineConfig):
+    # Set environment variable to identify this as a learner process
+    # This will be used by the SACPolicy to disable feature visualization for learners
+    import os
+    os.environ['LEROBOT_PROCESS_TYPE'] = 'learner'
+    os.environ['LEROBOT_IS_LEARNER'] = 'true'
+    
     if not use_threads(cfg):
         import torch.multiprocessing as mp
 
@@ -506,6 +513,9 @@ def add_actor_information_and_train(
                 "next_observation_feature": next_observation_features,  # 下一观测特征
                 "complementary_info": batch["complementary_info"],  # 补充信息
             }
+            # 打印用于sample采样的 utd_ratio 的值
+            if DEBUG_PRINT_FLAG:
+                print(f" utd_ratio forward_batch : {forward_batch}")
 
             # 使用前向传播方法计算评论家损失
             critic_output = policy.forward(forward_batch, model="critic")
@@ -542,6 +552,7 @@ def add_actor_information_and_train(
         batch = next(online_iterator)
 
         # 如果有离线数据集，则同时采样离线数据
+        batch_offline = None
         if dataset_repo_id is not None:
             batch_offline = next(offline_iterator)
             # 将在线和离线批次数据连接起来
@@ -576,7 +587,41 @@ def add_actor_information_and_train(
             "done": done,  # 完成标志
             "observation_feature": observation_features,  # 观测特征
             "next_observation_feature": next_observation_features,  # 下一观测特征
+            "training_step": optimization_step,  # 当前训练步数，用于BC权重衰减
         }
+        
+        # 如果批次包含离线数据，则添加expert_action用于BC损失计算
+        if dataset_repo_id is not None and batch_offline is not None:
+            total_batch_size = actions.shape[0]
+            offline_batch_size = batch_offline["action"].shape[0]
+            
+            if offline_batch_size > 0:
+                # concatenate_batch_transitions将数据按以下方式连接：
+                # [在线数据(batch_size), 离线数据(batch_size)]
+                # 因此，离线数据（专家动作）位于后半部分
+                if total_batch_size == offline_batch_size * 2:
+                    # 标准情况：总批次大小 = 在线批次大小 + 离线批次大小
+                    # 提取后半部分作为专家动作
+                    expert_actions_from_batch = actions[offline_batch_size:]
+                    forward_batch["expert_action"] = expert_actions_from_batch
+                    logging.debug(f"BC: Using expert actions from mixed batch - shape: {expert_actions_from_batch.shape}")
+                else:
+                    # 异常情况处理：批次大小不匹配时的fallback
+                    logging.warning(f"Batch size mismatch: total={total_batch_size}, offline={offline_batch_size}")
+                    # 使用原始离线批次，重复填充到匹配总批次大小
+                    expert_actions = batch_offline["action"]
+                    if expert_actions.shape[0] < total_batch_size:
+                        # 重复专家动作以匹配batch size
+                        repeat_times = (total_batch_size + expert_actions.shape[0] - 1) // expert_actions.shape[0]
+                        expert_actions = expert_actions.repeat(repeat_times, 1)[:total_batch_size]
+                        logging.debug(f"BC: Repeated expert actions to match batch size - shape: {expert_actions.shape}")
+                    elif expert_actions.shape[0] > total_batch_size:
+                        # 截断专家动作以匹配batch size
+                        expert_actions = expert_actions[:total_batch_size]
+                        logging.debug(f"BC: Truncated expert actions to match batch size - shape: {expert_actions.shape}")
+                    forward_batch["expert_action"] = expert_actions
+            else:
+                logging.debug("BC: No offline data available for BC loss calculation")
 
         # 计算评论家输出
         critic_output = policy.forward(forward_batch, model="critic")
@@ -638,6 +683,12 @@ def add_actor_information_and_train(
                 # 将Actor信息添加到训练信息中
                 training_infos["loss_actor"] = loss_actor.item()  # Actor损失
                 training_infos["actor_grad_norm"] = actor_grad_norm  # Actor梯度范数
+                
+                # 添加BC相关的训练信息（如果可用）
+                if hasattr(policy, '_last_bc_loss') and policy._last_bc_loss is not None:
+                    training_infos["bc_loss"] = policy._last_bc_loss.item()
+                    training_infos["bc_weight"] = policy._last_bc_weight
+                    training_infos["sac_actor_loss"] = policy._last_sac_actor_loss.item()
 
                 # 温度优化
                 temperature_output = policy.forward(forward_batch, model="temperature")  # 计算温度输出
@@ -661,6 +712,11 @@ def add_actor_information_and_train(
 
         # 如果需要，将策略推送给Actor
         if time.time() - last_time_policy_pushed > policy_parameters_push_frequency:  # 如果距离上次推送的时间超过了指定频率
+            if DEBUG_PRINT_FLAG:
+                print(f" ============================== learner push_actor_policy_to_queue ======================================  ")
+                print(f" policy: {policy.actor} ")
+                print(f" parameters_queue: {parameters_queue} ")
+                print(f" ================================================ ")
             push_actor_policy_to_queue(parameters_queue=parameters_queue, policy=policy)  # 推送策略参数到队列
             last_time_policy_pushed = time.time()  # 更新上次推送时间
 
@@ -675,6 +731,59 @@ def add_actor_information_and_train(
                 training_infos["offline_replay_buffer_size"] = len(offline_replay_buffer)  # 离线回放缓冲区大小
             training_infos["Optimization step"] = optimization_step  # 优化步骤
 
+            # 计算并记录单个 critic 的 Q 值
+            with torch.no_grad():
+                # 获取当前 Q 值预测（下一状态和下一动作的 Q 值）
+                next_actions, _, _ = policy.actor(next_observations, next_observation_features)
+                
+                # 如果有离散动作，需要分离连续动作部分
+                if policy.config.num_discrete_actions is not None:
+                    next_actions_continuous = next_actions[:, :-1]  # 除去最后一维（离散动作）
+                else:
+                    next_actions_continuous = next_actions
+                
+                # Target Q值 (使用下一状态和下一动作)
+                target_q_values = policy.critic_forward(
+                    observations=next_observations,
+                    actions=next_actions_continuous,
+                    use_target=True,
+                    observation_features=next_observation_features,
+                )
+                
+                # Current Q值 (使用当前状态和当前动作)
+                current_actions_continuous = actions
+                if policy.config.num_discrete_actions is not None:
+                    current_actions_continuous = actions[:, :-1]  # 除去最后一维（离散动作）
+                
+                current_q_values = policy.critic_forward(
+                    observations=observations,
+                    actions=current_actions_continuous,
+                    use_target=False,
+                    observation_features=observation_features,
+                )
+                
+                # 记录每个 Target Critic 的 Q 值
+                for i in range(target_q_values.shape[0]):  # 遍历每个 target critic
+                    target_q_mean = target_q_values[i].mean().item()  # 计算该 target critic 的平均 Q 值
+                    training_infos[f"Q_target_critic_{i+1}"] = target_q_mean
+                
+                # 记录每个 Current Critic 的 Q 值
+                for i in range(current_q_values.shape[0]):  # 遍历每个 current critic
+                    current_q_mean = current_q_values[i].mean().item()  # 计算该 current critic 的平均 Q 值
+                    training_infos[f"Q_current_critic_{i+1}"] = current_q_mean
+            
+            # 记录 TD target 值（如果可用）
+            if hasattr(policy, 'last_td_target') and policy.last_td_target is not None:
+                td_target_mean = policy.last_td_target.mean().item()  # TD target 的平均值
+                td_target_std = policy.last_td_target.std().item()   # TD target 的标准差
+                td_target_min = policy.last_td_target.min().item()   # TD target 的最小值
+                td_target_max = policy.last_td_target.max().item()   # TD target 的最大值
+                
+                training_infos["TD_target_mean"] = td_target_mean
+                training_infos["TD_target_std"] = td_target_std
+                training_infos["TD_target_min"] = td_target_min
+                training_infos["TD_target_max"] = td_target_max
+            
             # 记录训练指标
             if wandb_logger:  # 如果有WandB日志记录器
                 wandb_logger.log_dict(d=training_infos, mode="train", custom_step_key="Optimization step")  # 记录训练信息
@@ -829,7 +938,16 @@ def save_training_checkpoint(
     """
     logging.info(f"Checkpoint policy after step {optimization_step}")
     _num_digits = max(6, len(str(online_steps)))
-    interaction_step = interaction_message["Interaction step"] if interaction_message is not None else 0
+    
+    # Handle both episode-level and step-level messages
+    interaction_step = 0
+    if interaction_message is not None:
+        # Try to get Interaction step first (episode-level message)
+        if "Interaction step" in interaction_message:
+            interaction_step = interaction_message["Interaction step"]
+        # Fall back to Global step (step-level message)
+        elif "Global step" in interaction_message:
+            interaction_step = interaction_message["Global step"]
 
     # Create checkpoint directory
     checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, online_steps, optimization_step)
@@ -1228,17 +1346,8 @@ def check_nan_in_transition(
 
 def push_actor_policy_to_queue(parameters_queue: Queue, policy: nn.Module):
     logging.debug("[LEARNER] Pushing actor policy to the queue")
-    # Create a dictionary to hold all the state dicts
-    state_dicts = {"policy": move_state_dict_to_device(policy.actor.state_dict(), device="cpu")}
-
-    # Add discrete critic if it exists
-    if hasattr(policy, "discrete_critic") and policy.discrete_critic is not None:
-        state_dicts["discrete_critic"] = move_state_dict_to_device(
-            policy.discrete_critic.state_dict(), device="cpu"
-        )
-        logging.debug("[LEARNER] Including discrete critic in state dict push")
-
-    state_bytes = state_to_bytes(state_dicts)
+    state_dict = move_state_dict_to_device(policy.actor.state_dict(), device="cpu")
+    state_bytes = state_to_bytes(state_dict)
     parameters_queue.put(state_bytes)
 
 
@@ -1247,12 +1356,94 @@ def process_interaction_message(
 ):
     """Process a single interaction message with consistent handling."""
     message = bytes_to_python_object(message)
-    # Shift interaction step for consistency with checkpointed state
-    message["Interaction step"] += interaction_step_shift
+    
+    # 区分不同类型的消息
+    is_episode_message = "Episodic reward" in message
+    is_step_message = "Step reward" in message
+    
+    # 根据消息类型处理step信息
+    if is_episode_message:
+        # Episode级别消息：使用Interaction step
+        message["Interaction step"] += interaction_step_shift
+        step_key = "Interaction step"
+    elif is_step_message:
+        # Step级别消息：使用Global step
+        if "Global step" in message:
+            message["Global step"] += interaction_step_shift
+            step_key = "Global step"
+        else:
+            # 兼容性处理：如果没有Global step，则添加它
+            message["Global step"] = message.get("Interaction step", 0) + interaction_step_shift
+            step_key = "Global step"
+    else:
+        # 默认处理其他类型消息
+        if "Interaction step" in message:
+            message["Interaction step"] += interaction_step_shift
+            step_key = "Interaction step"
+        else:
+            step_key = None
 
     # Log if logger available
     if wandb_logger:
-        wandb_logger.log_dict(d=message, mode="train", custom_step_key="Interaction step")
+        # Create a copy of the message to add better labeling for episode termination status
+        wandb_message = message.copy()
+        
+        if is_episode_message:
+            # Episode级别消息的处理逻辑
+            # Add clearer labels for episode termination status and remove original fields
+            if "Episode terminated" in wandb_message:
+                wandb_message["Episode_terminated_success"] = int(wandb_message.pop("Episode terminated"))
+            if "Episode truncated" in wandb_message:
+                wandb_message["Episode_truncated_timeout"] = int(wandb_message.pop("Episode truncated"))
+            
+            # Ensure episode length is properly labeled for wandb and remove original field
+            if "Episode length" in wandb_message:
+                wandb_message["Episode_length_steps"] = wandb_message.pop("Episode length")
+                
+        elif is_step_message:
+            # Step级别消息的处理逻辑
+            # 处理action统计信息
+            if "Action mean" in wandb_message:
+                action_mean = wandb_message["Action mean"]
+                if isinstance(action_mean, list):
+                    # 为每个动作维度单独记录均值
+                    import numpy as np
+                    action_mean_array = np.array(action_mean)
+                    
+                    # 记录每个动作维度的均值
+                    for i, mean_val in enumerate(action_mean_array):
+                        wandb_message[f"Action_mean_joint_{i}"] = float(mean_val)
+                    
+                    # # 记录总体统计量
+                    # wandb_message["Action_mean_overall"] = float(np.mean(action_mean_array))
+                    # wandb_message["Action_mean_std"] = float(np.std(action_mean_array))
+                    # wandb_message["Action_mean_max"] = float(np.max(action_mean_array))
+                    # wandb_message["Action_mean_min"] = float(np.min(action_mean_array))
+                    del wandb_message["Action mean"]
+                    
+            if "Action std" in wandb_message:
+                action_std = wandb_message["Action std"]
+                if isinstance(action_std, list):
+                    # 为每个动作维度单独记录标准差
+                    import numpy as np
+                    action_std_array = np.array(action_std)
+                    
+                    # 记录每个动作维度的标准差
+                    for i, std_val in enumerate(action_std_array):
+                        wandb_message[f"Action_std_joint_{i}"] = float(std_val)
+                    
+                    # # 记录总体统计量
+                    # wandb_message["Action_std_overall"] = float(np.mean(action_std_array))
+                    # wandb_message["Action_std_std"] = float(np.std(action_std_array))
+                    # wandb_message["Action_std_max"] = float(np.max(action_std_array))
+                    # wandb_message["Action_std_min"] = float(np.min(action_std_array))
+                    del wandb_message["Action std"]
+        
+        # 使用适当的step key进行记录
+        if step_key:
+            wandb_logger.log_dict(d=wandb_message, mode="train", custom_step_key=step_key)
+        else:
+            wandb_logger.log_dict(d=wandb_message, mode="train")
 
     return message
 
@@ -1282,6 +1473,13 @@ def process_transitions(
         # 将数据转换为transition列表
         transition_list = bytes_to_transitions(buffer=transition_list)
 
+        # DEBUG 
+        if DEBUG_PRINT_FLAG:
+            pass
+            # print(f" ============================== learner process_transitions ======================================  ")
+            # print(f" transition_list: {transition_list} ")
+            # print(f" ================================================ ")
+        
         # 遍历transition列表
         for transition in transition_list:
             transition = move_transition_to_device(transition=transition, device=device) # 将transition数据移动到cuda
@@ -1297,7 +1495,7 @@ def process_transitions(
                 continue
 
             replay_buffer.add(**transition) # 将transition数据添加到在线replay_buffer中
-
+            # print(" ====== a transition has been added to replay buffer ========== ")
             # Add to offline buffer if it's an intervention
             # 如果在线policy数据当中有干预数据，则将数据添加到离线回放缓冲区当中
             if dataset_repo_id is not None and transition.get("complementary_info", {}).get(

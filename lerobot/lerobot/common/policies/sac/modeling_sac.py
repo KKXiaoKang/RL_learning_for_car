@@ -15,6 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import math
 from dataclasses import asdict
 from typing import Callable, Literal
@@ -35,15 +36,15 @@ from lerobot.common.policies.utils import get_device_from_parameters
 # Add ROS imports for visualization
 try:
     import rospy
-    from sensor_msgs.msg import Image
-    from cv_bridge import CvBridge, CvBridgeError
+    from sensor_msgs.msg import Image, CompressedImage
+    import cv2
     ROS_AVAILABLE = True
 except ImportError:
     ROS_AVAILABLE = False
     rospy = None
     Image = None
-    CvBridge = None
-    CvBridgeError = None
+    CompressedImage = None
+    cv2 = None
 
 
 DISCRETE_DIMENSION_INDEX = -1  # Gripper is always the last dimension
@@ -73,7 +74,11 @@ class SACPolicy(
         self._init_critics(continuous_action_dim) # 🔥 初始化critic
         self._init_actor(continuous_action_dim) # 🔥 初始化actor
         self._init_temperature() # 🔥 初始化温度
+        self._init_warmup_parameters() # 🔥 初始化warm-up参数（如果启用）
 
+        # Initialize member variable to store td_target for wandb logging
+        self.last_td_target: Tensor | None = None
+    
     def get_optim_params(self) -> dict:
         optim_params = {
             "actor": [
@@ -213,10 +218,16 @@ class SACPolicy(
             )
             return {"loss_discrete_critic": loss_discrete_critic}
         if model == "actor":
+            # 提取专家动作（如果可用）和训练步数
+            expert_actions = batch.get("expert_action")
+            training_step = batch.get("training_step", 0)
+            
             return {
                 "loss_actor": self.compute_loss_actor(
                     observations=observations,
                     observation_features=observation_features,
+                    expert_actions=expert_actions,
+                    training_step=training_step,
                 )
             }
 
@@ -289,6 +300,9 @@ class SACPolicy(
                 min_q = min_q - (self.temperature * next_log_probs)
 
             td_target = rewards + (1 - done) * self.config.discount * min_q
+
+            # Store td_target for wandb logging (detach to avoid affecting gradients)
+            self.last_td_target = td_target.detach().clone()
 
         # 3- compute predicted qs
         if self.config.num_discrete_actions is not None:
@@ -387,7 +401,21 @@ class SACPolicy(
         self,
         observations,
         observation_features: Tensor | None = None,
+        expert_actions: Tensor | None = None,
+        training_step: int = 0,
     ) -> Tensor:
+        """
+        计算Actor损失，包含SAC损失和可选的BC损失
+        
+        Args:
+            observations: 观测数据
+            observation_features: 预计算的观测特征
+            expert_actions: 专家动作（来自离线数据集），用于计算BC损失
+            training_step: 当前训练步数，用于动态权重计算
+            
+        Returns:
+            Actor总损失
+        """
         actions_pi, log_probs, _ = self.actor(observations, observation_features)
 
         q_preds = self.critic_forward(
@@ -398,8 +426,112 @@ class SACPolicy(
         )
         min_q_preds = q_preds.min(dim=0)[0]
 
-        actor_loss = ((self.temperature * log_probs) - min_q_preds).mean()
+        # 计算标准SAC Actor损失
+        sac_actor_loss = ((self.temperature * log_probs) - min_q_preds).mean()
+        
+        # 如果有专家动作，计算BC损失
+        if expert_actions is not None:
+            bc_mse_loss = self._compute_bc_loss(
+                predicted_actions=actions_pi,
+                expert_actions=expert_actions
+            )
+            
+            # 计算动态权重（随训练步数衰减）
+            bc_weight = self._compute_dynamic_bc_weight(training_step)
+            sac_weight = 1.0 - bc_weight
+            
+            # 混合损失
+            actor_loss = sac_weight * sac_actor_loss + bc_weight * bc_mse_loss
+            
+            # 存储损失组件用于日志记录
+            self._last_bc_loss = bc_mse_loss.detach().clone()
+            self._last_bc_weight = bc_weight
+            self._last_sac_actor_loss = sac_actor_loss.detach().clone()
+        else:
+            # 纯SAC损失
+            actor_loss = sac_actor_loss
+            self._last_bc_loss = None
+            self._last_bc_weight = 0.0
+            self._last_sac_actor_loss = sac_actor_loss.detach().clone()
+            
         return actor_loss
+    
+    def _compute_bc_loss(self, predicted_actions: Tensor, expert_actions: Tensor) -> Tensor:
+        """
+        计算行为克隆的MSE损失
+        
+        Args:
+            predicted_actions: 策略网络预测的动作
+            expert_actions: 专家演示的动作
+            
+        Returns:
+            BC MSE损失
+        """
+        # 记录原始形状用于调试
+        orig_pred_shape = predicted_actions.shape
+        orig_expert_shape = expert_actions.shape
+        
+        # 首先处理动作维度不匹配的问题
+        if predicted_actions.shape[1] != expert_actions.shape[1]:
+            # 如果有离散动作维度，只使用连续部分
+            if self.config.num_discrete_actions is not None:
+                expert_actions = expert_actions[:, :predicted_actions.shape[1]]
+                logging.debug(f"BC: Adjusted expert action dims for discrete actions: {orig_expert_shape} -> {expert_actions.shape}")
+            else:
+                raise ValueError(f"Action dimension mismatch: predicted {predicted_actions.shape[1]} dims, expert {expert_actions.shape[1]} dims")
+        
+        # 处理批次大小不匹配的问题
+        if predicted_actions.shape[0] != expert_actions.shape[0]:
+            pred_batch_size = predicted_actions.shape[0]
+            expert_batch_size = expert_actions.shape[0]
+            
+            if expert_batch_size < pred_batch_size:
+                # 重复专家动作以匹配预测批次大小
+                repeat_times = (pred_batch_size + expert_batch_size - 1) // expert_batch_size
+                expert_actions = expert_actions.repeat(repeat_times, 1)[:pred_batch_size]
+                logging.debug(f"BC: Repeated expert actions: {orig_expert_shape} -> {expert_actions.shape}")
+            elif expert_batch_size > pred_batch_size:
+                # 截断专家动作以匹配预测批次大小
+                expert_actions = expert_actions[:pred_batch_size]
+                logging.debug(f"BC: Truncated expert actions: {orig_expert_shape} -> {expert_actions.shape}")
+        
+        # 最终检查形状是否匹配
+        if predicted_actions.shape != expert_actions.shape:
+            raise ValueError(f"Final shape mismatch after adjustments: predicted {predicted_actions.shape}, expert {expert_actions.shape}")
+        
+        # 计算MSE损失
+        bc_loss = F.mse_loss(predicted_actions, expert_actions)
+        return bc_loss
+    
+    def _compute_dynamic_bc_weight(self, training_step: int) -> float:
+        """
+        计算动态BC权重，随训练步数衰减
+        
+        策略：
+        - 初始权重：0.5（BC和SAC各占一半）
+        - 衰减方式：指数衰减
+        - 最终权重：0.01（保持少量BC正则化）
+        - 衰减步数：根据配置设定
+        
+        Args:
+            training_step: 当前训练步数
+            
+        Returns:
+            BC权重（0-1之间）
+        """
+        # 从配置中获取衰减参数，如果没有则使用默认值
+        initial_bc_weight = getattr(self.config, 'bc_initial_weight', 0.5)
+        final_bc_weight = getattr(self.config, 'bc_final_weight', 0.01)
+        bc_decay_steps = getattr(self.config, 'bc_decay_steps', 50000)
+        
+        if training_step >= bc_decay_steps:
+            return final_bc_weight
+        
+        # 指数衰减
+        decay_ratio = training_step / bc_decay_steps
+        weight = initial_bc_weight * (final_bc_weight / initial_bc_weight) ** decay_ratio
+        
+        return max(weight, final_bc_weight)
 
     def _init_normalization(self, dataset_stats):
         """Initialize input/output normalization modules."""
@@ -567,6 +699,46 @@ class SACPolicy(
         # 从 log_alpha 当中通过exp还原为temperature
         self.temperature = self.log_alpha.exp().item() # temperature 必须为一个 x > 0 的数字
 
+    def _init_warmup_parameters(self):
+        """Initialize warm-up parameters if enabled."""
+        if not self.config.enable_warmup or not self.config.warmup_model_path:
+            return
+        
+        import logging
+        from .warmup_utils import WarmupParameterLoader, validate_warmup_model_path
+        
+        # Validate warmup model path
+        validated_path = validate_warmup_model_path(self.config.warmup_model_path)
+        if not validated_path:
+            logging.warning(f"Invalid warm-up model path: {self.config.warmup_model_path}")
+            return
+        
+        # Create loader and load parameters
+        loader = WarmupParameterLoader()
+        if not loader.load_warmup_parameters(validated_path):
+            logging.error("Failed to load warm-up parameters")
+            return
+        
+        # Apply parameters to actor
+        success = loader.apply_warmup_parameters(
+            target_model=self.actor,
+            strict=self.config.warmup_strict_loading,
+            freeze_loaded_params=self.config.warmup_freeze_loaded_params
+        )
+        
+        if success:
+            logging.info("✅ Successfully applied warm-up parameters to SAC Actor")
+            
+            # Log warm-up information
+            warmup_info = loader.get_warmup_info()
+            logging.info(f"Warm-up info: {warmup_info}")
+            
+            # Store warmup info in config for later reference
+            if not hasattr(self.config, '_warmup_info'):
+                self.config._warmup_info = warmup_info
+        else:
+            logging.error("❌ Failed to apply warm-up parameters to SAC Actor")
+
 
 class SACObservationEncoder(nn.Module):
     """Encode image and/or state vector observations."""
@@ -584,20 +756,65 @@ class SACObservationEncoder(nn.Module):
 
     def _init_feature_visualization(self):
         """Initialize ROS publisher and utilities for feature visualization."""
-        self.enable_feature_viz = True
+        # Check if feature visualization is enabled in config
+        if not getattr(self.config, 'enable_feature_visualization', False):
+            self.enable_feature_viz = False
+            self.feature_viz_enabled = False
+            rospy.loginfo("-- Feature visualization disabled in config -- enable_feature_visualization: False")
+            return
+            
+        # Determine which processes should enable feature visualization
+        import os
+        import sys
+        
+        # Determine if this should enable feature visualization
+        should_enable_viz = False
+        
+        # Method 1: Check command line arguments for inference scripts
+        cmd_line = ' '.join(sys.argv)
+        if 'gym_manipulator.py' in cmd_line or 'actor.py' in cmd_line:
+            should_enable_viz = True
+        
+        # Method 2: Check if environment variable is set (can be set by actor.py or gym_manipulator.py)
+        process_type = os.environ.get('LEROBOT_PROCESS_TYPE')
+        if process_type == 'actor':
+            should_enable_viz = True
+            
+        # Method 3: Check process name/title
+        try:
+            import setproctitle
+            proc_title = setproctitle.getproctitle().lower()
+            if 'actor' in proc_title or 'gym_manipulator' in proc_title:
+                should_enable_viz = True
+        except ImportError:
+            pass
+        
+        # Method 4: Check if this is an inference/evaluation context
+        # If we're loading a pretrained model and not in a learner context, enable visualization
+        if not should_enable_viz:
+            # Check if we're in a learner process (learners typically don't need visualization)
+            is_learner = ('learner.py' in cmd_line or 
+                         process_type == 'learner' or
+                         os.environ.get('LEROBOT_IS_LEARNER') == 'true')
+            
+            if not is_learner:
+                # This is likely an inference/evaluation context
+                should_enable_viz = True
+        
+        self.enable_feature_viz = should_enable_viz
 
         if self.enable_feature_viz and ROS_AVAILABLE and rospy is not None:
             try:
-                # Initialize ROS publisher for feature visualization
-                self.feature_viz_pub = rospy.Publisher('/vision_features/resnet10_features', Image, queue_size=1, tcp_nodelay=True)
-                self.cv_bridge = CvBridge()
+                # Initialize ROS publisher for feature visualization (using CompressedImage for better performance)
+                self.feature_viz_pub = rospy.Publisher('/vision_features/resnet10_features/compressed', CompressedImage, queue_size=1, tcp_nodelay=True)
                 self.feature_viz_enabled = True
-                rospy.loginfo("Feature visualization enabled - publishing to /vision_features/resnet10_features")
+                rospy.loginfo("Feature visualization enabled - publishing to /vision_features/resnet10_features/compressed")
             except Exception as e:
                 rospy.logwarn(f"Failed to initialize feature visualization: {e}")
                 self.feature_viz_enabled = False
         else:
             self.feature_viz_enabled = False
+            rospy.loginfo("-- Feature visualization disabled -- [if self.enable_feature_viz and ROS_AVAILABLE and rospy is not None] ")
 
     def _visualize_features(self, features: Tensor, image_key: str = "observation.image.front"):
         """
@@ -658,10 +875,15 @@ class SACObservationEncoder(nn.Module):
                     rospy.logwarn(f"Unsupported feature shape for visualization: {features.shape}")
                     return
                 
-                # Publish as ROS Image message
-                ros_image = self.cv_bridge.cv2_to_imgmsg(feat_rgb, "rgb8")
+                # Publish as ROS CompressedImage message
+                ros_image = CompressedImage()
                 ros_image.header.stamp = rospy.Time.now()
                 ros_image.header.frame_id = f"features_{image_key.replace('.', '_')}"
+                ros_image.format = "jpeg"
+                
+                # Encode image to JPEG format
+                _, encoded_img = cv2.imencode('.jpg', feat_rgb)
+                ros_image.data = encoded_img.tobytes()
                 
                 self.feature_viz_pub.publish(ros_image)
                 
@@ -680,6 +902,15 @@ class SACObservationEncoder(nn.Module):
             rospy.logwarn(f"Error in feature visualization: {e}")
 
     def _init_image_layers(self) -> None:
+        # If the config explicitly disables vision features, skip image processing entirely
+        if getattr(self.config, 'disable_vision_features', False):
+            self.has_images = False
+            self.image_keys = []
+            self.image_encoder = None
+            self.spatial_embeddings = nn.ModuleDict()
+            self.post_encoders = nn.ModuleDict()
+            return
+
         # If the config clearly indicates no vision, just exit.
         # This is a stronger check that relies on explicit config values.
         if self.config.vision_encoder_name is None and self.config.image_encoder_hidden_dim == 0:
@@ -804,12 +1035,16 @@ class SACObservationEncoder(nn.Module):
         Args:
             obs: Dictionary of observation tensors containing image keys
             normalize: Whether to normalize observations before encoding
-                      Set to True when calling directly from outside the encoder's forward method
-                      Set to False when calling from within forward() where inputs are already normalized
+                  Set to True when calling directly from outside the encoder's forward method
+                  Set to False when calling from within forward() where inputs are already normalized
 
         Returns:
             Dictionary mapping image keys to their corresponding encoded features
         """
+        # Early return if vision features are disabled
+        if not self.has_images or len(self.image_keys) == 0 or self.image_encoder is None:
+            return {}
+        
         if normalize:
             obs = self.input_normalization(obs) # 归一化图像
         batched = torch.cat([obs[k] for k in self.image_keys], dim=0) # 🔥 关键步骤：只提取图像键对应的数据, 同时拼接在一起

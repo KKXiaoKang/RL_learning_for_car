@@ -1,0 +1,82 @@
+MLP Network Parameter Comparison Report
+==================================================
+
+Model Information:
+  Model 1: MLP_BC
+    Total parameters: 88,920
+    Weight layers: 5
+    Architecture: [(32, 64), (256, 6), (64, 256), (256, 256), (256, 6)]
+
+  Model 2: SAC_Actor
+    Total parameters: 5,474,060
+    Weight layers: 6
+    Architecture: [(4096, 64), (32, 64), (256, 6), (128, 256), (256, 256), (256, 6)]
+
+Global Comparison:
+  Parameter count difference: 5,385,140
+
+Layer-by-Layer Comparison:
+  Layer 1: actor.encoder.state_encoder.0.weight vs actor.encoder.image_encoder.image_enc_layers.embedder.0.weight
+    Shape match: False
+    mean: 108.00% difference
+    std: 57.70% difference
+    min: 287.70% difference
+    max: 221.54% difference
+    norm: 238.04% difference
+
+  Layer 2: actor.encoder.state_encoder.1.weight vs actor.encoder.image_encoder.image_enc_layers.embedder.1.weight
+    Shape match: True
+    mean: 219.75% difference
+    std: 2847.31% difference
+    min: 101.51% difference
+    max: 596.32% difference
+    norm: 262.69% difference
+
+  Layer 3: actor.mean_layer.weight vs actor.encoder.image_encoder.image_enc_layers.encoder.stages.0.conv1.conv.weight
+    Shape match: False
+    mean: 1374.50% difference
+    std: 261.10% difference
+    min: 1023.29% difference
+    max: 353.94% difference
+    norm: 1672.14% difference
+
+  Layer 4: actor.network.net.0.weight vs actor.encoder.image_encoder.image_enc_layers.encoder.stages.0.conv2.conv.weight
+    Shape match: False
+    mean: 407.39% difference
+    std: 13.53% difference
+    min: 151.73% difference
+    max: 68.51% difference
+    norm: 29.87% difference
+
+  Layer 5: actor.network.net.1.weight vs actor.encoder.image_encoder.image_enc_layers.encoder.stages.0.norm1.weight
+    Shape match: False
+    mean: 204.36% difference
+    std: 3285.66% difference
+    min: 57.21% difference
+    max: 588.00% difference
+    norm: 71.27% difference
+
+  Layer 6: actor.network.net.3.weight vs actor.encoder.image_encoder.image_enc_layers.encoder.stages.0.norm2.weight
+    Shape match: False
+    mean: 504645.44% difference
+    std: 4579.06% difference
+    min: 756.36% difference
+    max: 3411.80% difference
+    norm: 182.33% difference
+
+  Layer 7: actor.network.net.4.weight vs actor.encoder.image_encoder.image_enc_layers.encoder.stages.1.conv1.conv.weight
+    Shape match: False
+    mean: 100.26% difference
+    std: 9.62% difference
+    min: 145.62% difference
+    max: 64.23% difference
+    norm: 9.41% difference
+
+  Layer 8: actor.std_layer.weight vs actor.encoder.image_encoder.image_enc_layers.encoder.stages.1.conv2.conv.weight
+    Shape match: False
+    mean: 172.54% difference
+    std: 20.51% difference
+    min: 56.27% difference
+    max: 502.17% difference
+    norm: 678.89% difference
+

@@ -28,6 +28,7 @@ from lerobot.common.policies.pi0.configuration_pi0 import PI0Config
 from lerobot.common.policies.pi0fast.configuration_pi0fast import PI0FASTConfig
 from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.policies.sac.configuration_sac import SACConfig
+from lerobot.common.policies.sac.mlp_bc_model.configuration_mlp_bc import MLPBCConfig
 from lerobot.common.policies.sac.reward_model.configuration_classifier import RewardClassifierConfig
 from lerobot.common.policies.smolvla.configuration_smolvla import SmolVLAConfig
 from lerobot.common.policies.tdmpc.configuration_tdmpc import TDMPCConfig
@@ -66,6 +67,10 @@ def get_policy_class(name: str) -> PreTrainedPolicy:
         from lerobot.common.policies.sac.modeling_sac import SACPolicy
 
         return SACPolicy
+    elif name == "mlp_bc":
+        from lerobot.common.policies.sac.mlp_bc_model.modeling_mlp_bc import MLPBCPolicy
+
+        return MLPBCPolicy
     elif name == "reward_classifier":
         from lerobot.common.policies.sac.reward_model.modeling_classifier import Classifier
 
@@ -93,6 +98,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return PI0FASTConfig(**kwargs)
     elif policy_type == "sac":
         return SACConfig(**kwargs)
+    elif policy_type == "mlp_bc":
+        return MLPBCConfig(**kwargs)
     elif policy_type == "smolvla":
         return SmolVLAConfig(**kwargs)
     elif policy_type == "reward_classifier":

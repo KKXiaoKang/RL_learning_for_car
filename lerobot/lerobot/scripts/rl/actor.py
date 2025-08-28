@@ -97,10 +97,17 @@ ACTOR_SHUTDOWN_TIMEOUT = 30
 # Main entry point #
 #################################################
 
+DEBUG_PRINT_FLAG = False
 
 @parser.wrap()
 def actor_cli(cfg: TrainRLServerPipelineConfig):
     cfg.validate()
+    
+    # Set environment variable to identify this as an actor process
+    # This will be used by the SACPolicy to enable feature visualization only for actors
+    import os
+    os.environ['LEROBOT_PROCESS_TYPE'] = 'actor'
+    
     display_pid = False
     if not use_threads(cfg):
         import torch.multiprocessing as mp
@@ -243,6 +250,7 @@ def act_with_policy(
     set_seed(cfg.seed) # 设置随机种子
     device = get_safe_torch_device(cfg.policy.device, log=True) # 获取设备
 
+
     """
         benchmark 会让 PyTorch 在第一次运行卷积操作时，自动测试所有可用的算法，选择最快的那个，然后缓存下来，测试结果会被缓存，后续使用相同输入尺寸时直接使用最优算法
         allow_tf32 允许在CUDA上使用TF32混合精度计算, 提高性能
@@ -271,6 +279,7 @@ def act_with_policy(
     # Add counters for intervention rate calculation
     episode_intervention_steps = 0 # 干预步数
     episode_total_steps = 0 # 总步数
+    episode_length = 0 # 回合长度（步数）
 
     policy_timer = TimerManager("Policy inference", log=False) # 策略推理计时器
 
@@ -281,17 +290,61 @@ def act_with_policy(
             logging.info("[ACTOR] Shutting down act_with_policy")
             return
 
-        # 如果当前步数大于online_step_before_learning(100), 使用策略选择的动作
-        if interaction_step >= cfg.policy.online_step_before_learning: 
+        # 判断是否使用策略选择动作
+        # 如果enable_warmup为true，或者步数大于online_step_before_learning，则使用策略选择的动作
+        warmup_enabled = hasattr(cfg.policy, 'enable_warmup') and cfg.policy.enable_warmup
+        past_learning_threshold = interaction_step >= cfg.policy.online_step_before_learning
+        use_policy_action = past_learning_threshold or warmup_enabled
+        
+        # 在第一步或者每1000步记录一次当前的动作选择策略
+        if interaction_step == 0 or interaction_step % 200 == 0:
+            print(f"[ACTOR] Step {interaction_step}: warmup_enabled={warmup_enabled}, "
+                        f"past_learning_threshold={past_learning_threshold}, "
+                        f"use_policy_action={use_policy_action}")
+        
+        if use_policy_action: 
             # Time policy inference and check if it meets FPS requirement
             with policy_timer:
                 action = policy.select_action(batch=obs) # 选择动作
+                
+                # 获取动作统计信息用于wandb记录
+                action_mean = None
+                action_std = None
+                try:
+                    # 获取action的分布统计信息
+                    observations_features = None
+                    if policy.shared_encoder and policy.actor.encoder.has_images:
+                        observations_features = policy.actor.encoder.get_cached_image_features(obs, normalize=True)
+                    
+                    # 调用actor的forward方法获取均值
+                    with torch.no_grad():
+                        _, _, means = policy.actor(obs, observations_features)
+                        action_mean = means.cpu().numpy().flatten()
+                        
+                        # 计算标准差（从actor网络获取）
+                        obs_enc = policy.actor.encoder(obs, cache=observations_features, detach=policy.actor.encoder_is_shared)
+                        outputs = policy.actor.network(obs_enc)
+                        if policy.actor.fixed_std is None:
+                            log_std = policy.actor.std_layer(outputs)
+                            std = torch.exp(log_std)
+                            std = torch.clamp(std, policy.actor.std_min, policy.actor.std_max)
+                            action_std = std.cpu().numpy().flatten()
+                        else:
+                            action_std = policy.actor.fixed_std.cpu().numpy().flatten()
+                except Exception as e:
+                    # 如果获取统计信息失败，记录错误但不影响正常执行
+                    logging.warning(f"Failed to get action statistics: {e}")
+                    action_mean = None
+                    action_std = None
+                    
             policy_fps = policy_timer.fps_last
 
             log_policy_frequency_issue(policy_fps=policy_fps, cfg=cfg, interaction_step=interaction_step)
 
-        else: # 如果小于100步, 使用随机动作，学习前使用随机动作进行探索
+        else: # 如果enable_warmup为false且步数小于online_step_before_learning, 使用随机动作进行探索
             action = online_env.action_space.sample()
+            action_mean = None
+            action_std = None
 
         # truncated 表示是否提前终止，比如达到最大步数
         # done 表示是否完成，比如到达目标位置
@@ -302,6 +355,7 @@ def act_with_policy(
         sum_reward_episode += float(reward) # 累计奖励
         # Increment total steps counter for intervention rate
         episode_total_steps += 1 # 总步数
+        episode_length += 1 # 回合长度计数
 
         # NOTE: We override the action if the intervention is True, because the action applied is the intervention action
         # 检查是否发生人类干预
@@ -335,6 +389,25 @@ def act_with_policy(
                 complementary_info=info,
             )
         )
+        
+        # NOTE: 发送步级别的统计信息到learner用于wandb记录
+        step_stats = {
+            "Step reward": float(reward),
+            "Global step": interaction_step,
+            "Episode step": episode_length,
+        }
+        
+        # 添加action统计信息（如果可用）
+        if action_mean is not None:
+            step_stats["Action mean"] = action_mean.tolist() if hasattr(action_mean, 'tolist') else action_mean
+        if action_std is not None:
+            step_stats["Action std"] = action_std.tolist() if hasattr(action_std, 'tolist') else action_std
+            
+        # 发送step级别的信息到interaction队列
+        interactions_queue.put(
+            python_object_to_bytes(step_stats)
+        )
+        
         # NOTE:assign obs to the next obs and continue the rollout
         obs = next_obs
 
@@ -342,8 +415,21 @@ def act_with_policy(
         if done or truncated:
             logging.info(f"[ACTOR] Global step {interaction_step}: Episode reward: {sum_reward_episode}")
             # NOTE:更新策略参数
-            update_policy_parameters(policy=policy, parameters_queue=parameters_queue, device=device)
-
+            # update_policy_parameters(policy=policy, parameters_queue=parameters_queue, device=device)
+            update_policy_parameters(policy=policy.actor, parameters_queue=parameters_queue, device=device)
+            
+            # 打印参数
+            if DEBUG_PRINT_FLAG:
+                print(f" ============================== actor update_policy_parameters ======================================  ")
+                print(f" policy: {policy.actor} ")
+                print(f" parameters_queue: {parameters_queue} ")
+                print(f" device: {device} ")
+                print(f" ================================================ ")
+            if DEBUG_PRINT_FLAG:
+                print(f" ============================== actor list_transition_to_send_to_learner ======================================  ")
+                print(list_transition_to_send_to_learner)
+                print(f" ================================================ ")
+                
             # NOTE:如果list_transition_to_send_to_learner列表不为空，则将列表中的转换数据推送到传输队列中
             if len(list_transition_to_send_to_learner) > 0:
                 push_transitions_to_transport_queue(
@@ -361,6 +447,14 @@ def act_with_policy(
                 intervention_rate = episode_intervention_steps / episode_total_steps # 干预率 = 干预步数 / 总步数
 
             # NOTE:Send episodic reward to the learner - 发送该回合的统计信息
+            if DEBUG_PRINT_FLAG:
+                print(f" ============================== actor interactions_queue.put ======================================  ")
+                print(f" sum_reward_episode: {sum_reward_episode} ")
+                print(f" interaction_step: {interaction_step} ")
+                print(f" episode_intervention: {episode_intervention} ")
+                print(f" intervention_rate: {intervention_rate} ")
+                print(f" stats: {stats} ")
+                print(f" ================================================ ")
             interactions_queue.put(
                 python_object_to_bytes(
                     {
@@ -368,6 +462,9 @@ def act_with_policy(
                         "Interaction step": interaction_step, # 此次episode的交互步数
                         "Episode intervention": int(episode_intervention), # 此次episode是否发生干预
                         "Intervention rate": intervention_rate, # 此次episode的干预率
+                        "Episode length": episode_length, # 回合长度
+                        "Episode terminated": done, # 回合是否正常终止（达到目标）
+                        "Episode truncated": truncated, # 回合是否被截断（超时等）
                         **stats,
                     }
                 )
@@ -378,6 +475,7 @@ def act_with_policy(
             episode_intervention = False   
             episode_intervention_steps = 0
             episode_total_steps = 0
+            episode_length = 0
             obs, info = online_env.reset()
         
         # NOTE: 频率控制 - 如果fps不为空，则进行频率控制
@@ -404,6 +502,21 @@ def establish_learner_connection(
         attempts (int): The number of attempts to establish the connection.
     Returns:
         bool: True if the connection is established, False otherwise.
+    """
+    """
+        1. 连接建立
+        尝试与 Learner 服务建立 gRPC 连接
+        通过发送 Ready 消息来验证 Learner 是否准备就绪
+        支持重试机制，最多尝试 30 次
+
+        2. 错误处理
+        捕获 gRPC 连接错误
+        在连接失败时等待 2 秒后重试
+        记录详细的日志信息
+
+        3. 优雅关闭
+        检查 shutdown_event 信号
+        如果收到关闭信号，立即停止连接尝试
     """
     for _ in range(attempts):
         if shutdown_event.is_set():
@@ -666,33 +779,13 @@ def interactions_stream(
 
 
 def update_policy_parameters(policy: SACPolicy, parameters_queue: Queue, device):
+    print( " ============================== update_policy_parameters ======================================  ")
     bytes_state_dict = get_last_item_from_queue(parameters_queue, block=False)
     if bytes_state_dict is not None:
         logging.info("[ACTOR] Load new parameters from Learner.")
-        state_dicts = bytes_to_state_dict(bytes_state_dict)
-
-        # TODO: check encoder parameter synchronization possible issues:
-        # 1. When shared_encoder=True, we're loading stale encoder params from actor's state_dict
-        #    instead of the updated encoder params from critic (which is optimized separately)
-        # 2. When freeze_vision_encoder=True, we waste bandwidth sending/loading frozen params
-        # 3. Need to handle encoder params correctly for both actor and discrete_critic
-        # Potential fixes:
-        # - Send critic's encoder state when shared_encoder=True
-        # - Skip encoder params entirely when freeze_vision_encoder=True
-        # - Ensure discrete_critic gets correct encoder state (currently uses encoder_critic)
-
-        # Load actor state dict
-        actor_state_dict = move_state_dict_to_device(state_dicts["policy"], device=device)
-        policy.actor.load_state_dict(actor_state_dict)
-
-        # Load discrete critic if present
-        if hasattr(policy, "discrete_critic") and "discrete_critic" in state_dicts:
-            discrete_critic_state_dict = move_state_dict_to_device(
-                state_dicts["discrete_critic"], device=device
-            )
-            policy.discrete_critic.load_state_dict(discrete_critic_state_dict)
-            logging.info("[ACTOR] Loaded discrete critic parameters from Learner.")
-
+        state_dict = bytes_to_state_dict(bytes_state_dict)
+        state_dict = move_state_dict_to_device(state_dict, device=device)        
+        policy.load_state_dict(state_dict)
 
 #################################################
 #  Utilities functions #

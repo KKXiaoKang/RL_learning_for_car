@@ -127,6 +127,10 @@ class SACConfig(PreTrainedConfig):
     vision_encoder_name: str | None = None
     # Whether to freeze the vision encoder during training
     freeze_vision_encoder: bool = True
+    # Whether to disable vision features entirely (useful for debugging or ablation studies)
+    disable_vision_features: bool = False
+    # Whether to enable ResNet feature visualization (publishes features to ROS topic)
+    enable_feature_visualization: bool = False
     # Hidden dimension size for the image encoder
     image_encoder_hidden_dim: int = 32
     # Whether to use a shared encoder for actor and critic
@@ -195,6 +199,24 @@ class SACConfig(PreTrainedConfig):
     actor_learner_config: ActorLearnerConfig = field(default_factory=ActorLearnerConfig)
     # Configuration for concurrency settings (you can use threads or processes for the actor and learner)
     concurrency: ConcurrencyConfig = field(default_factory=ConcurrencyConfig)
+    
+    # Warm-up configuration for loading pre-trained parameters
+    # Path to warm-up model file (e.g., MLP BC model safetensors file)
+    warmup_model_path: str | None = None
+    # Whether to enable warm-up parameter loading
+    enable_warmup: bool = False
+    # Whether to freeze parameters loaded from warm-up model
+    warmup_freeze_loaded_params: bool = False
+    # Whether to require strict parameter matching during warm-up loading
+    warmup_strict_loading: bool = False
+
+    # Behavior Cloning (BC) hybrid loss configuration
+    # Initial weight for BC loss in hybrid BC+SAC loss (0.0-1.0)
+    bc_initial_weight: float = 0.5
+    # Final weight for BC loss after decay (0.0-1.0)  
+    bc_final_weight: float = 0.01
+    # Number of training steps over which to decay BC weight
+    bc_decay_steps: int = 50000
 
     # Optimizations
     use_torch_compile: bool = True
@@ -221,11 +243,21 @@ class SACConfig(PreTrainedConfig):
         has_image = any(is_image_feature(key) for key in self.input_features)
         """ 检查config当中是否有observation.state特征键 | 如果没有则报错 """
         has_state = OBS_STATE in self.input_features
-
-        if not (has_state or has_image):
-            raise ValueError(
-                "You must provide either 'observation.state' or an image observation (key starting with 'observation.image') in the input features"
-            )
+        
+        # If vision features are explicitly disabled, we only require state features
+        if getattr(self, 'disable_vision_features', False):
+            if not has_state:
+                raise ValueError(
+                    "When vision features are disabled (disable_vision_features=True), "
+                    "you must provide 'observation.state' in the input features"
+                )
+        else:
+            # Normal validation: require either state or image
+            if not (has_state or has_image):
+                raise ValueError(
+                    "You must provide either 'observation.state' or an image observation "
+                    "(key starting with 'observation.image') in the input features"
+                )
 
         """ 检查config当中是否有action特征键 | 如果没有则报错 """
         if "action" not in self.output_features:

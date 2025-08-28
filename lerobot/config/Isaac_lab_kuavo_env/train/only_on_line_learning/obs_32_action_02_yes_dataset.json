@@ -1,0 +1,151 @@
+{
+    "output_dir": null,
+    "job_name": "kuavo_debug_11_test | zero_obs_yes_dataset_action-0.5or0.5_fps10_seed1000_action_02_reward_type_shaped",
+    "resume": false,
+    "seed": 1000,
+    "num_workers": 4,
+    "batch_size": 256,
+    "steps": 100000,
+    "log_freq": 1,
+    "save_checkpoint": true,
+    "save_freq": 2000,
+    "wandb": {
+        "enable": true,
+        "project": "rl_kuavo_MetaVR_hil_real_control",
+        "disable_artifact": true
+    },
+    "dataset": null, 
+    "policy": {
+        "type": "sac",
+        "n_obs_steps": 1,
+        "normalization_mapping": {
+            "STATE": "MIN_MAX",
+            "ACTION": "MIN_MAX"
+        },
+        "dataset_stats": {
+            "observation.state": {
+                "min": [-1.2917577028274536, -0.570685863494873, 0.7295843958854675, -1.304768443107605, -0.5613779425621033, 0.7473117709159851, -0.3559678792953491, -0.22024473547935486, -0.7741824388504028, -2.6179935932159424, -0.9371932744979858, -0.7436486482620239, -0.6981319189071655, -0.45602893829345703, -0.5058940649032593, -0.602821946144104, -2.5534157752990723, -1.5707964897155762, -0.6981315612792969, -0.6985939145088196, -0.8438863158226013, -0.0017371545545756817, 0.8664000034332275, 0.15477274358272552, 0.0479290746152401, -0.1368156522512436, 0.14473681151866913, -0.5613775849342346, -0.11908822506666183, -1.1865878105163574, -0.04097478464245796, 0.9173179864883423],
+                "max": [1.291588544845581, 0.5674864053726196, 1.2040494680404663, 1.3269648551940918, 0.5451250672340393, 1.2192052602767944, 0.7739959359169006, 0.512202262878418, 0.6391605734825134, -0.5522511005401611, 1.5707967281341553, 0.6959399580955505, 0.6981316208839417, 0.570129930973053, 0.21686126291751862, 0.8414734601974487, -0.42903199791908264, 1.1521750688552856, 0.7167247533798218, 0.6797691583633423, 0.8717080950737, 0.0, 0.8664000034332275, 0.5104916095733643, 0.570685863494873, 0.33764931559562683, 0.5210177898406982, 0.00502369087189436, 0.35280486941337585, 1.1546261310577393, 0.12380478531122208, 1.185847282409668]
+            },
+            "action": {
+                "min": [-0.5, -0.5],
+                "max": [0.5, 0.5]
+            }
+        },
+        "input_features": {
+            "observation.state": {
+                "type": "STATE",
+                "shape": [ 32 ]
+            }
+        },
+        "output_features": {
+            "action": {
+                "type": "ACTION",
+                "shape": [ 2 ]
+            }
+        },
+        "device": "cuda",
+        "use_amp": false,
+        "storage_device": "cpu",
+        "vision_encoder_name": null,
+        "freeze_vision_encoder": false,
+        "image_encoder_hidden_dim": 0,
+        "shared_encoder": false,
+        "num_discrete_actions": null,
+        "online_steps": 1000000,
+        "online_env_seed": 1000,
+        "online_buffer_capacity": 100000,
+        "offline_buffer_capacity": 100000,
+        "online_step_before_learning": 200,
+        "policy_update_freq": 1,
+        "discount": 0.99,
+        "temperature_init": 1.0,
+        "num_critics": 2,
+        "num_subsample_critics": null,
+        "critic_lr": 3e-4,
+        "actor_lr": 3e-4,
+        "temperature_lr": 3e-4,
+        "critic_target_update_weight": 0.005,
+        "utd_ratio": 1,
+        "state_encoder_hidden_dim": 256,
+        "latent_dim": 64,
+        "target_entropy": null,
+        "use_backup_entropy": true,
+        "grad_clip_norm": 10.0,
+        "actor_network_kwargs": {
+            "hidden_dims": [ 256, 256 ],
+            "activate_final": true
+        },
+        "critic_network_kwargs": {
+            "hidden_dims": [ 256, 256 ],
+            "activate_final": true,
+            "final_activation": null
+        },
+        "policy_kwargs": {
+            "use_tanh_squash": true,
+            "std_min": 1e-4,
+            "std_max": 2.0,
+            "init_final": 0.01
+        },
+        "actor_learner_config": {
+            "learner_host": "127.0.0.1",
+            "learner_port": 50051,
+            "policy_parameters_push_frequency": 1,
+            "queue_get_timeout": 2
+        },
+        "concurrency": {
+            "actor": "threads",
+            "learner": "threads"
+        }
+    },
+    "env": {
+        "type": "hil",
+        "wrapper": {
+            "control_time_s": 20.0,
+            "reset_time_s": 2.0,
+            "control_mode": "meta_vr",
+            "vel_smoothing_factor": 0.2,
+            "arm_smoothing_factor": 0.2,
+            "wbc_observation_enabled": false,
+            "display_cameras": false,
+            "add_joint_velocity_to_observation": false,
+            "add_ee_pose_to_observation": false,
+            "crop_params_dict": null,
+            "resize_size": null,
+            "fixed_reset_joint_positions": null,
+            "gripper_penalty": 0.0
+        },
+        "name": "rl_kuavo_MetaVR_env",
+        "mode": null,
+        "task": "RLKuavoMetaVR-v0",
+        "device": "cuda",
+        "fps": 10,
+        "use_viewer": true,
+        "use_gamepad": true,
+        "repo_id": null,
+        "dataset_root": null,
+        "num_episodes": 50,
+        "episode": 0,
+        "pretrained_policy_name_or_path": null,
+        "push_to_hub": true,
+        "features": {
+            "observation.state": {
+                "type": "STATE",
+                "shape": [
+                    32
+                ]
+            },
+            "action": {
+                "type": "ACTION",
+                "shape": [
+                    2
+                ]
+            }
+        },
+        "features_map": {
+            "observation.state": "observation.state",
+            "action": "action"
+        },
+        "reward_classifier_pretrained_path": null
+    }
+}

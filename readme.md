@@ -139,3 +139,182 @@ SELECT
     MAX("observation.state"[21]) AS max_dim_21
 FROM train
 ```
+
+# Kuavo RL RLPD Hil-Serl
+```bash
+cd lerobot
+pip3 install -e .
+```
+* RL 为了dataset buffer 还是得(RL仓库环境) - lerobot_rl rl环境组合
+- pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu128 --force-reinstall
+- pip install torchcodec --index-url=https://download.pytorch.org/whl/cu128
+- conda install ffmpeg -c conda-forge
+```bash
+nvblox_torch                   0.0.post1.dev15
+torch                          2.8.0+cu128
+torchaudio                     2.8.0+cu128
+torchcodec                     0.6.0+cu128
+torchvision                    0.23.0+cu128
+```
+## 2025/8/19 - agent实现
+* 目前agent学会如何在固定基下，双手靠近箱子 + 搬运固定位置和朝向的箱子
+* 开发分支
+    * RL 分支 ： KangKK/dev/default_joint_space_test_0726 (3d1b50cb7366e0440d712ae4c3c2973805949c0b)
+    * 机器人isaac sim env分支： KangKK/fix/merge_kmpc_for_rlpd(6f90ce465e602e9cfbc9da4add695d8ccd3ebb35)
+* train config
+    * 1) 通过原子策略干预录制，预先采集30条专家transition数据存入到off-line buffer当中
+        * ![robot_action_record](./IMG/robot_action_record.jpg) 
+    * 2) 后续在on-line learning的过程中不再进行干预，而是由agent自行探索将经验存放到replay buffer当中，训练曲线如下，可以看到后期reward逐步上涨，一次成功的回合的总reward为2到3左右
+        * ![Kuavo_on_line_train_reward](./IMG/Kuavo_on_line_train_reward.jpg) 
+
+### reward设计如下：
+根据代码中的奖励设计，我可以将其总结为以下的LaTeX公式：
+
+$$R = \alpha \cdot \text{scale} \cdot \left( w_{\text{hand}} \cdot \text{MSE}{\text{hand}} + w{\text{box}} \cdot \text{MSE}{\text{box}} + \text{bonus} \right)$$
+其中各个组件的详细定义为：
+$$\text{MSE}{\text{hand}} = -\left( \text{MSE}{\text{left}} + \text{MSE}{\text{right}} \right)$$
+$$\text{MSE}{\text{left}} = \frac{1}{3}\sum{i=0}^{2}(p_{\text{left},i}^{\text{current}} - p_{\text{left},i}^{\text{target}})^2$$
+$$\text{MSE}{\text{right}} = \frac{1}{3}\sum{i=0}^{2}(p_{\text{right},i}^{\text{current}} - p_{\text{right},i}^{\text{target}})^2$$
+$$\text{MSE}{\text{box}} = -\frac{1}{3}\sum{i=0}^{2}(p_{\text{box},i}^{\text{current}} - p_{\text{box},i}^{\text{target}})^2$$
+$$\text{bonus} = \begin{cases} 
++3.0 & \text{if } z_{\text{box}}^{\text{current}} > z_{\text{box}}^{\text{target}} \text{ (success)} \\
+-1.0 & \text{if } z_{\text{box}}^{\text{current}} < 0.20 \text{ (failure)} \\
+0 & \text{otherwise}
+\end{cases}$$
+
+参数说明：
+- $w_{\text{hand}}$ = `hand_reward_weight`（手部位置权重）
+- $w_{\text{box}}$ = `box_reward_weight`（箱子位置权重）
+- $\alpha$ = `reward_scale` = 10.0（奖励缩放因子）
+- $p^{\text{current}}$：当前位置
+- $p^{\text{target}}$：目标位置
+
+设计原理：通过设置 $w_{\text{box}} > w_{\text{hand}}$，使得智能体优先关注箱子的移动而非手部精确定位。
+
+### 推理实时演示视频
+* 进issue查看
+
+## 录制huggingface dataset - 专家transition
+* ![huggingface_dataset](./IMG/huggingface_dataset.png)
+### 1）启动机器人及环境
+* KangKK/fix/merge_kmpc_for_rlpd
+* 6f90ce465e602e9cfbc9da4add695d8ccd3ebb35
+```bash
+cd /home/lab/kuavo-ros-control
+roslaunch isaac_sim isaac_lab_nodelet_no_tcp.launch
+roslaunch motion_capture_ik ik_node.launch
+```
+### 2）可以通过record_dataset 通过工具模拟MetaVR的发布节点，并且同时发布贝塞尔轨迹的信息
+* 重点关于`/home/lab/RL/lerobot/lerobot/scripts/rl/record_dataset/key_point.json`的定义，关于抓取的关键帧率
+* 每个绝对式下的贝塞尔轨迹点之间的增量都会回放到[-1, 1]，INCREMENT_SCALE = 0.01，即 action[-1,1] * 0.01 = ±0.01m的增量范围
+* 同时发布话题为`/sac/kuavo_eef_action_scale_left` 和 `/sac/kuavo_eef_action_scale_right`
+* 脚本使用指南：先按1+回车开始发布meta fake话题，然后按2+回车决定是否开始干预，3+回车是开始执行贝塞尔专家演示数据
+```bash
+conda activate lerobot_rl
+cd /home/lab/RL/lerobot/lerobot/scripts/rl/record_dataset
+python3 joystick_simulator.py
+
+# lab @ lab in ~/RL/lerobot/lerobot/scripts/rl/record_dataset on git:KangKK/dev/default_joint_space_test_0726 x [14:03:36] 
+$ python3 joystick_simulator.py                                                                                                            
+Meta VR Joystick Simulator
+========================================
+ROS joystick simulator initialized successfully
+Meta VR Joystick Simulator
+Simulates Quest3 controller for testing intervention functionality
+
+============================================================
+META VR JOYSTICK SIMULATOR - MAIN MENU
+============================================================
+1. Start/Stop Publishing Joystick Data
+2. Toggle Intervention (Right Grip)
+3. Start Bézier Trajectory Tool
+4. Stop Bézier Trajectory Tool
+5. Trigger Episode Success
+6. Trigger Episode Failure
+7. Show Status
+8. Quick Start (Publishing + Bézier Tool)
+9. Quick Stop (Stop All)
+0. Exit
+============================================================
+
+Enter your choice (0-9):
+```
+### 3） 开始录制
+```bash
+conda activate lerobot_rl
+python3 lerobot/scripts/rl/gym_manipulator.py --config_path config/Isaac_lab_kuavo_env/gym_env/eef_gym_hil_env_meta_obs_32_action_06_record.json
+```
+
+## on-line learning阶段
+### 1）启动机器人env环境
+* 和上一步一样省略
+### 2）开始学习
+* 请注意，因为代码当中我把cv_image(224 x 224)都进行了赋0操作，所以录制出来的lerobotdataset其实都是0的黑色图像
+```bash
+# actor启动
+python3 lerobot/scripts/rl/actor.py --config_path config/Isaac_lab_kuavo_env/train/only_on_line_learning/eef_obs_32_action_06_yes_dataset_grasp.json
+
+# learner启动
+python3 lerobot/scripts/rl/learner.py --config_path config/Isaac_lab_kuavo_env/train/only_on_line_learning/eef_obs_32_action_06_yes_dataset_grasp.json
+```
+
+## 下一步计划
+* 使用行为克隆的学习方式先初始化actor网络，看是否会比现在训练5小时出效果的收敛时间更短
+* 引入不同朝向的箱子进行搬运
+* 开放浮动基的躯干控制
+
+
+# SAC Actor MLP BC 训练指南
+## train
+```bash
+python3 lerobot/scripts/rl/train_mlp_bc.py --config config/Isaac_lab_kuavo_env/train/only_on_line_learning/mlp_bc_train_grasp_aligned.json
+```
+
+## 将训练好的pt文件进行参数对比和参数转换
+* `/home/lab/RL/lerobot/lerobot/scripts/rl/visual_mlp_network` 文件夹下
+## visual_mlp_network 可视化 mlp参数对比
+* 查看RLPD的当中训练的actor的所有参数
+    * 通过checkpoint路径读取
+```bash
+python3 inspect_actor_params.py
+```
+
+* 可视化actor网格参数
+```bash
+python3 visualize_actor_network.py
+```
+
+* 对比rl actor的mlp参数 和 bc mlp参数 | 同时进行可视化
+```bash
+python3 compare_rl_mlp_bc_mlp.py
+```
+
+* 参数对比工具 | 对比是否可以直接无缝迁移
+```bash
+python3 detailed_parameter_analysis.py
+```
+
+* 转换为safetensors
+```bash
+python3 transfer_mlp_bc_to_sac.py
+```
+
+## 将 MLP BC 替换 现有的 sac actor policy直接验证推理
+* 将`transfer_mlp_bc_to_sac.py`生成的`transferred_sac_model.safetensors`
+* 可以选择直接替换到`lerobot/outputs/train/xxxx/checkpoints/last/pretrained_model/model.safetensors`
+* 替换后可以直接无缝衔接使用，模型验证eval推理代码如下
+```bash
+python3 lerobot/scripts/rl/gym_manipulator.py --config_path config/Isaac_lab_kuavo_env/eval/gym_hil_env_meta_obs_32_action_06_grasp.json
+```
+
+## 如何将transferred_sac_model.safetensors用于warm up?
+* 通过`enable_warmup`参数，决定是否启用actor warm up, 如果为true则加载`warmup_model_path`路径下的safetensors用于加载actor的默认参数
+* 如果不需要enable_warmup, 设置为fasle, 则会默认不使用warm up
+```json
+{
+    "warmup_model_path": "/home/lab/RL/lerobot/lerobot/scripts/rl/visual_mlp_network/transfer_mlp2actor/transferred_sac_model.safetensors",
+    "enable_warmup": false,
+    "warmup_freeze_loaded_params": false,
+    "warmup_strict_loading": false,
+}
+```

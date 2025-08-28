@@ -1,0 +1,50 @@
+{
+    "key_points": {
+        "frame": "base_link",
+        "description": "Cartesian key-points for left and right hand end-effectors with elbow configurations",
+        "elbow_positions": {
+            "left_elbow": [-0.0178026345146559, 0.4004180715613648, 0.17417275957965042],
+            "right_elbow": [-0.0178026345146559, -0.4004180715613648, 0.17417275957965042]
+        },
+        "ik_parameters": {
+            "ik_solve_param": 1,
+            "use_custom_ik_param": false,
+            "joint_angles_as_q0": false
+        },
+        "keyframes": [
+            {
+                "frame_id": 0,
+                "left_hand": {
+                    "position": [0.3178026345146559, 0.4004180715613648, -0.019417275957965042],
+                    "quaternion": [0.0, -0.70711, 0.0, 0.70711]
+                },
+                "right_hand": {
+                    "position": [0.3178026345146559, -0.4004180715613648, -0.019417275957965042],
+                    "quaternion": [0.0, -0.70711, 0.0, 0.70711]
+                }
+            },
+            {
+                "frame_id": 1,
+                "left_hand": {
+                    "position": [0.5078026345146559, 0.2004180715613648, 0.069417275957965042],
+                    "quaternion": [0.0, -0.70711, 0.0, 0.70711]
+                },
+                "right_hand": {
+                    "position": [0.5078026345146559, -0.2004180715613648, 0.069417275957965042],
+                    "quaternion": [0.0, -0.70711, 0.0, 0.70711]
+                }
+            },
+            {
+                "frame_id": 2,
+                "left_hand": {
+                    "position": [0.5078026345146559, 0.2004180715613648, 0.309417275957965042],
+                    "quaternion": [0.0, -0.70711, 0.0, 0.70711]
+                },
+                "right_hand": {
+                    "position": [0.5078026345146559, -0.2004180715613648, 0.309417275957965042],
+                    "quaternion": [0.0, -0.70711, 0.0, 0.70711]
+                }
+            }
+        ]
+    }
+}
