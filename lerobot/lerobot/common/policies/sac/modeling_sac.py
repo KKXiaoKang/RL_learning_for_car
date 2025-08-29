@@ -106,7 +106,19 @@ class SACPolicy(
             # Cache and normalize image features
             observations_features = self.actor.encoder.get_cached_image_features(batch, normalize=True)
 
-        actions, _, _ = self.actor(batch, observations_features)
+        # 🔥 Q-chunking: 处理序列ACT Actor的动作选择
+        if hasattr(self.actor, 'chunk_size') and getattr(self.config, 'use_sequence_act_actor', False):
+            # 序列ACT Actor：获取动作序列，但只返回第一个动作用于执行
+            action_sequence, _, _ = self.actor(
+                batch, 
+                observations_features, 
+                return_sequence=True
+            )
+            # Q-chunking核心：只使用序列的第一个动作进行实际执行
+            actions = action_sequence[:, 0, :]  # (batch, action_dim)
+        else:
+            # 传统Actor：直接获取单步动作
+            actions, _, _ = self.actor(batch, observations_features)
 
         if self.config.num_discrete_actions is not None:
             discrete_action_value = self.discrete_critic(batch, observations_features)
@@ -289,7 +301,19 @@ class SACPolicy(
         use_n_step_backup: bool = False,  # Q-chunking的n-step backup选项
     ) -> Tensor:
         with torch.no_grad():
-            next_action_preds, next_log_probs, _ = self.actor(next_observations, next_observation_features)
+            # 🔥 Q-chunking: 处理序列ACT Actor的预测
+            if hasattr(self.actor, 'chunk_size') and getattr(self.config, 'use_sequence_act_actor', False):
+                # 序列ACT Actor：获取动作序列，但只使用第一个动作
+                next_action_sequence, next_log_probs, _ = self.actor(
+                    next_observations, 
+                    next_observation_features, 
+                    return_sequence=True
+                )
+                # Q-chunking核心：只使用序列的第一个动作计算Q值
+                next_action_preds = next_action_sequence[:, 0, :]  # (batch, action_dim)
+            else:
+                # 传统Actor：直接获取单步动作
+                next_action_preds, next_log_probs, _ = self.actor(next_observations, next_observation_features)
 
             # 2- compute q targets
             q_targets = self.critic_forward(
@@ -334,14 +358,28 @@ class SACPolicy(
             self.last_td_target = td_target.detach().clone()
 
         # 3- compute predicted qs
+        # 🔥 Q-chunking: 处理输入的动作数据
+        if hasattr(self.actor, 'chunk_size') and getattr(self.config, 'use_sequence_act_actor', False):
+            # 对于序列ACT Actor，actions可能是3D的 (batch, chunk_size, action_dim)
+            if len(actions.shape) == 3:
+                # 只使用第一个动作计算Q值 - Q-chunking的核心思路
+                current_actions = actions[:, 0, :]  # (batch, action_dim)
+            else:
+                # 如果已经是2D的，直接使用
+                current_actions = actions
+        else:
+            # 传统情况：actions已经是 (batch, action_dim)
+            current_actions = actions
+            
         if self.config.num_discrete_actions is not None:
             # NOTE: We only want to keep the continuous action part
             # In the buffer we have the full action space (continuous + discrete)
             # We need to split them before concatenating them in the critic forward
-            actions: Tensor = actions[:, :DISCRETE_DIMENSION_INDEX]
+            current_actions: Tensor = current_actions[:, :DISCRETE_DIMENSION_INDEX]
+            
         q_preds = self.critic_forward(
             observations=observations,
-            actions=actions,
+            actions=current_actions,
             use_target=False,
             observation_features=observation_features,
         )
@@ -422,7 +460,19 @@ class SACPolicy(
         """Compute the temperature loss"""
         # calculate temperature loss
         with torch.no_grad():
-            _, log_probs, _ = self.actor(observations, observation_features)
+            # 🔥 Q-chunking: 处理序列ACT Actor的对数概率
+            if hasattr(self.actor, 'chunk_size') and getattr(self.config, 'use_sequence_act_actor', False):
+                # 序列ACT Actor：获取联合对数概率
+                _, log_probs, _ = self.actor(
+                    observations, 
+                    observation_features, 
+                    return_sequence=True
+                )
+                # log_probs已经是联合对数概率 (batch,)
+            else:
+                # 传统Actor：获取单步对数概率
+                _, log_probs, _ = self.actor(observations, observation_features)
+                
         temperature_loss = (-self.log_alpha.exp() * (log_probs + self.target_entropy)).mean()
         return temperature_loss
 

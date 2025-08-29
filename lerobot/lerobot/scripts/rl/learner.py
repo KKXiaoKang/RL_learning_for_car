@@ -733,8 +733,19 @@ def add_actor_information_and_train(
 
             # 计算并记录单个 critic 的 Q 值
             with torch.no_grad():
-                # 获取当前 Q 值预测（下一状态和下一动作的 Q 值）
-                next_actions, _, _ = policy.actor(next_observations, next_observation_features)
+                # 🔥 Q-chunking: 处理序列ACT Actor的动作预测
+                if hasattr(policy.actor, 'chunk_size') and getattr(policy.config, 'use_sequence_act_actor', False):
+                    # 序列ACT Actor：获取动作序列，但只使用第一个动作
+                    next_action_sequence, _, _ = policy.actor(
+                        next_observations, 
+                        next_observation_features, 
+                        return_sequence=True
+                    )
+                    # Q-chunking核心：只使用序列的第一个动作计算Q值
+                    next_actions = next_action_sequence[:, 0, :]  # (batch, action_dim)
+                else:
+                    # 传统Actor：直接获取单步动作
+                    next_actions, _, _ = policy.actor(next_observations, next_observation_features)
                 
                 # 如果有离散动作，需要分离连续动作部分
                 if policy.config.num_discrete_actions is not None:

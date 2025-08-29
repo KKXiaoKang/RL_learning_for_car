@@ -915,6 +915,14 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
             # During VR intervention, don't publish actions - VR system handles control
             return
         
+        # 🔥 处理序列ACT Actor输出的多维动作
+        if action.ndim > 1:
+            rospy.logwarn(f"Received multi-dimensional action with shape {action.shape}, taking first action")
+            action = action[0]  # 取第一个动作（如果是序列）
+            
+        # 确保是1D数组
+        action = np.asarray(action).flatten()
+        
         # De-normalize and publish cmd_vel
         if TEST_DEMO_USE_ACTION_16_DIM:
             """
@@ -1045,6 +1053,14 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         if IF_USE_ARM_MPC_CONTROL:
             self.change_mobile_ctrl_mode(IncrementalMpcCtrlMode.ArmOnly.value)
             print( "=============== change_mobile_ctrl_mode to ArmOnly ================")
+        
+        # 🔥 处理序列ACT Actor输出的多维动作
+        if ee_action.ndim > 1:
+            rospy.logwarn(f"Received multi-dimensional action with shape {ee_action.shape}, taking first action")
+            ee_action = ee_action[0]  # 取第一个动作（如果是序列）
+            
+        # 确保是1D数组
+        ee_action = np.asarray(ee_action).flatten()
         
         # 确保action长度足够
         if len(ee_action) < 6:
