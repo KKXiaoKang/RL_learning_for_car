@@ -1,0 +1,81 @@
+ =========================== 随机位置 ================================ ！！
+[ACTOR] Step 225000: warmup_enabled=False, past_learning_threshold=True, use_policy_action=True
+[SUCCESS CONDITION] Box lifted successfully! Current z: 1.133, Target z: 1.127
+ ============================== update_policy_parameters ======================================  
+[VR DEBUG] Sent trajectory restart request for episode 1456
+[VR DEBUG] VR intervention mode disabled, cleared VR data
+[VR DEBUG] Reset - Episode ID incremented to 1456
+[VR DEBUG] Previous action episode IDs - Left: -1, Right: -1
+ =========================== 随机位置 ================================ ！！
+[SUCCESS CONDITION] Box lifted successfully! Current z: 1.129, Target z: 1.127
+ ============================== update_policy_parameters ======================================  
+[VR DEBUG] Sent trajectory restart request for episode 1457
+[VR DEBUG] VR intervention mode disabled, cleared VR data
+[VR DEBUG] Reset - Episode ID incremented to 1457
+[VR DEBUG] Previous action episode IDs - Left: -1, Right: -1
+ =========================== 随机位置 ================================ ！！
+[SUCCESS CONDITION] Box lifted successfully! Current z: 1.127, Target z: 1.127
+ ============================== update_policy_parameters ======================================  
+[VR DEBUG] Sent trajectory restart request for episode 1458
+[VR DEBUG] VR intervention mode disabled, cleared VR data
+[VR DEBUG] Reset - Episode ID incremented to 1458
+[VR DEBUG] Previous action episode IDs - Left: -1, Right: -1
+ =========================== 随机位置 ================================ ！！
+[ACTOR] Step 225200: warmup_enabled=False, past_learning_threshold=True, use_policy_action=True
+[SUCCESS CONDITION] Box lifted successfully! Current z: 1.131, Target z: 1.127
+ ============================== update_policy_parameters ======================================  
+[VR DEBUG] Sent trajectory restart request for episode 1459
+[VR DEBUG] VR intervention mode disabled, cleared VR data
+[VR DEBUG] Reset - Episode ID incremented to 1459
+[VR DEBUG] Previous action episode IDs - Left: -1, Right: -1
+ =========================== 随机位置 ================================ ！！
+[ACTOR] Step 225400: warmup_enabled=False, past_learning_threshold=True, use_policy_action=True
+[SUCCESS CONDITION] Box lifted successfully! Current z: 1.138, Target z: 1.127
+ ============================== update_policy_parameters ======================================  
+[VR DEBUG] Sent trajectory restart request for episode 1460
+[VR DEBUG] VR intervention mode disabled, cleared VR data
+[VR DEBUG] Reset - Episode ID incremented to 1460
+[VR DEBUG] Previous action episode IDs - Left: -1, Right: -1
+ =========================== 随机位置 ================================ ！！
+[ACTOR] Step 225600: warmup_enabled=False, past_learning_threshold=True, use_policy_action=True
+ ============================== update_policy_parameters ======================================  
+[VR DEBUG] Sent trajectory restart request for episode 1461
+[VR DEBUG] VR intervention mode disabled, cleared VR data
+[VR DEBUG] Reset - Episode ID incremented to 1461
+[VR DEBUG] Previous action episode IDs - Left: -1, Right: -1
+ =========================== 随机位置 ================================ ！！
+Traceback (most recent call last):
+  File "/home/lab/RL/lerobot/lerobot/scripts/rl/actor.py", line 849, in <module>
+    actor_cli()
+  File "/home/lab/RL/lerobot/lerobot/configs/parser.py", line 234, in wrapper_inner
+    response = fn(cfg, *args, **kwargs)
+  File "/home/lab/RL/lerobot/lerobot/scripts/rl/actor.py", line 184, in actor_cli
+    act_with_policy( # 执行策略交互
+  File "/home/lab/RL/lerobot/lerobot/scripts/rl/actor.py", line 308, in act_with_policy
+    action = policy.select_action(batch=obs) # 选择动作
+  File "/home/lab/miniforge3/envs/lerobot_rl/lib/python3.10/site-packages/torch/utils/_contextlib.py", line 120, in decorate_context
+    return func(*args, **kwargs)
+  File "/home/lab/RL/lerobot/lerobot/common/policies/sac/modeling_sac.py", line 112, in select_action
+    action_sequence, _, _ = self.actor(
+  File "/home/lab/miniforge3/envs/lerobot_rl/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/lab/miniforge3/envs/lerobot_rl/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/lab/RL/lerobot/lerobot/common/policies/sac/modeling_sac_sequence_act_actor.py", line 249, in forward
+    actions_sequence, log_probs_joint = self._sample_action_sequence(action_means, action_stds)
+  File "/home/lab/RL/lerobot/lerobot/common/policies/sac/modeling_sac_sequence_act_actor.py", line 333, in _sample_action_sequence
+    dist = TanhMultivariateNormalDiag(
+  File "/home/lab/RL/lerobot/lerobot/common/policies/sac/modeling_sac.py", line 1972, in __init__
+    
+  File "/home/lab/miniforge3/envs/lerobot_rl/lib/python3.10/site-packages/torch/distributions/multivariate_normal.py", line 184, in __init__
+    super().__init__(batch_shape, event_shape, validate_args=validate_args)
+  File "/home/lab/miniforge3/envs/lerobot_rl/lib/python3.10/site-packages/torch/distributions/distribution.py", line 77, in __init__
+    raise ValueError(
+ValueError: Expected parameter loc (Tensor of shape (1, 6)) of distribution MultivariateNormal(loc: torch.Size([1, 6]), covariance_matrix: torch.Size([1, 6, 6])) to satisfy the constraint IndependentConstraint(Real(), 1), but found invalid values:
+tensor([[nan, nan, nan, nan, nan, nan]], device='cuda:0')
+./run_memory_optimized_actor.sh：行 21: 1672474 已杀死               python3 /home/lab/RL/lerobot/lerobot/scripts/rl/actor.py --config_path /home/lab/RL/lerobot/config/Isaac_lab_kuavo_env/train/only_on_line_learning/eef_obs_32_action_06_memory_optimized.json
+Memory usage after training:
+              总计         已用        空闲      共享    缓冲/缓存    可用
+内存：        62Gi        19Gi        40Gi       731Mi       2.4Gi        41Gi
+交换：        30Gi        19Gi        10Gi
+

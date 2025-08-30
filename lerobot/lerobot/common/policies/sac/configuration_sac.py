@@ -248,12 +248,64 @@ class SACConfig(PreTrainedConfig):
     # Maximum sequence length for positional encoding
     act_max_seq_length: int = 10
 
+    # Q-chunking Configuration
+    # Whether to enable Q-chunking algorithm
+    enable_q_chunking: bool = True
+    # Q-chunking strategy: 'standard', 'conservative', 'temporal_weighted'
+    q_chunking_strategy: str = "standard"
+    # Q-chunking horizon: number of actions to consider in non-standard strategies
+    q_chunking_horizon: int = 3
+    # Q-chunking temporal decay factor for weighted strategy
+    q_chunking_decay: float = 0.9
+    # Q-chunking entropy scaling strategy: 'linear', 'sqrt', 'log', 'none'
+    q_chunking_entropy_scaling: str = "linear"
+
     # Optimizations
     use_torch_compile: bool = True
 
     def __post_init__(self):
         super().__post_init__()
         # Any validation specific to SAC configuration
+        self._validate_q_chunking_config()
+    
+    def _validate_q_chunking_config(self):
+        """Validate Q-chunking configuration parameters"""
+        # Q-chunking can only be enabled with sequence ACT actor
+        if self.enable_q_chunking and not (self.use_act_actor and self.use_sequence_act_actor):
+            raise ValueError(
+                "Q-chunking (enable_q_chunking=True) requires sequence ACT actor "
+                "(use_act_actor=True and use_sequence_act_actor=True)"
+            )
+        
+        # Validate Q-chunking strategy
+        valid_strategies = ['standard', 'conservative', 'temporal_weighted']
+        if self.q_chunking_strategy not in valid_strategies:
+            raise ValueError(
+                f"Invalid q_chunking_strategy '{self.q_chunking_strategy}'. "
+                f"Must be one of: {valid_strategies}"
+            )
+        
+        # Validate Q-chunking horizon
+        if self.q_chunking_horizon < 1:
+            raise ValueError("q_chunking_horizon must be >= 1")
+        
+        if self.q_chunking_horizon > self.act_chunk_size:
+            raise ValueError(
+                f"q_chunking_horizon ({self.q_chunking_horizon}) cannot be larger than "
+                f"act_chunk_size ({self.act_chunk_size})"
+            )
+        
+        # Validate temporal decay factor
+        if not (0.0 < self.q_chunking_decay <= 1.0):
+            raise ValueError("q_chunking_decay must be in range (0.0, 1.0]")
+        
+        # Validate entropy scaling strategy
+        valid_entropy_strategies = ['linear', 'sqrt', 'log', 'none']
+        if self.q_chunking_entropy_scaling not in valid_entropy_strategies:
+            raise ValueError(
+                f"Invalid q_chunking_entropy_scaling '{self.q_chunking_entropy_scaling}'. "
+                f"Must be one of: {valid_entropy_strategies}"
+            )
 
     def get_optimizer_preset(self) -> MultiAdamConfig:
         return MultiAdamConfig(

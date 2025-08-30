@@ -298,96 +298,53 @@ class SACPolicy(
         done,
         observation_features: Tensor | None = None,
         next_observation_features: Tensor | None = None,
-        use_n_step_backup: bool = False,  # Q-chunking的n-step backup选项
+        use_q_chunking: bool = None,  # Q-chunking开关
     ) -> Tensor:
+        """
+        计算Critic损失，支持Q-chunking的n-step TD learning
+        
+        Q-chunking核心改进：
+        1. 使用动作序列的第一个动作进行Q值计算
+        2. 使用n-step TD targets进行更稳定的学习
+        3. 考虑动作序列的时间一致性
+        """
+        # 检查是否启用Q-chunking
+        if use_q_chunking is None:
+            use_q_chunking = (hasattr(self.actor, 'chunk_size') and 
+                             getattr(self.config, 'use_sequence_act_actor', False) and
+                             getattr(self.config, 'enable_q_chunking', True))
+        
         with torch.no_grad():
-            # 🔥 Q-chunking: 处理序列ACT Actor的预测
-            if hasattr(self.actor, 'chunk_size') and getattr(self.config, 'use_sequence_act_actor', False):
-                # 序列ACT Actor：获取动作序列，但只使用第一个动作
-                next_action_sequence, next_log_probs, _ = self.actor(
-                    next_observations, 
-                    next_observation_features, 
-                    return_sequence=True
+            if use_q_chunking:
+                # Q-chunking模式：使用动作序列进行预测
+                td_target = self._compute_q_chunking_td_target(
+                    next_observations=next_observations,
+                    rewards=rewards,
+                    done=done,
+                    next_observation_features=next_observation_features
                 )
-                # Q-chunking核心：只使用序列的第一个动作计算Q值
-                next_action_preds = next_action_sequence[:, 0, :]  # (batch, action_dim)
             else:
-                # 传统Actor：直接获取单步动作
-                next_action_preds, next_log_probs, _ = self.actor(next_observations, next_observation_features)
-
-            # 2- compute q targets
-            q_targets = self.critic_forward(
-                observations=next_observations,
-                actions=next_action_preds,
-                use_target=True,
-                observation_features=next_observation_features,
-            )
-
-            # subsample critics to prevent overfitting if use high UTD (update to date)
-            # TODO: Get indices before forward pass to avoid unnecessary computation
-            if self.config.num_subsample_critics is not None:
-                indices = torch.randperm(self.config.num_critics)
-                indices = indices[: self.config.num_subsample_critics]
-                q_targets = q_targets[indices]
-
-            # critics subsample size
-            min_q, _ = q_targets.min(dim=0)  # Get values from min operation
-            if self.config.use_backup_entropy:
-                min_q = min_q - (self.temperature * next_log_probs)
-
-            # Q-chunking可选：使用n-step backup进行更稳定的TD学习
-            if use_n_step_backup and hasattr(self.actor, 'compute_n_step_returns'):
-                # 如果使用序列ACT Actor，可以利用其n-step return计算
-                try:
-                    n_step_returns = self.actor.compute_n_step_returns(
-                        rewards=rewards,
-                        next_observations=next_observations,
-                        done=done,
-                        gamma=self.config.discount,
-                        observation_features=next_observation_features
-                    )
-                    td_target = n_step_returns + (1 - done) * (self.config.discount ** self.actor.chunk_size) * min_q
-                except Exception as e:
-                    logging.warning(f"Failed to compute n-step returns, falling back to 1-step: {e}")
-                    td_target = rewards + (1 - done) * self.config.discount * min_q
-            else:
-                # 标准1-step TD target
-                td_target = rewards + (1 - done) * self.config.discount * min_q
+                # 传统SAC模式：单步TD target
+                td_target = self._compute_traditional_td_target(
+                    next_observations=next_observations,
+                    rewards=rewards,
+                    done=done,
+                    next_observation_features=next_observation_features
+                )
 
             # Store td_target for wandb logging (detach to avoid affecting gradients)
             self.last_td_target = td_target.detach().clone()
 
-        # 3- compute predicted qs
-        # 🔥 Q-chunking: 处理输入的动作数据
-        if hasattr(self.actor, 'chunk_size') and getattr(self.config, 'use_sequence_act_actor', False):
-            # 对于序列ACT Actor，actions可能是3D的 (batch, chunk_size, action_dim)
-            if len(actions.shape) == 3:
-                # 只使用第一个动作计算Q值 - Q-chunking的核心思路
-                current_actions = actions[:, 0, :]  # (batch, action_dim)
-            else:
-                # 如果已经是2D的，直接使用
-                current_actions = actions
-        else:
-            # 传统情况：actions已经是 (batch, action_dim)
-            current_actions = actions
-            
-        if self.config.num_discrete_actions is not None:
-            # NOTE: We only want to keep the continuous action part
-            # In the buffer we have the full action space (continuous + discrete)
-            # We need to split them before concatenating them in the critic forward
-            current_actions: Tensor = current_actions[:, :DISCRETE_DIMENSION_INDEX]
-            
-        q_preds = self.critic_forward(
+        # 计算当前Q值预测
+        q_preds = self._compute_current_q_values(
             observations=observations,
-            actions=current_actions,
-            use_target=False,
+            actions=actions,
             observation_features=observation_features,
+            use_q_chunking=use_q_chunking
         )
 
-        # 4- Calculate loss
-        # Compute state-action value loss (TD loss) for all of the Q functions in the ensemble.
+        # 计算TD损失
         td_target_duplicate = einops.repeat(td_target, "b -> e b", e=q_preds.shape[0])
-        # You compute the mean loss of the batch for each critic and then to compute the final loss you sum them up
         critics_loss = (
             F.mse_loss(
                 input=q_preds,
@@ -395,7 +352,148 @@ class SACPolicy(
                 reduction="none",
             ).mean(dim=1)
         ).sum()
+        
         return critics_loss
+    
+    def _compute_q_chunking_td_target(
+        self,
+        next_observations,
+        rewards,
+        done,
+        next_observation_features: Tensor | None = None,
+    ) -> Tensor:
+        """
+        计算Q-chunking的TD target
+        
+        Q-chunking的核心创新：
+        1. 使用动作序列的联合概率进行策略评估
+        2. 使用n-step returns进行更稳定的值函数估计
+        3. 在"chunked"动作空间中运行SAC
+        """
+        # 1. 获取下一状态的动作序列预测
+        next_action_sequence, next_log_probs_joint, _ = self.actor(
+            next_observations, 
+            next_observation_features, 
+            return_sequence=True
+        )
+        
+        # 2. 使用序列的第一个动作计算Q值（Q-chunking的关键）
+        next_first_action = next_action_sequence[:, 0, :]  # (batch, action_dim)
+        
+        # 3. 计算目标Q值
+        q_targets = self.critic_forward(
+            observations=next_observations,
+            actions=next_first_action,
+            use_target=True,
+            observation_features=next_observation_features,
+        )
+
+        # 4. Critic ensemble子采样（防止高UTD时过拟合）
+        if self.config.num_subsample_critics is not None:
+            indices = torch.randperm(self.config.num_critics)
+            indices = indices[: self.config.num_subsample_critics]
+            q_targets = q_targets[indices]
+
+        # 5. 计算最小Q值（保守估计）
+        min_q, _ = q_targets.min(dim=0)
+        
+        # 6. Q-chunking核心：使用联合对数概率进行熵正则化
+        if self.config.use_backup_entropy:
+            # 注意：这里使用的是整个动作序列的联合概率，而不是单个动作的概率
+            min_q = min_q - (self.temperature * next_log_probs_joint)
+
+        # 7. 计算n-step TD target（Q-chunking的另一个关键改进）
+        chunk_size = getattr(self.actor, 'chunk_size', 1)
+        if chunk_size > 1 and hasattr(self.actor, 'compute_n_step_returns'):
+            try:
+                # 使用序列Actor的n-step return计算能力
+                n_step_returns = self.actor.compute_n_step_returns(
+                    rewards=rewards,
+                    next_observations=next_observations,
+                    done=done,
+                    gamma=self.config.discount,
+                    observation_features=next_observation_features
+                )
+                # n-step TD target: R_t + γ^n * Q_target(s_{t+n}, a_{t+n})
+                td_target = n_step_returns + (1 - done) * (self.config.discount ** chunk_size) * min_q
+                
+                logging.debug(f"Q-chunking using {chunk_size}-step TD target")
+            except Exception as e:
+                logging.warning(f"Failed to compute n-step returns, falling back to 1-step: {e}")
+                td_target = rewards + (1 - done) * self.config.discount * min_q
+        else:
+            # 降级到标准1-step TD target
+            td_target = rewards + (1 - done) * self.config.discount * min_q
+
+        return td_target
+    
+    def _compute_traditional_td_target(
+        self,
+        next_observations,
+        rewards,
+        done,
+        next_observation_features: Tensor | None = None,
+    ) -> Tensor:
+        """计算传统SAC的TD target"""
+        # 传统Actor：直接获取单步动作
+        next_action_preds, next_log_probs, _ = self.actor(next_observations, next_observation_features)
+
+        # 计算目标Q值
+        q_targets = self.critic_forward(
+            observations=next_observations,
+            actions=next_action_preds,
+            use_target=True,
+            observation_features=next_observation_features,
+        )
+
+        # Critic ensemble子采样
+        if self.config.num_subsample_critics is not None:
+            indices = torch.randperm(self.config.num_critics)
+            indices = indices[: self.config.num_subsample_critics]
+            q_targets = q_targets[indices]
+
+        # 计算最小Q值
+        min_q, _ = q_targets.min(dim=0)
+        if self.config.use_backup_entropy:
+            min_q = min_q - (self.temperature * next_log_probs)
+
+        # 标准1-step TD target
+        td_target = rewards + (1 - done) * self.config.discount * min_q
+        return td_target
+    
+    def _compute_current_q_values(
+        self,
+        observations,
+        actions,
+        observation_features: Tensor | None = None,
+        use_q_chunking: bool = False,
+    ) -> Tensor:
+        """计算当前状态-动作对的Q值"""
+        if use_q_chunking:
+            # Q-chunking: 处理可能的动作序列输入
+            if len(actions.shape) == 3:
+                # 动作序列输入：只使用第一个动作计算Q值
+                current_actions = actions[:, 0, :]  # (batch, action_dim)
+            else:
+                # 单个动作输入
+                current_actions = actions
+        else:
+            # 传统模式：直接使用动作
+            current_actions = actions
+            
+        # 处理离散动作（如果存在）
+        if self.config.num_discrete_actions is not None:
+            current_actions = current_actions[:, :DISCRETE_DIMENSION_INDEX]
+            
+        # 计算Q值
+        q_preds = self.critic_forward(
+            observations=observations,
+            actions=current_actions,
+            use_target=False,
+            observation_features=observation_features,
+        )
+        
+        return q_preds
 
     def compute_loss_discrete_critic(
         self,
@@ -457,24 +555,76 @@ class SACPolicy(
         return discrete_critic_loss
 
     def compute_loss_temperature(self, observations, observation_features: Tensor | None = None) -> Tensor:
-        """Compute the temperature loss"""
-        # calculate temperature loss
+        """
+        计算温度参数损失，支持Q-chunking
+        
+        Q-chunking改进：使用动作序列的联合概率计算温度损失
+        这确保温度参数适应动作序列的复杂性
+        """
+        # 检查是否启用Q-chunking
+        use_q_chunking = (hasattr(self.actor, 'chunk_size') and 
+                         getattr(self.config, 'use_sequence_act_actor', False) and
+                         getattr(self.config, 'enable_q_chunking', True))
+        
+        # 计算温度损失
         with torch.no_grad():
-            # 🔥 Q-chunking: 处理序列ACT Actor的对数概率
-            if hasattr(self.actor, 'chunk_size') and getattr(self.config, 'use_sequence_act_actor', False):
-                # 序列ACT Actor：获取联合对数概率
-                _, log_probs, _ = self.actor(
+            if use_q_chunking:
+                # Q-chunking模式：使用动作序列的联合对数概率
+                _, log_probs_joint, _ = self.actor(
                     observations, 
                     observation_features, 
                     return_sequence=True
                 )
-                # log_probs已经是联合对数概率 (batch,)
-            else:
-                # 传统Actor：获取单步对数概率
-                _, log_probs, _ = self.actor(observations, observation_features)
                 
-        temperature_loss = (-self.log_alpha.exp() * (log_probs + self.target_entropy)).mean()
+                # Q-chunking的目标熵调整
+                # 由于使用联合概率，目标熵需要根据chunk_size调整
+                chunk_size = getattr(self.actor, 'chunk_size', 1)
+                adjusted_target_entropy = self._get_adjusted_target_entropy(chunk_size)
+                
+                temperature_loss = (-self.log_alpha.exp() * (log_probs_joint + adjusted_target_entropy)).mean()
+            else:
+                # 传统模式：使用单步对数概率
+                _, log_probs, _ = self.actor(observations, observation_features)
+                temperature_loss = (-self.log_alpha.exp() * (log_probs + self.target_entropy)).mean()
+                
         return temperature_loss
+    
+    def _get_adjusted_target_entropy(self, chunk_size: int) -> float:
+        """
+        计算Q-chunking的调整目标熵
+        
+        由于Q-chunking使用联合概率，目标熵需要相应调整：
+        - 联合概率通常比单个动作概率更小（更负）
+        - 目标熵应该根据序列长度进行缩放
+        
+        Args:
+            chunk_size: 动作序列长度
+            
+        Returns:
+            调整后的目标熵
+        """
+        base_target_entropy = self.target_entropy
+        
+        # Q-chunking目标熵调整策略
+        entropy_scaling_strategy = getattr(self.config, 'q_chunking_entropy_scaling', 'linear')
+        
+        if entropy_scaling_strategy == 'linear':
+            # 线性缩放：目标熵与序列长度成正比
+            adjusted_entropy = base_target_entropy * chunk_size
+        elif entropy_scaling_strategy == 'sqrt':
+            # 平方根缩放：更温和的调整
+            adjusted_entropy = base_target_entropy * math.sqrt(chunk_size)
+        elif entropy_scaling_strategy == 'log':
+            # 对数缩放：最温和的调整
+            adjusted_entropy = base_target_entropy * math.log(chunk_size + 1)
+        else:
+            # 无缩放：保持原始目标熵
+            adjusted_entropy = base_target_entropy
+        
+        logging.debug(f"Q-chunking entropy: base={base_target_entropy:.3f}, "
+                     f"adjusted={adjusted_entropy:.3f}, chunk_size={chunk_size}")
+        
+        return adjusted_entropy
 
     def compute_loss_actor(
         self,
@@ -699,19 +849,22 @@ class SACPolicy(
         training_step: int = 0,
     ) -> Tensor:
         """
-        计算序列ACT Actor的损失
+        计算Q-chunking序列ACT Actor的损失
         
-        这个方法实现了真正的动作序列联合概率损失计算
+        Q-chunking的核心改进：
+        1. 使用动作序列的联合概率进行SAC优化
+        2. 支持多种Q-chunking策略（标准/保守/时间加权）
+        3. 考虑动作序列的时间一致性
         
         Args:
-            observations: 观测数据
+            observations: 观测数据（可能是序列）
             observation_features: 预计算的观测特征
             expert_actions: 单步专家动作
             expert_action_sequences: 专家动作序列 (batch, chunk_size, action_dim)
             training_step: 当前训练步数
             
         Returns:
-            序列Actor总损失
+            Q-chunking Actor总损失
         """
         # 1. 获取动作序列预测（联合概率）
         action_sequence, log_probs_joint, means_sequence = self.actor(
@@ -720,35 +873,15 @@ class SACPolicy(
             return_sequence=True
         )
         
-        # 2. 获取第一个动作用于SAC损失计算
-        first_action = action_sequence[:, 0, :]  # (batch, action_dim)
-        
-        # 3. 获取当前观测（用于Q值计算）
-        # 如果observations是序列，取最后一个（当前观测）
-        if isinstance(observations, list):
-            current_obs = observations[-1]  # 取序列的最后一个观测作为当前观测
-        else:
-            current_obs = observations
-        
-        # 计算Q值（只针对第一个动作，因为SAC是单步的）
-        q_preds = self.critic_forward(
-            observations=current_obs,
-            actions=first_action,
-            use_target=False,
-            observation_features=observation_features,
+        # 2. Q-chunking SAC损失计算
+        sac_actor_loss = self._compute_q_chunking_sac_loss(
+            action_sequence=action_sequence,
+            log_probs_joint=log_probs_joint,
+            observations=observations,
+            observation_features=observation_features
         )
-        min_q_preds = q_preds.min(dim=0)[0]
         
-        # 3. 计算SAC损失（Q-chunking风格）
-        # 🔥 Q-chunking核心创新：SAC损失使用整个动作序列的联合概率
-        # 这确保策略优化时考虑动作序列的时间一致性和长期规划
-        # 
-        # 相比传统SAC只考虑单步动作，Q-chunking考虑的是：
-        # loss = E[α * log π(a₁:ₜ|s₁:ₜ) - Q(s₁, a₁)]
-        # 其中 a₁:ₜ 是动作序列，π(a₁:ₜ|s₁:ₜ) 是联合动作概率
-        sac_actor_loss = ((self.temperature * log_probs_joint) - min_q_preds).mean()
-        
-        # 4. 计算序列BC损失
+        # 3. 计算序列BC损失
         bc_sequence_loss = None
         if expert_action_sequences is not None:
             # 使用完整的动作序列计算BC损失
@@ -832,6 +965,165 @@ class SACPolicy(
         # weighted_mse = (weights.view(1, -1, 1) * (predicted_sequence - expert_sequence) ** 2).mean()
         
         return sequence_mse
+    
+    def _compute_q_chunking_sac_loss(
+        self,
+        action_sequence: Tensor,
+        log_probs_joint: Tensor,
+        observations,
+        observation_features: Tensor | None = None,
+    ) -> Tensor:
+        """
+        计算Q-chunking的SAC损失
+        
+        Q-chunking的核心创新：SAC损失使用整个动作序列的联合概率
+        这确保策略优化时考虑动作序列的时间一致性和长期规划
+        
+        相比传统SAC只考虑单步动作，Q-chunking考虑的是：
+        loss = E[α * log π(a₁:ₜ|s₁:ₜ) - Q(s₁, a₁)]
+        其中 a₁:ₜ 是动作序列，π(a₁:ₜ|s₁:ₜ) 是联合动作概率
+        
+        Args:
+            action_sequence: 预测的动作序列 (batch, chunk_size, action_dim)
+            log_probs_joint: 动作序列的联合对数概率 (batch,)
+            observations: 观测数据
+            observation_features: 预计算的观测特征
+            
+        Returns:
+            Q-chunking SAC Actor损失
+        """
+        # 1. 获取当前观测（用于Q值计算）
+        if isinstance(observations, list):
+            current_obs = observations[-1]  # 取序列的最后一个观测作为当前观测
+        else:
+            current_obs = observations
+        
+        # 2. Q-chunking策略选择
+        q_chunking_strategy = getattr(self.config, 'q_chunking_strategy', 'standard')
+        
+        if q_chunking_strategy == 'conservative':
+            # 保守策略：对序列中的多个动作计算Q值并取最小值
+            sac_loss = self._compute_conservative_q_chunking_loss(
+                action_sequence, log_probs_joint, current_obs, observation_features
+            )
+        elif q_chunking_strategy == 'temporal_weighted':
+            # 时间加权策略：对不同时间步的动作给予不同权重
+            sac_loss = self._compute_temporal_weighted_q_chunking_loss(
+                action_sequence, log_probs_joint, current_obs, observation_features
+            )
+        else:
+            # 标准策略：只使用第一个动作计算Q值，但使用联合概率
+            sac_loss = self._compute_standard_q_chunking_loss(
+                action_sequence, log_probs_joint, current_obs, observation_features
+            )
+        
+        return sac_loss
+    
+    def _compute_standard_q_chunking_loss(
+        self,
+        action_sequence: Tensor,
+        log_probs_joint: Tensor,
+        current_obs,
+        observation_features: Tensor | None = None,
+    ) -> Tensor:
+        """
+        标准Q-chunking策略：使用第一个动作计算Q值，但使用序列联合概率
+        
+        这是Q-chunking论文中的主要方法
+        """
+        # 使用序列的第一个动作计算Q值
+        first_action = action_sequence[:, 0, :]  # (batch, action_dim)
+        
+        q_preds = self.critic_forward(
+            observations=current_obs,
+            actions=first_action,
+            use_target=False,
+            observation_features=observation_features,
+        )
+        min_q_preds = q_preds.min(dim=0)[0]
+        
+        # 🔥 Q-chunking核心：使用整个动作序列的联合概率
+        # 这确保策略学习到时间一致的动作序列
+        sac_actor_loss = ((self.temperature * log_probs_joint) - min_q_preds).mean()
+        
+        return sac_actor_loss
+    
+    def _compute_conservative_q_chunking_loss(
+        self,
+        action_sequence: Tensor,
+        log_probs_joint: Tensor,
+        current_obs,
+        observation_features: Tensor | None = None,
+    ) -> Tensor:
+        """
+        保守Q-chunking策略：对序列中的多个动作计算Q值并取最小值
+        
+        这提供了更保守的价值估计，可能更稳定但学习较慢
+        """
+        batch_size, chunk_size, action_dim = action_sequence.shape
+        
+        # 计算序列中每个动作的Q值
+        q_values_list = []
+        for t in range(min(chunk_size, getattr(self.config, 'q_chunking_horizon', 3))):
+            action_t = action_sequence[:, t, :]  # (batch, action_dim)
+            
+            q_preds_t = self.critic_forward(
+                observations=current_obs,
+                actions=action_t,
+                use_target=False,
+                observation_features=observation_features,
+            )
+            min_q_t = q_preds_t.min(dim=0)[0]
+            q_values_list.append(min_q_t)
+        
+        # 对多个时间步的Q值取最小值（保守估计）
+        stacked_q_values = torch.stack(q_values_list, dim=1)  # (batch, horizon)
+        conservative_q = stacked_q_values.min(dim=1)[0]  # (batch,)
+        
+        # 使用联合概率和保守Q值
+        sac_actor_loss = ((self.temperature * log_probs_joint) - conservative_q).mean()
+        
+        return sac_actor_loss
+    
+    def _compute_temporal_weighted_q_chunking_loss(
+        self,
+        action_sequence: Tensor,
+        log_probs_joint: Tensor,
+        current_obs,
+        observation_features: Tensor | None = None,
+    ) -> Tensor:
+        """
+        时间加权Q-chunking策略：对不同时间步的动作给予不同权重
+        
+        近期动作权重更高，远期动作权重较低
+        """
+        batch_size, chunk_size, action_dim = action_sequence.shape
+        horizon = min(chunk_size, getattr(self.config, 'q_chunking_horizon', 3))
+        
+        # 创建时间衰减权重
+        decay_factor = getattr(self.config, 'q_chunking_decay', 0.9)
+        weights = torch.tensor([decay_factor ** t for t in range(horizon)], 
+                              device=action_sequence.device)
+        weights = weights / weights.sum()  # 归一化权重
+        
+        # 计算序列中每个动作的加权Q值
+        weighted_q_sum = 0.0
+        for t in range(horizon):
+            action_t = action_sequence[:, t, :]  # (batch, action_dim)
+            
+            q_preds_t = self.critic_forward(
+                observations=current_obs,
+                actions=action_t,
+                use_target=False,
+                observation_features=observation_features,
+            )
+            min_q_t = q_preds_t.min(dim=0)[0]
+            weighted_q_sum += weights[t] * min_q_t
+        
+        # 使用联合概率和加权Q值
+        sac_actor_loss = ((self.temperature * log_probs_joint) - weighted_q_sum).mean()
+        
+        return sac_actor_loss
 
     def _init_normalization(self, dataset_stats):
         """Initialize input/output normalization modules."""
