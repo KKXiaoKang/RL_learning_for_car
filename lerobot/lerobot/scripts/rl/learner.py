@@ -673,11 +673,17 @@ def add_actor_information_and_train(
                 loss_actor = actor_output["loss_actor"]  # 获取Actor损失
                 optimizers["actor"].zero_grad()  # 清零Actor优化器的梯度
                 loss_actor.backward()  # 反向传播
-                # 对Actor网络参数进行梯度裁剪并获取梯度范数
-                actor_grad_norm = torch.nn.utils.clip_grad_norm_(
-                    parameters=policy.actor.parameters(),  # Actor网络参数
-                    max_norm=clip_grad_norm_value  # 最大梯度范数
-                ).item()  # 转换为标量值
+                            # 对Actor网络参数进行梯度裁剪并获取梯度范数
+            actor_grad_norm = torch.nn.utils.clip_grad_norm_(
+                parameters=policy.actor.parameters(),  # Actor网络参数
+                max_norm=clip_grad_norm_value  # 最大梯度范数
+            ).item()  # 转换为标量值
+            
+            # 检查梯度是否异常大或包含NaN
+            if actor_grad_norm > 100.0 or torch.isnan(torch.tensor(actor_grad_norm)):
+                logging.warning(f"[LEARNER] Abnormal actor gradient norm: {actor_grad_norm}, skipping parameter update")
+                optimizers["actor"].zero_grad()
+            else:
                 optimizers["actor"].step()  # 更新Actor网络参数
 
                 # 将Actor信息添加到训练信息中

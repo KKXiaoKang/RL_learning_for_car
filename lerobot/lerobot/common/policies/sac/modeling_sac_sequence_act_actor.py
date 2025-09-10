@@ -327,22 +327,52 @@ class SequenceACTSACActorV2(nn.Module):
         actions_list = []
         log_probs_list = []
         
+        # 🔥 NaN检测和修复：检查输入的均值和标准差是否包含NaN
+        if torch.isnan(means).any() or torch.isnan(stds).any():
+            logging.error("[ACTOR] NaN detected in action distribution parameters!")
+            logging.error(f"means contains NaN: {torch.isnan(means).any().item()}")
+            logging.error(f"stds contains NaN: {torch.isnan(stds).any().item()}")
+            
+            # 使用零均值和小的固定标准差作为fallback
+            device = means.device
+            dtype = means.dtype
+            means = torch.zeros_like(means)  # 零均值
+            stds = torch.ones_like(stds) * 0.01  # 小的固定标准差
+            logging.warning("[ACTOR] Using fallback values: zero means and 0.01 std")
+        
+        # 确保标准差在合理范围内（数值稳定性）
+        stds = torch.clamp(stds, min=1e-6, max=10.0)
+        
         for t in range(self.chunk_size):
             # 为每个时间步创建分布
-            if self.use_tanh_squash:
-                dist = TanhMultivariateNormalDiag(
-                    loc=means[:, t, :], 
-                    scale_diag=stds[:, t, :]
-                )
-            else:
-                dist = MultivariateNormal(
-                    means[:, t, :], 
-                    torch.diag_embed(stds[:, t, :])
-                )
-            
-            # 采样动作（使用重参数化技巧确保梯度可传播）
-            action = dist.rsample()
-            log_prob = dist.log_prob(action)
+            try:
+                if self.use_tanh_squash:
+                    dist = TanhMultivariateNormalDiag(
+                        loc=means[:, t, :], 
+                        scale_diag=stds[:, t, :]
+                    )
+                else:
+                    dist = MultivariateNormal(
+                        means[:, t, :], 
+                        torch.diag_embed(stds[:, t, :])
+                    )
+                
+                # 采样动作（使用重参数化技巧确保梯度可传播）
+                action = dist.rsample()
+                log_prob = dist.log_prob(action)
+                
+                # 检查采样结果是否包含NaN
+                if torch.isnan(action).any() or torch.isnan(log_prob).any():
+                    logging.error(f"[ACTOR] NaN detected in sampled action or log_prob at time step {t}")
+                    # 使用零动作和很小的log_prob作为fallback
+                    action = torch.zeros_like(action)
+                    log_prob = torch.full_like(log_prob, -1000.0)  # 很小的概率
+                    
+            except Exception as e:
+                logging.error(f"[ACTOR] Error creating distribution at time step {t}: {e}")
+                # 创建fallback动作和概率
+                action = torch.zeros((batch_size, means.shape[-1]), device=means.device, dtype=means.dtype)
+                log_prob = torch.full((batch_size,), -1000.0, device=means.device, dtype=means.dtype)
             
             actions_list.append(action)
             log_probs_list.append(log_prob)

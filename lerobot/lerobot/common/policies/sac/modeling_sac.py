@@ -566,26 +566,31 @@ class SACPolicy(
                          getattr(self.config, 'use_sequence_act_actor', False) and
                          getattr(self.config, 'enable_q_chunking', True))
         
-        # 计算温度损失
-        with torch.no_grad():
-            if use_q_chunking:
-                # Q-chunking模式：使用动作序列的联合对数概率
+        # 基于Q-chunking论文 (https://arxiv.org/abs/2507.07969) 的温度损失计算
+        if use_q_chunking:
+            # Q-chunking模式：使用动作序列的联合对数概率
+            with torch.no_grad():
+                # 只对Actor前向传播禁用梯度，获取联合概率
                 _, log_probs_joint, _ = self.actor(
                     observations, 
                     observation_features, 
                     return_sequence=True
                 )
-                
-                # Q-chunking的目标熵调整
-                # 由于使用联合概率，目标熵需要根据chunk_size调整
-                chunk_size = getattr(self.actor, 'chunk_size', 1)
-                adjusted_target_entropy = self._get_adjusted_target_entropy(chunk_size)
-                
-                temperature_loss = (-self.log_alpha.exp() * (log_probs_joint + adjusted_target_entropy)).mean()
-            else:
-                # 传统模式：使用单步对数概率
+            
+            # 根据chunk_size调整目标熵（论文核心思想）
+            chunk_size = getattr(self.actor, 'chunk_size', 1)
+            adjusted_target_entropy = self._get_adjusted_target_entropy(chunk_size)
+            
+            # Q-chunking温度损失：保持log_alpha梯度用于温度参数优化
+            temperature_loss = (-self.log_alpha.exp() * (log_probs_joint + adjusted_target_entropy)).mean()
+        else:
+            # 传统SAC模式：使用单步对数概率
+            with torch.no_grad():
+                # 只对Actor前向传播禁用梯度
                 _, log_probs, _ = self.actor(observations, observation_features)
-                temperature_loss = (-self.log_alpha.exp() * (log_probs + self.target_entropy)).mean()
+            
+            # 标准SAC温度损失：保持log_alpha梯度
+            temperature_loss = (-self.log_alpha.exp() * (log_probs + self.target_entropy)).mean()
                 
         return temperature_loss
     
@@ -1263,15 +1268,20 @@ class SACPolicy(
         """
         # 检查是否使用ACT Actor
         use_act_actor = getattr(self.config, 'use_act_actor', False)
+        use_sequence_actor = getattr(self.config, 'use_sequence_act_actor', False)
+        
+        # 🔥 调试输出：确保这些信息总是被打印
+        print(f"[DEBUG ACTOR INIT] use_act_actor: {use_act_actor}")
+        print(f"[DEBUG ACTOR INIT] use_sequence_act_actor: {use_sequence_actor}")
+        logging.info(f"[DEBUG ACTOR INIT] use_act_actor: {use_act_actor}, use_sequence_act_actor: {use_sequence_actor}")
         
         if use_act_actor:
-            # 检查是否使用序列版本
-            use_sequence_actor = getattr(self.config, 'use_sequence_act_actor', False)
-            
+            # 检查是否使用序列版本            
             if use_sequence_actor:
                 # 使用真正的序列ACT Actor (延迟导入以避免循环依赖)
                 from lerobot.common.policies.sac.modeling_sac_sequence_act_actor import SequenceACTSACActorV2
                 
+                print("🚀 [PRINT] Initializing Sequence ACT-SAC Actor V2")
                 logging.info("🚀 Initializing Sequence ACT-SAC Actor V2")
                 
                 self.actor = SequenceACTSACActorV2(
@@ -1293,6 +1303,8 @@ class SACPolicy(
                     encoder_is_shared=self.shared_encoder,
                     use_tanh_squash=getattr(self.config.policy_kwargs, 'use_tanh_squash', True),
                 )
+                print("✅ [PRINT] Using Sequence ACT-SAC Actor with history length: {}".format(
+                    getattr(self.config, 'obs_history_length', 5)))
                 logging.info("✅ Using Sequence ACT-SAC Actor with history length: {}".format(
                     getattr(self.config, 'obs_history_length', 5)))
             else:
@@ -2062,14 +2074,45 @@ class Policy(nn.Module):
             # 使用固定标准差
             std = self.fixed_std.expand_as(means)
 
+        # 🔥 NaN检测和修复：检查输入的均值和标准差是否包含NaN
+        if torch.isnan(means).any() or torch.isnan(std).any():
+            import logging
+            logging.error("[ACTOR] NaN detected in action distribution parameters!")
+            logging.error(f"means contains NaN: {torch.isnan(means).any().item()}")
+            logging.error(f"std contains NaN: {torch.isnan(std).any().item()}")
+            
+            # 使用零均值和小的固定标准差作为fallback
+            means = torch.zeros_like(means)  # 零均值
+            std = torch.ones_like(std) * 0.01  # 小的固定标准差
+            logging.warning("[ACTOR] Using fallback values: zero means and 0.01 std")
+
+        # 确保标准差在合理范围内（数值稳定性）
+        std = torch.clamp(std, min=1e-6, max=10.0)
+
         # 构建变换分布：使用tanh变换的多元正态分布
-        dist = TanhMultivariateNormalDiag(loc=means, scale_diag=std)
-
-        # 采样动作（使用重参数化技巧）
-        actions = dist.rsample()
-
-        # 计算动作的对数概率
-        log_probs = dist.log_prob(actions)
+        try:
+            dist = TanhMultivariateNormalDiag(loc=means, scale_diag=std)
+            # 采样动作（使用重参数化技巧）
+            actions = dist.rsample()
+            # 计算动作的对数概率
+            log_probs = dist.log_prob(actions)
+            
+            # 检查采样结果是否包含NaN
+            if torch.isnan(actions).any() or torch.isnan(log_probs).any():
+                import logging
+                logging.error("[ACTOR] NaN detected in sampled actions or log_probs")
+                # 使用零动作和很小的log_prob作为fallback
+                actions = torch.zeros_like(actions)
+                log_probs = torch.full_like(log_probs, -1000.0)  # 很小的概率
+                
+        except Exception as e:
+            import logging
+            logging.error(f"[ACTOR] Error creating distribution: {e}")
+            # 创建fallback动作和概率
+            batch_size = means.shape[0]
+            action_dim = means.shape[1]
+            actions = torch.zeros((batch_size, action_dim), device=means.device, dtype=means.dtype)
+            log_probs = torch.full((batch_size,), -1000.0, device=means.device, dtype=means.dtype)
 
         return actions, log_probs, means
 

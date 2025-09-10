@@ -2682,7 +2682,11 @@ def main(cfg: EnvConfig):
         if cfg.pretrained_policy_name_or_path is not None:
             from lerobot.common.policies.sac.modeling_sac import SACPolicy
             print(f"cfg.pretrained_policy_name_or_path: {cfg.pretrained_policy_name_or_path}")
+            print("[DEBUG] Loading SACPolicy from pretrained model...")
             policy = SACPolicy.from_pretrained(cfg.pretrained_policy_name_or_path)
+            print(f"[DEBUG] Policy loaded. Actor type: {type(policy.actor).__name__}")
+            print(f"[DEBUG] Policy config use_act_actor: {getattr(policy.config, 'use_act_actor', False)}")
+            print(f"[DEBUG] Policy config use_sequence_act_actor: {getattr(policy.config, 'use_sequence_act_actor', False)}")
             
             # Update policy config with environment's feature visualization setting
             if hasattr(cfg, 'enable_feature_visualization'):
