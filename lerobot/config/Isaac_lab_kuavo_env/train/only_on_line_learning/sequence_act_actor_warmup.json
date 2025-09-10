@@ -1,0 +1,87 @@
+{
+    "job_name": "sequence_act_actor_warmup",
+    "output_dir": "outputs/train/sequence_act_actor_warmup",
+    "dataset": {
+        "repo_id": "KANGKKANG/rl_graspbox_increase_0818_vision_random"
+    },
+    "batch_size": 32,
+    "num_workers": 4,
+    "steps": 100000,
+    "log_freq": 100,
+    "save_freq": 20000,
+    "save_checkpoint": true,
+    "wandb": {
+        "enable": true,
+        "project": "sequence-act-actor-warmup"
+    },
+    "policy": {
+        "type": "sequence_act_actor",
+        "name": "SequenceACTSACActorV2",
+        "device": "cuda",
+        "use_amp": false,
+        "storage_device": "cpu",
+        
+        "input_features": {
+            "observation.images.front": {
+                "type": "VISUAL",
+                "shape": [3, 224, 224]
+            },
+            "observation.state": {
+                "type": "STATE",
+                "shape": [32]
+            }
+        },
+        "output_features": {
+            "action": {
+                "type": "ACTION", 
+                "shape": [6]
+            }
+        },
+        
+        "normalization_mapping": {
+            "observation.state": "normalize",
+            "action": "normalize"
+        },
+        
+        "dataset_stats": {
+            "observation.state": {
+                "mean": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                "std": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+            },
+            "action": {
+                "mean": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                "std": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+            }
+        },
+        
+        "vision_encoder_name": "helper2424/resnet10",
+        "freeze_vision_encoder": true,
+        "enable_feature_visualization": false,
+        "image_encoder_hidden_dim": 32,
+        "shared_encoder": true,
+        "latent_dim": 64,
+        "state_encoder_hidden_dim": 256,
+        
+        "use_act_actor": true,
+        "use_sequence_act_actor": true,
+        "enable_q_chunking": true,
+        "obs_history_length": 5,
+        "act_chunk_size": 8,
+        "q_chunking_horizon": 8,
+        "act_dim_model": 512,
+        "act_n_heads": 8,
+        "act_dim_feedforward": 3200,
+        "act_n_encoder_layers": 4,
+        "act_n_decoder_layers": 4,
+        "act_dropout": 0.1,
+        "act_feedforward_activation": "relu",
+        "act_pre_norm": false,
+        
+        "std_min": -5.0,
+        "std_max": 2.0,
+        "use_tanh_squash": true,
+        "encoder_is_shared": false,
+        
+        "grad_clip_norm": 10.0
+    }
+}
