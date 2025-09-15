@@ -258,3 +258,18 @@ def compute_sequence_bc_loss(actor, observations, target_actions, ...):
 ```
 
 这个预训练脚本为 `SequenceACTSACActorV2` 提供了完整的 warm-up 训练流程，支持视觉编码器和序列动作预测，是 SAC 策略训练的重要组件。
+
+
+---
+训练好的warm up ACT module 应该如何进行推理？
+## 推理验证
+```bash
+cd /home/lab/RL/lerobot
+
+python lerobot/scripts/rl/warm_up/eval_sequence_act_actor.py \
+    --checkpoint /home/lab/RL/outputs/train/sequence_act_actor_warmup/final_sequence_act_actor.pt \
+    --config /home/lab/RL/lerobot/config/Isaac_lab_kuavo_env/train/only_on_line_learning/sequence_act_actor_warmup.json \
+    --env_config /home/lab/RL/lerobot/config/Isaac_lab_kuavo_env/eval/RLKuavoMetaVR-v0.yaml \
+    --num_episodes 5 \
+    --output_dir ./eval_results_sequence_act
+```
