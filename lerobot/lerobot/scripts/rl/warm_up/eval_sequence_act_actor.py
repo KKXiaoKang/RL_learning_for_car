@@ -34,6 +34,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import draccus
+import rospy
+from std_msgs.msg import Float64MultiArray
 
 from lerobot.common.policies.sac.modeling_sac_sequence_act_actor import SequenceACTSACActorV2
 from lerobot.common.policies.sac.modeling_sac import SACObservationEncoder
@@ -204,13 +206,28 @@ def load_sequence_act_actor(checkpoint_path: str, config: TrainPipelineConfig, d
 class SequenceACTActorEvaluator:
     """Evaluator for Sequence ACT Actor models"""
     
-    def __init__(self, actor: SequenceACTSACActorV2, device: torch.device, chunk_size: int = 8):
+    def __init__(self, actor: SequenceACTSACActorV2, device: torch.device, chunk_size: int = 8, enable_visualization: bool = True):
         self.actor = actor
         self.device = device
         self.chunk_size = chunk_size
         self.obs_history = []
         self.action_buffer = []
         self.current_action_index = 0
+        
+        # ROS visualization setup
+        self.enable_visualization = enable_visualization
+        if self.enable_visualization:
+            try:
+                # Initialize ROS node if not already initialized
+                if not rospy.core.is_initialized():
+                    rospy.init_node('sequence_act_evaluator', anonymous=True)
+                
+                # Publisher for action buffer visualization - 增加队列大小减少消息丢失
+                self.action_buffer_pub = rospy.Publisher('/policy/action/eef_pose_marker_all', Float64MultiArray, queue_size=10)
+                rospy.loginfo("Sequence ACT Evaluator: ROS visualization enabled")
+            except Exception as e:
+                rospy.logwarn(f"Failed to initialize ROS visualization: {e}")
+                self.enable_visualization = False
         
     def select_action(self, observation: Dict[str, torch.Tensor]) -> torch.Tensor:
         """
@@ -256,9 +273,77 @@ class SequenceACTActorEvaluator:
             self.action_buffer = action_sequence[0].cpu()  # Take first batch element
             self.current_action_index = 1
             
+            # Publish action buffer for visualization
+            if self.enable_visualization:
+                self._publish_action_buffer_for_visualization(observation)
+            
             # Return the first action
             return self.action_buffer[0]
     
+    def _publish_action_buffer_for_visualization(self, current_observation: Dict[str, torch.Tensor]):
+        """
+        Publish action buffer for visualization.
+        
+        Data format: [left_x, left_y, left_z, right_x, right_y, right_z, cmd_vel_linear_z] * chunk_size
+        where each step contains the current base_link eef position + accumulated increments
+        
+        Note: Actions are scaled to match the environment's incremental control range.
+        """
+        try:
+            # Extract current base_link eef positions from observation
+            # obs[23:26] = left eef position in base_link frame
+            # obs[26:29] = right eef position in base_link frame
+            obs_state = current_observation["observation.state"].cpu().numpy()[0]
+            current_left_eef_base = obs_state[23:26]  # [x, y, z]
+            current_right_eef_base = obs_state[26:29]  # [x, y, z]
+            
+            # Prepare data array for the entire chunk
+            chunk_data = []
+            
+            # Initialize current positions
+            left_pos = current_left_eef_base.copy()
+            right_pos = current_right_eef_base.copy()
+            
+            # 🔥 增量控制缩放参数 - 与环境中保持一致
+            INCREMENT_SCALE = 0.01  # 将action[-1,1]缩放到±0.01m的增量范围
+            
+            # For each action in the buffer, accumulate the increments
+            for i, action in enumerate(self.action_buffer):
+                # Extract increments from action and apply scaling
+                # action[0:3] = left hand increments (normalized [-1,1])
+                # action[3:6] = right hand increments (normalized [-1,1])
+                left_increment_action = action[0:3].numpy()
+                right_increment_action = action[3:6].numpy()
+                
+                # 🔥 应用增量缩放 - 与环境中保持一致
+                left_increment = left_increment_action * INCREMENT_SCALE
+                right_increment = right_increment_action * INCREMENT_SCALE
+                
+                # Apply increments to current positions
+                left_pos += left_increment
+                right_pos += right_increment
+                
+                # Add cmd_vel_linear_z (assuming it's 0 for now, can be extracted from action if available)
+                cmd_vel_linear_z = 0.0
+                
+                # Append to chunk data: [left_x, left_y, left_z, right_x, right_y, right_z, cmd_vel_linear_z]
+                chunk_data.extend([
+                    left_pos[0], left_pos[1], left_pos[2],  # left eef position
+                    right_pos[0], right_pos[1], right_pos[2],  # right eef position
+                    cmd_vel_linear_z  # cmd_vel_linear_z
+                ])
+            
+            # Create and publish ROS message
+            msg = Float64MultiArray()
+            msg.data = chunk_data
+            
+            if hasattr(self, 'action_buffer_pub'):
+                self.action_buffer_pub.publish(msg)
+                rospy.logdebug(f"Published action buffer with {len(self.action_buffer)} steps, total data points: {len(chunk_data)}")
+            
+        except Exception as e:
+            rospy.logwarn(f"Failed to publish action buffer for visualization: {e}")
+
     def reset(self):
         """Reset the evaluator state"""
         self.obs_history = []
@@ -321,11 +406,12 @@ def evaluate_sequence_act_actor(
     logger.info("Loading trained Sequence ACT Actor")
     actor = load_sequence_act_actor(checkpoint_path, config, device)
     
-    # Create evaluator
+    # Create evaluator with visualization enabled
     evaluator = SequenceACTActorEvaluator(
         actor=actor,
         device=device,
-        chunk_size=getattr(config.policy, 'act_chunk_size', 8)
+        chunk_size=getattr(config.policy, 'act_chunk_size', 8),
+        enable_visualization=True
     )
     
     # Evaluation loop
@@ -351,6 +437,10 @@ def evaluate_sequence_act_actor(
             
             # Step environment
             obs, reward, terminated, truncated, info = env.step(action)
+            
+            # # 检验一下obs的长度是多少
+            # print( " === obs === : ", obs["observation.state"].cpu().numpy()[0])
+            # print( " === obs length === : ", len(obs["observation.state"].cpu().numpy()[0]))
             
             episode_reward += float(reward)
             episode_length += 1
