@@ -1036,6 +1036,12 @@ class RLKuavoGymEnv(IsaacLabGymEnv):
         if self.debug:
             print(f"[FIXED POSES] Set initial positions - Left: {left_pos}, Right: {right_pos}")
 
+    def get_robot_init_current_pose(self):
+        """
+        Get the initial current pose of the robot.
+        """
+        return self.current_left_pos, self.current_right_pos
+
     def _publish_action_based_arm_poses(self, ee_action: np.ndarray):
         """
         Publish arm poses based on the action input using incremental control.

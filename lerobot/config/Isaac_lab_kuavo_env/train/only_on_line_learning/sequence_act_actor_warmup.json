@@ -2,7 +2,7 @@
     "job_name": "sequence_act_actor_warmup",
     "output_dir": "outputs/train/sequence_act_actor_warmup",
     "dataset": {
-        "repo_id": "KANGKKANG/rl_graspbox_increase_0818_vision_random"
+        "repo_id": "KANGKKANG/rl_graspbox_0920_vision_random_new_tool"
     },
     "batch_size": 32,
     "num_workers": 4,
@@ -82,6 +82,6 @@
         "use_tanh_squash": true,
         "encoder_is_shared": false,
         
-        "grad_clip_norm": 10.0
+        "grad_clip_norm": 1.0
     }
 }

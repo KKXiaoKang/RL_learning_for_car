@@ -214,6 +214,11 @@ class SequenceACTActorEvaluator:
         self.action_buffer = []
         self.current_action_index = 0
         
+        # Episode reference positions for visualization - 每个episode开始时获取一次
+        self.episode_left_eef_base = None
+        self.episode_right_eef_base = None
+        self.episode_reference_initialized = False
+        
         # ROS visualization setup
         self.enable_visualization = enable_visualization
         if self.enable_visualization:
@@ -229,16 +234,28 @@ class SequenceACTActorEvaluator:
                 rospy.logwarn(f"Failed to initialize ROS visualization: {e}")
                 self.enable_visualization = False
         
-    def select_action(self, observation: Dict[str, torch.Tensor]) -> torch.Tensor:
+    def select_action(self, observation: Dict[str, torch.Tensor], env=None) -> torch.Tensor:
         """
         Select action using the Sequence ACT Actor
         
         Args:
             observation: Current observation dictionary
+            env: Environment instance (optional, needed for first call to initialize reference positions)
             
         Returns:
             Action tensor for the current step
         """
+        # Initialize episode reference positions on first call (episode start)
+        if not self.episode_reference_initialized:
+            if env is not None:
+                self._initialize_episode_reference_positions(env)
+            else:
+                rospy.logwarn("Environment instance not provided for reference position initialization")
+                # Fallback to default values
+                self.episode_left_eef_base = np.array([0.0, 0.0, 0.0])
+                self.episode_right_eef_base = np.array([0.0, 0.0, 0.0])
+                self.episode_reference_initialized = True
+        
         # If we have actions in buffer, use the next one
         if self.current_action_index < len(self.action_buffer):
             action = self.action_buffer[self.current_action_index]
@@ -271,7 +288,7 @@ class SequenceACTActorEvaluator:
             
             # Store the action sequence in buffer
             self.action_buffer = action_sequence[0].cpu()  # Take first batch element
-            self.current_action_index = 1
+            self.current_action_index = 1  # 设置为1，因为即将返回第一个动作
             
             # Publish action buffer for visualization
             if self.enable_visualization:
@@ -280,34 +297,59 @@ class SequenceACTActorEvaluator:
             # Return the first action
             return self.action_buffer[0]
     
+    def _initialize_episode_reference_positions(self, env):
+        """
+        Initialize episode reference positions from the environment's current pose.
+        This is called only once at the beginning of each episode.
+        
+        Args:
+            env: The environment instance to get initial positions from
+        """
+        try:
+            # Get initial positions directly from environment
+            left_pos, right_pos = env.unwrapped.get_robot_init_current_pose()
+            self.episode_left_eef_base = left_pos.copy()  # [x, y, z]
+            self.episode_right_eef_base = right_pos.copy()  # [x, y, z]
+            self.episode_reference_initialized = True
+            
+            rospy.loginfo(f"Episode reference positions initialized from environment:")
+            rospy.loginfo(f"  Left eef base: {self.episode_left_eef_base}")
+            rospy.loginfo(f"  Right eef base: {self.episode_right_eef_base}")
+            
+        except Exception as e:
+            rospy.logwarn(f"Failed to initialize episode reference positions from environment: {e}")
+            # Set default values if initialization fails
+            self.episode_left_eef_base = np.array([0.0, 0.0, 0.0])
+            self.episode_right_eef_base = np.array([0.0, 0.0, 0.0])
+            self.episode_reference_initialized = True
+    
     def _publish_action_buffer_for_visualization(self, current_observation: Dict[str, torch.Tensor]):
         """
         Publish action buffer for visualization.
         
         Data format: [left_x, left_y, left_z, right_x, right_y, right_z, cmd_vel_linear_z] * chunk_size
-        where each step contains the current base_link eef position + accumulated increments
+        where each step contains the episode reference base_link eef position + accumulated increments
         
-        Note: Actions are scaled to match the environment's incremental control range.
+        Note: Uses episode reference positions and updates them with applied increments in a single loop.
         """
         try:
-            # Extract current base_link eef positions from observation
-            # obs[23:26] = left eef position in base_link frame
-            # obs[26:29] = right eef position in base_link frame
-            obs_state = current_observation["observation.state"].cpu().numpy()[0]
-            current_left_eef_base = obs_state[23:26]  # [x, y, z]
-            current_right_eef_base = obs_state[26:29]  # [x, y, z]
-            
+            # Use episode reference positions instead of current observation
+            # These were initialized once at the beginning of the episode
+            if not self.episode_reference_initialized:
+                rospy.logwarn("Episode reference positions not initialized, skipping visualization")
+                return
+                
             # Prepare data array for the entire chunk
             chunk_data = []
             
-            # Initialize current positions
-            left_pos = current_left_eef_base.copy()
-            right_pos = current_right_eef_base.copy()
+            # Initialize current positions with episode reference positions
+            left_pos = self.episode_left_eef_base.copy()
+            right_pos = self.episode_right_eef_base.copy()
             
             # 🔥 增量控制缩放参数 - 与环境中保持一致
             INCREMENT_SCALE = 0.01  # 将action[-1,1]缩放到±0.01m的增量范围
             
-            # For each action in the buffer, accumulate the increments
+            # 🔥 单循环完成可视化数据填充和位置同步更新
             for i, action in enumerate(self.action_buffer):
                 # Extract increments from action and apply scaling
                 # action[0:3] = left hand increments (normalized [-1,1])
@@ -319,7 +361,7 @@ class SequenceACTActorEvaluator:
                 left_increment = left_increment_action * INCREMENT_SCALE
                 right_increment = right_increment_action * INCREMENT_SCALE
                 
-                # Apply increments to current positions
+                # Apply increments to current positions for visualization
                 left_pos += left_increment
                 right_pos += right_increment
                 
@@ -333,6 +375,15 @@ class SequenceACTActorEvaluator:
                     cmd_vel_linear_z  # cmd_vel_linear_z
                 ])
             
+            # 🔥 同步更新episode参考位置 - 使用循环中累积的位置变化
+            # 计算累积增量：最终位置 - 初始位置
+            total_left_increment = left_pos - self.episode_left_eef_base
+            total_right_increment = right_pos - self.episode_right_eef_base
+            
+            # 更新episode参考位置
+            self.episode_left_eef_base += total_left_increment
+            self.episode_right_eef_base += total_right_increment
+            
             # Create and publish ROS message
             msg = Float64MultiArray()
             msg.data = chunk_data
@@ -340,6 +391,7 @@ class SequenceACTActorEvaluator:
             if hasattr(self, 'action_buffer_pub'):
                 self.action_buffer_pub.publish(msg)
                 rospy.logdebug(f"Published action buffer with {len(self.action_buffer)} steps, total data points: {len(chunk_data)}")
+                rospy.logdebug(f"Updated episode reference positions - Left: {self.episode_left_eef_base}, Right: {self.episode_right_eef_base}")
             
         except Exception as e:
             rospy.logwarn(f"Failed to publish action buffer for visualization: {e}")
@@ -349,6 +401,11 @@ class SequenceACTActorEvaluator:
         self.obs_history = []
         self.action_buffer = []
         self.current_action_index = 0
+        
+        # Reset episode reference positions - will be initialized on first select_action call
+        self.episode_left_eef_base = None
+        self.episode_right_eef_base = None
+        self.episode_reference_initialized = False
 
 
 def evaluate_sequence_act_actor(
@@ -431,12 +488,18 @@ def evaluate_sequence_act_actor(
         episode_success = False
         
         # Run episode
+        step_count = 0
         while True:
             # Get action from evaluator
-            action = evaluator.select_action(obs)
+            # Pass environment instance on first call to initialize reference positions
+            if step_count == 0:
+                action = evaluator.select_action(obs, env=env)
+            else:
+                action = evaluator.select_action(obs)
             
             # Step environment
             obs, reward, terminated, truncated, info = env.step(action)
+            step_count += 1
             
             # # 检验一下obs的长度是多少
             # print( " === obs === : ", obs["observation.state"].cpu().numpy()[0])
