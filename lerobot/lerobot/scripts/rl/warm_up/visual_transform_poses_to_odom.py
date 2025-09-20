@@ -101,8 +101,8 @@ class PoseTransformNode:
         
         # STL文件路径
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
-        self.left_hand_mesh_path = f"file://{os.path.join(self.script_dir, 'meshes', 'l_hand_pitch_offset.STL')}"
-        self.right_hand_mesh_path = f"file://{os.path.join(self.script_dir, 'meshes', 'r_hand_pitch_offset.STL')}"
+        self.left_hand_mesh_path = f"file://{os.path.join(self.script_dir, 'meshes', 'eef_grasp_tool_offset_scale_02_left_scale.STL')}"
+        self.right_hand_mesh_path = f"file://{os.path.join(self.script_dir, 'meshes', 'eef_grasp_tool_offset_scale_02_right_scale.STL')}"
         
         # 定时器，定期发布缓存的poses和markers - 提高频率减少延迟
         self.publish_timer = rospy.Timer(rospy.Duration(0.005), self.publish_buffered_data)  # 200Hz
